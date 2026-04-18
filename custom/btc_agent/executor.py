@@ -37,6 +37,17 @@ class TokenQuoteSnapshot:
     spread: Optional[float]
 
 
+@dataclass
+class AccountBalanceSnapshot:
+    signer_address: str
+    balance_address: str
+    proxy_address: Optional[str]
+    cash_balance: Optional[float]
+    portfolio_balance: Optional[float]
+    total_account_value: Optional[float]
+    error: Optional[str]
+
+
 def _coerce_price(value: Any) -> Optional[float]:
     if value is None:
         return None
@@ -67,6 +78,115 @@ def _extract_single_price(obj: Dict[str, Any]) -> Optional[float]:
             return price
 
     return None
+
+
+def _normalize_address(address: Optional[str]) -> Optional[str]:
+    if not address:
+        return None
+    if address.startswith("0x"):
+        return address.lower()
+    return f"0x{address.lower()}"
+
+
+def _derive_signer_address(private_key: str) -> str:
+    from eth_account import Account
+
+    return Account.from_key(private_key).address.lower()
+
+
+def _balance_of_call_data(address: str) -> str:
+    # ERC20 balanceOf(address)
+    selector = "70a08231"
+    encoded_address = address[2:].rjust(64, "0")
+    return f"0x{selector}{encoded_address}"
+
+
+def _get_polygon_usdc_balance(address: str) -> Optional[float]:
+    cfg = get_polymarket_config()
+    usdc_address = "0x2791bca1f2de4661ed88a30c99a7a9449aa84174"
+    payload = {
+        "jsonrpc": "2.0",
+        "method": "eth_call",
+        "params": [
+            {
+                "to": usdc_address,
+                "data": _balance_of_call_data(address),
+            },
+            "latest",
+        ],
+        "id": 1,
+    }
+
+    resp = requests.post(cfg.polygon_rpc, json=payload, timeout=10)
+    resp.raise_for_status()
+    data = resp.json()
+    raw_balance = data.get("result")
+    if not isinstance(raw_balance, str):
+        return None
+
+    return int(raw_balance, 16) / 1_000_000
+
+
+def _get_portfolio_value(address: str) -> Optional[float]:
+    cfg = get_polymarket_config()
+    resp = requests.get(
+        f"{cfg.data_api}/value",
+        params={"user": address},
+        timeout=10,
+    )
+
+    if resp.status_code == 404:
+        return None
+
+    resp.raise_for_status()
+    data = resp.json()
+    if isinstance(data, list) and data and isinstance(data[0], dict):
+        return _coerce_price(data[0].get("value"))
+
+    if isinstance(data, dict):
+        return _coerce_price(data.get("value"))
+
+    return None
+
+
+def get_account_balance_snapshot() -> AccountBalanceSnapshot:
+    cfg = get_polymarket_config()
+    proxy_address = _normalize_address(cfg.proxy_address)
+    signer_address = proxy_address or "Unavailable"
+    balance_address = proxy_address or "Unavailable"
+
+    cash_balance = None
+    portfolio_balance = None
+    error = None
+
+    try:
+        if proxy_address:
+            try:
+                signer_address = _derive_signer_address(cfg.private_key)
+            except Exception:
+                signer_address = "Unavailable"
+        else:
+            signer_address = _derive_signer_address(cfg.private_key)
+            balance_address = signer_address
+
+        cash_balance = _get_polygon_usdc_balance(balance_address)
+        portfolio_balance = _get_portfolio_value(balance_address)
+    except Exception as exc:
+        error = str(exc)
+
+    total_account_value = None
+    if cash_balance is not None and portfolio_balance is not None:
+        total_account_value = cash_balance + portfolio_balance
+
+    return AccountBalanceSnapshot(
+        signer_address=signer_address,
+        balance_address=balance_address,
+        proxy_address=proxy_address,
+        cash_balance=cash_balance,
+        portfolio_balance=portfolio_balance,
+        total_account_value=total_account_value,
+        error=error,
+    )
 
 
 def _get_price_from_clob_single(token_id: str, side: str) -> Optional[float]:
