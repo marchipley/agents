@@ -29,6 +29,7 @@ class PolymarketConfig:
     gamma_api: str = "https://gamma-api.polymarket.com"
     data_api: str = "https://data-api.polymarket.com"
     clob_api: str = "https://clob.polymarket.com"
+    polygon_rpc: str = os.getenv("POLYGON_RPC_URL", "https://polygon-rpc.com")
     chain_id: int = 137
 
 def get_openai_config() -> OpenAIConfig:

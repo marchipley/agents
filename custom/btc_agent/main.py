@@ -8,7 +8,11 @@ from .config import get_trading_config
 from .market_lookup import find_current_btc_updown_market
 from .indicators import build_btc_features
 from .llm_decision import decide_trade
-from .executor import maybe_execute_paper_trade, get_token_quote_snapshot
+from .executor import (
+    get_account_balance_snapshot,
+    get_token_quote_snapshot,
+    maybe_execute_paper_trade,
+)
 
 
 def _fmt(value):
@@ -36,8 +40,21 @@ def print_quote_snapshot(label: str, token_id: str, decision=None) -> None:
     print(f"  tick_size              = {_fmt(q.tick_size)}")
     print(f"  spread                 = {_fmt(q.spread)}")
 
+
+def print_account_snapshot() -> None:
+    account = get_account_balance_snapshot()
+    print("Account balances:")
+    print(f"  signer_address         = {account.signer_address}")
+    print(f"  balance_address        = {account.balance_address}")
+    print(f"  proxy_address          = {account.proxy_address or 'None'}")
+    print(f"  cash_balance_usdc      = {_fmt(account.cash_balance)}")
+    print(f"  portfolio_balance_usd  = {_fmt(account.portfolio_balance)}")
+    print(f"  total_account_value_usd= {_fmt(account.total_account_value)}")
+    print(f"  balance_error          = {account.error or 'None'}")
+
 def run_once() -> None:
     print(f"[{datetime.now(timezone.utc).isoformat()}] BTC up/down agent tick")
+    print_account_snapshot()
 
     market = find_current_btc_updown_market()
     if not market:
