@@ -29,6 +29,13 @@ def _parse_rpc_urls() -> list[str]:
             urls.append(url)
     return urls
 
+
+def _parse_bool_env(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
 @dataclass
 class OpenAIConfig:
     api_key: str
@@ -37,6 +44,7 @@ class OpenAIConfig:
 @dataclass
 class TradingConfig:
     paper_trading: bool = True
+    debug: bool = _parse_bool_env("BTC_AGENT_DEBUG", False)
     max_trade_usd: float = float(os.getenv("BTC_AGENT_MAX_TRADE_USD", "5"))
     trade_shares_size: float = max(float(os.getenv("BTC_AGENT_TRADE_SHARES_SIZE", "5")), 5.0)
     max_trades_per_period: int = max(int(os.getenv("BTC_AGENT_MAX_TRADES_PER_PERIOD", "1")), 1)

@@ -26,8 +26,10 @@ from .paper_state import (
 )
 from scripts.python.check_public_ip_indonesia import (
     check_current_public_ip_location,
-    print_location,
 )
+
+
+_FIRST_LOOP = True
 
 
 def _fmt(value):
@@ -38,13 +40,49 @@ def _fmt(value):
     return str(value)
 
 
-def print_quote_snapshot(label: str, token_id: str, decision=None) -> None:
+def print_ip_location(public_ip, location, debug: bool) -> None:
+    print(f"public_ip: {public_ip or 'unknown'}")
+    print(
+        f"is_indonesia: "
+        f"{str(str(location.get('country', '')).strip().lower() == 'indonesia' or str(location.get('country_code', '')).strip().lower() == 'id').lower()}"
+    )
+    print(f"lookup_success: {str(bool(location.get('success', False))).lower()}")
+    print(f"country: {location.get('country', 'unknown')}")
+    if not debug:
+        return
+
+    print(f"country_code: {location.get('country_code', 'unknown')}")
+    print(f"region: {location.get('region', 'unknown')}")
+    print(f"city: {location.get('city', 'unknown')}")
+    print(f"continent: {location.get('continent', 'unknown')}")
+    print(f"latitude: {location.get('latitude', 'unknown')}")
+    print(f"longitude: {location.get('longitude', 'unknown')}")
+    print(f"asn: {location.get('connection', {}).get('asn', 'unknown')}")
+    print(f"org: {location.get('connection', {}).get('org', 'unknown')}")
+
+    message = location.get("message")
+    if message:
+        print(f"message: {message}")
+
+
+def print_quote_snapshot(label: str, token_id: str, decision=None, debug: bool = True) -> None:
     q = get_token_quote_snapshot(token_id, decision=decision)
-    print_quote_snapshot_from_snapshot(label, q)
+    print_quote_snapshot_from_snapshot(label, q, debug=debug)
 
 
-def print_quote_snapshot_from_snapshot(label: str, q: TokenQuoteSnapshot) -> None:
+def print_quote_snapshot_from_snapshot(
+    label: str,
+    q: TokenQuoteSnapshot,
+    debug: bool = True,
+) -> None:
     print(f"{label} quote snapshot:")
+    if not debug:
+        print(f"  buy_quote              = {_fmt(q.buy_quote)}")
+        print(f"  recommended_limit_price= {_fmt(q.recommended_limit_price)}")
+        print(f"  ok_to_submit           = {q.ok_to_submit}")
+        print(f"  submit_reason          = {q.submit_reason}")
+        return
+
     print(f"  token_id               = {q.token_id}")
     print(f"  buy_quote              = {_fmt(q.buy_quote)}")
     print(f"  midpoint               = {_fmt(q.midpoint)}")
@@ -65,9 +103,15 @@ def get_decision_quote_snapshot(market, decision) -> TokenQuoteSnapshot:
     return get_token_quote_snapshot(token_id, decision=decision)
 
 
-def print_account_snapshot() -> None:
+def print_account_snapshot(debug: bool) -> None:
     account = get_account_balance_snapshot()
     print("Account balances:")
+    if not debug:
+        print(f"  cash_balance_usdc      = {_fmt(account.cash_balance)}")
+        print(f"  portfolio_balance_usd  = {_fmt(account.portfolio_balance)}")
+        print(f"  total_account_value_usd= {_fmt(account.total_account_value)}")
+        return
+
     print(f"  signer_address         = {account.signer_address}")
     print(f"  balance_address        = {account.balance_address}")
     print(f"  proxy_address          = {account.proxy_address or 'None'}")
@@ -97,68 +141,28 @@ def print_active_orders(current_btc_price: float) -> None:
         print(f"  order_{idx}_position_state = {status}")
 
 
-def run_once() -> None:
-    cfg = get_trading_config()
-    print(f"[{datetime.now(timezone.utc).isoformat()}] BTC up/down agent tick")
-    print_account_snapshot()
-
-    market = find_current_btc_updown_market()
-    if not market:
-        print("No BTC Up/Down market found.")
-        return
-
-    period_changed = sync_period_state(market.slug, market.title)
-    state = get_state()
-    if period_changed:
-        print(f"New 5-minute market period detected: {market.slug}")
-
-    if state.trades_executed >= cfg.max_trades_per_period:
-        print(
-            f"Trade limit reached for current period: "
-            f"{state.trades_executed}/{cfg.max_trades_per_period}"
-        )
-        print_active_orders(fetch_btc_spot_price())
-        print("-" * 80)
-        return
-
-    print("Market found:")
-    print(f"  title      = {market.title}")
-    print(f"  slug       = {market.slug}")
-    print(f"  event_id   = {market.event_id}")
-    print(f"  market_id  = {market.market_id}")
-    print(f"  up_token   = {market.up_token_id}")
-    print(f"  down_token = {market.down_token_id}")
-
-    print_quote_snapshot("UP", market.up_token_id)
-    print_quote_snapshot("DOWN", market.down_token_id)
-
-    features = build_btc_features(window_start_ts=market.start_ts)
+def print_features(features, debug: bool) -> None:
     print("Features:")
     print(f"  btc_price             = {features.price_usd:.2f}")
+    print(f"  momentum_5m           = {features.momentum_5m}")
+    print(f"  volatility_5m         = {features.volatility_5m}")
+    if not debug:
+        return
+
     print(f"  window_open_price     = {features.window_open_price:.2f}")
     print(f"  delta_from_window_pct = {features.delta_pct_from_window_open * 100:.4f}%")
     print(f"  rsi_14                = {features.rsi_14}")
-    print(f"  momentum_5m           = {features.momentum_5m}")
-    print(f"  volatility_5m         = {features.volatility_5m}")
 
-    decision = decide_trade(features, market)
+
+def print_llm_decision(decision, debug: bool) -> None:
     print("LLM decision:")
     print(f"  side              = {decision.side}")
     print(f"  confidence        = {decision.confidence:.3f}")
     print(f"  max_price_to_pay  = {decision.max_price_to_pay:.3f}")
     print(f"  reason            = {decision.reason}")
 
-    decision_snapshot = None
-    if decision.side == "UP":
-        decision_snapshot = get_decision_quote_snapshot(market, decision)
-        print_quote_snapshot_from_snapshot("UP (with decision)", decision_snapshot)
-    elif decision.side == "DOWN":
-        decision_snapshot = get_decision_quote_snapshot(market, decision)
-        print_quote_snapshot_from_snapshot("DOWN (with decision)", decision_snapshot)
 
-    result = maybe_execute_paper_trade(market, decision, snapshot=decision_snapshot)
-    if result.execution_snapshot is not None:
-        print_quote_snapshot_from_snapshot("Execution", result.execution_snapshot)
+def print_paper_execution_result(result, debug: bool) -> None:
     print("Paper execution result:")
     print(f"  executed = {result.executed}")
     print(f"  side     = {result.side}")
@@ -166,6 +170,74 @@ def run_once() -> None:
     print(f"  price    = {_fmt(result.price)}")
     print(f"  token_id = {result.token_id}")
     print(f"  reason   = {result.reason}")
+
+
+def run_once() -> None:
+    global _FIRST_LOOP
+    cfg = get_trading_config()
+    if cfg.debug:
+        print(f"[{datetime.now(timezone.utc).isoformat()}] BTC up/down agent tick")
+
+    market = find_current_btc_updown_market()
+    if not market:
+        if _FIRST_LOOP:
+            print_account_snapshot(debug=cfg.debug)
+            _FIRST_LOOP = False
+        if cfg.debug:
+            print("No BTC Up/Down market found.")
+        return
+
+    period_changed = sync_period_state(market.slug, market.title)
+    state = get_state()
+    if _FIRST_LOOP or period_changed:
+        print_account_snapshot(debug=cfg.debug)
+        _FIRST_LOOP = False
+    if period_changed:
+        print(f"New 5-minute market period detected: {market.slug}")
+
+    if state.trades_executed >= cfg.max_trades_per_period:
+        if cfg.debug:
+            print(
+                f"Trade limit reached for current period: "
+                f"{state.trades_executed}/{cfg.max_trades_per_period}"
+            )
+        print_active_orders(fetch_btc_spot_price())
+        if cfg.debug:
+            print("-" * 80)
+        return
+
+    if cfg.debug:
+        print("Market found:")
+        print(f"  title      = {market.title}")
+        print(f"  slug       = {market.slug}")
+        print(f"  event_id   = {market.event_id}")
+        print(f"  market_id  = {market.market_id}")
+        print(f"  up_token   = {market.up_token_id}")
+        print(f"  down_token = {market.down_token_id}")
+
+    print_quote_snapshot("UP", market.up_token_id, debug=cfg.debug)
+    print_quote_snapshot("DOWN", market.down_token_id, debug=cfg.debug)
+
+    features = build_btc_features(window_start_ts=market.start_ts)
+    print_features(features, debug=cfg.debug)
+
+    decision = decide_trade(features, market)
+    print_llm_decision(decision, debug=cfg.debug)
+
+    decision_snapshot = None
+    if decision.side == "UP":
+        decision_snapshot = get_decision_quote_snapshot(market, decision)
+        if cfg.debug:
+            print_quote_snapshot_from_snapshot("UP (with decision)", decision_snapshot, debug=True)
+    elif decision.side == "DOWN":
+        decision_snapshot = get_decision_quote_snapshot(market, decision)
+        if cfg.debug:
+            print_quote_snapshot_from_snapshot("DOWN (with decision)", decision_snapshot, debug=True)
+
+    result = maybe_execute_paper_trade(market, decision, snapshot=decision_snapshot)
+    if result.execution_snapshot is not None and cfg.debug:
+        print_quote_snapshot_from_snapshot("Execution", result.execution_snapshot, debug=True)
+    print_paper_execution_result(result, debug=cfg.debug)
 
     if result.executed and decision.side in ("UP", "DOWN") and result.token_id:
         record_executed_trade(
@@ -182,15 +254,17 @@ def run_once() -> None:
         )
 
     active_btc_price = features.price_usd
-    if get_active_orders():
+    if cfg.debug and get_active_orders():
         print_active_orders(active_btc_price)
-    print("-" * 80)
+    if cfg.debug:
+        print("-" * 80)
 
 
 def enforce_indonesia_ip() -> None:
+    cfg = get_trading_config()
     print("Checking public IP geolocation...")
     public_ip, location, ip_is_indonesia = check_current_public_ip_location()
-    print_location(public_ip, location)
+    print_ip_location(public_ip, location, debug=cfg.debug)
 
     if not ip_is_indonesia:
         print("ERROR: Public IP geolocation is not Indonesia. Aborting BTC agent startup.")
@@ -199,7 +273,8 @@ def enforce_indonesia_ip() -> None:
 
 def main() -> None:
     cfg = get_trading_config()
-    print(f"Starting BTC agent (paper_trading={cfg.paper_trading})")
+    if cfg.debug:
+        print(f"Starting BTC agent (paper_trading={cfg.paper_trading})")
     enforce_indonesia_ip()
 
     interval = int(os.getenv("BTC_AGENT_LOOP_INTERVAL", "30"))
