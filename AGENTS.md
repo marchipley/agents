@@ -76,7 +76,8 @@ Optional / supported:
 
 - `OPENAI_MODEL` default: `gpt-4.1-mini`
 - `POLYMKT_PROXY_ADDRESS`
-- `POLYGON_RPC_URL` default: `https://polygon-rpc.com`
+- `POLYGON_RPC_URL` default: `https://polygon.drpc.org`
+- `POLYGON_RPC_URLS` optional comma-separated list of Polygon RPC endpoints to try in order
 - `BTC_AGENT_LOOP_INTERVAL` default: `30`
 - `BTC_AGENT_MAX_TRADE_USD` default: `5`
 - `BTC_AGENT_MIN_CONFIDENCE` default: `0.7`
@@ -99,6 +100,8 @@ What the BTC agent does today:
 - Uses the current 5-minute BTC Up/Down slug by timestamp alignment, unless overridden.
 - Uses OpenAI chat completions with JSON output to decide `UP`, `DOWN`, or `NO_TRADE`.
 - Computes a reference price from quote, midpoint, last trade, and order book data.
+- Retrieves Polygon USDC cash balances through a configurable ordered RPC list with public fallback endpoints.
+- Retrieves Polymarket portfolio value separately from the on-chain cash balance lookup so one failure does not suppress the other.
 - Approves or rejects a paper trade based on confidence, entry caps, and quote drift.
 - Prints diagnostics for balances, quotes, features, decision, and simulated execution.
 
@@ -126,7 +129,7 @@ When changing live-trading behavior, prefer reusing vetted primitives from `agen
 - The indicator pipeline depends on process-local memory, so restarts erase context and make RSI/momentum less meaningful until enough samples accumulate.
 - The market lookup assumes the current slug format and first market in the event response remain stable.
 - The decision path depends on a single LLM response and does not yet validate response quality beyond JSON parsing and basic coercion.
-- Network/API failures are mostly handled by raising exceptions or returning partial data; resilience is limited.
+- Network/API failures are still only partially hardened; balance lookups now degrade more cleanly, but other external calls remain single-point dependent.
 - There are no BTC-agent tests for market parsing, pricing, decision normalization, or paper-trade gating.
 - The inherited repo still contains placeholder tests and unused upstream surfaces, which can mislead future work if not distinguished from the active BTC path.
 
@@ -170,3 +173,4 @@ Do not revert unrelated local changes unless the user explicitly asks for that.
 - Added `AGENTS.md` to document the fork’s active BTC-agent architecture, configuration surface, inherited vs active code paths, and maintenance rules for future Codex work.
 - Added `scripts/python/check_public_ip_indonesia.py` to print the current public IP and geolocation and return success only when the detected location is Indonesia.
 - Recreated `AGENTS.md` after accidental deletion, preserving the prior project context and maintenance guidance.
+- Updated BTC account balance handling to stop using `https://polygon-rpc.com` as the default Polygon RPC, add ordered RPC fallback support via `POLYGON_RPC_URLS`, and separate cash-balance failures from portfolio-balance failures in the printed account snapshot.
