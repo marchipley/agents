@@ -8,6 +8,27 @@ from typing import Optional
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 load_dotenv(os.path.join(REPO_ROOT, ".env"))
 
+
+def _parse_rpc_urls() -> list[str]:
+    raw = os.getenv("POLYGON_RPC_URLS", "").strip()
+    if raw:
+        urls = [url.strip() for url in raw.split(",") if url.strip()]
+        if urls:
+            return urls
+
+    primary = os.getenv("POLYGON_RPC_URL", "https://polygon.drpc.org").strip()
+
+    fallbacks = [
+        "https://polygon.publicnode.com",
+        "https://tenderly.rpc.polygon.community",
+    ]
+
+    urls = [primary]
+    for url in fallbacks:
+        if url not in urls:
+            urls.append(url)
+    return urls
+
 @dataclass
 class OpenAIConfig:
     api_key: str
@@ -29,7 +50,8 @@ class PolymarketConfig:
     gamma_api: str = "https://gamma-api.polymarket.com"
     data_api: str = "https://data-api.polymarket.com"
     clob_api: str = "https://clob.polymarket.com"
-    polygon_rpc: str = os.getenv("POLYGON_RPC_URL", "https://polygon-rpc.com")
+    polygon_rpc: str = _parse_rpc_urls()[0]
+    polygon_rpc_urls: list[str] = None
     chain_id: int = 137
 
 def get_openai_config() -> OpenAIConfig:
@@ -43,7 +65,13 @@ def get_polymarket_config() -> PolymarketConfig:
     if not pk:
         raise RuntimeError("POLYGON_WALLET_PRIVATE_KEY is not set in .env")
     proxy = os.getenv("POLYMKT_PROXY_ADDRESS")
-    return PolymarketConfig(private_key=pk, proxy_address=proxy)
+    rpc_urls = _parse_rpc_urls()
+    return PolymarketConfig(
+        private_key=pk,
+        proxy_address=proxy,
+        polygon_rpc=rpc_urls[0],
+        polygon_rpc_urls=rpc_urls,
+    )
 
 def get_trading_config() -> TradingConfig:
     return TradingConfig()

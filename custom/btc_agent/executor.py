@@ -104,27 +104,34 @@ def _balance_of_call_data(address: str) -> str:
 def _get_polygon_usdc_balance(address: str) -> Optional[float]:
     cfg = get_polymarket_config()
     usdc_address = "0x2791bca1f2de4661ed88a30c99a7a9449aa84174"
-    payload = {
-        "jsonrpc": "2.0",
-        "method": "eth_call",
-        "params": [
-            {
-                "to": usdc_address,
-                "data": _balance_of_call_data(address),
-            },
-            "latest",
-        ],
-        "id": 1,
-    }
+    rpc_errors = []
 
-    resp = requests.post(cfg.polygon_rpc, json=payload, timeout=10)
-    resp.raise_for_status()
-    data = resp.json()
-    raw_balance = data.get("result")
-    if not isinstance(raw_balance, str):
-        return None
+    for rpc_url in cfg.polygon_rpc_urls or [cfg.polygon_rpc]:
+        payload = {
+            "jsonrpc": "2.0",
+            "method": "eth_call",
+            "params": [
+                {
+                    "to": usdc_address,
+                    "data": _balance_of_call_data(address),
+                },
+                "latest",
+            ],
+            "id": 1,
+        }
 
-    return int(raw_balance, 16) / 1_000_000
+        try:
+            resp = requests.post(rpc_url, json=payload, timeout=10)
+            resp.raise_for_status()
+            data = resp.json()
+            raw_balance = data.get("result")
+            if not isinstance(raw_balance, str):
+                raise ValueError(f"RPC {rpc_url} returned no result field")
+            return int(raw_balance, 16) / 1_000_000
+        except Exception as exc:
+            rpc_errors.append(f"{rpc_url}: {exc}")
+
+    raise RuntimeError("Failed to fetch Polygon USDC balance from configured RPCs: " + " | ".join(rpc_errors))
 
 
 def _get_portfolio_value(address: str) -> Optional[float]:
@@ -157,7 +164,7 @@ def get_account_balance_snapshot() -> AccountBalanceSnapshot:
 
     cash_balance = None
     portfolio_balance = None
-    error = None
+    errors = []
 
     try:
         if proxy_address:
@@ -168,11 +175,19 @@ def get_account_balance_snapshot() -> AccountBalanceSnapshot:
         else:
             signer_address = _derive_signer_address(cfg.private_key)
             balance_address = signer_address
-
-        cash_balance = _get_polygon_usdc_balance(balance_address)
-        portfolio_balance = _get_portfolio_value(balance_address)
     except Exception as exc:
-        error = str(exc)
+        errors.append(f"Address resolution failed: {exc}")
+
+    if balance_address != "Unavailable":
+        try:
+            cash_balance = _get_polygon_usdc_balance(balance_address)
+        except Exception as exc:
+            errors.append(f"Cash balance lookup failed: {exc}")
+
+        try:
+            portfolio_balance = _get_portfolio_value(balance_address)
+        except Exception as exc:
+            errors.append(f"Portfolio balance lookup failed: {exc}")
 
     total_account_value = None
     if cash_balance is not None and portfolio_balance is not None:
@@ -185,7 +200,7 @@ def get_account_balance_snapshot() -> AccountBalanceSnapshot:
         cash_balance=cash_balance,
         portfolio_balance=portfolio_balance,
         total_account_value=total_account_value,
-        error=error,
+        error=" | ".join(errors) if errors else None,
     )
 
 
