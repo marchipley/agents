@@ -102,9 +102,10 @@ Notes:
 
 What the BTC agent does today:
 
-- Pulls the current BTC/USD spot price from CoinGecko.
+- Pulls the current BTC/USD spot price from a small fallback chain of public APIs, currently trying CoinGecko and Coinbase spot pricing.
 - Maintains an in-memory rolling price history during process lifetime only.
 - Approximates window-open price using the earliest retained sample, not a true historical open for the market window.
+- Falls back across multiple live BTC spot-price APIs first, then to the most recent in-memory BTC price sample when all configured live price requests fail during the current process lifetime, which prevents active paper-order reporting from aborting immediately on a single-provider rate-limit response after recent successful samples.
 - Uses the current 5-minute BTC Up/Down slug by timestamp alignment, unless overridden.
 - Performs a startup IP geolocation check and refuses to run unless the current public IP resolves to Indonesia.
 - Uses OpenAI chat completions with JSON output to decide `UP`, `DOWN`, or `NO_TRADE`.
@@ -147,6 +148,7 @@ When changing live-trading behavior, prefer reusing vetted primitives from `agen
 - The market lookup assumes the current slug format and first market in the event response remain stable.
 - The decision path depends on a single LLM response and does not yet validate response quality beyond JSON parsing and basic coercion.
 - Network/API failures are still only partially hardened; balance lookups now degrade more cleanly, but other external calls remain single-point dependent.
+- Multi-provider spot-price fallback still only has cached-price protection when the current process already has a recent BTC price in memory; a cold start where all configured BTC price providers fail immediately can still abort the loop.
 - There are no BTC-agent tests for market parsing, pricing, decision normalization, or paper-trade gating.
 - The inherited repo still contains placeholder tests and unused upstream surfaces, which can mislead future work if not distinguished from the active BTC path.
 
@@ -196,3 +198,4 @@ Do not revert unrelated local changes unless the user explicitly asks for that.
 - Updated the BTC paper-trading loop to log the exact execution snapshot and to reuse a single decision-time quote snapshot end-to-end per tick, eliminating mismatches between the printed `UP/DOWN (with decision)` snapshot and the final paper execution result.
 - Added `BTC_AGENT_TRADE_SHARES_SIZE` and `BTC_AGENT_MAX_TRADES_PER_PERIOD`, switched paper-trade sizing to fixed shares with a minimum of 5, and introduced per-period in-memory active paper-order tracking so the loop can stop decisioning after the trade limit is reached and report each active order’s BTC target plus winning/losing status until the next 5-minute window starts.
 - Added `BTC_AGENT_DEBUG` with a default of `false` and changed the BTC loop so non-debug mode emits only compact operational output while debug mode retains the fuller diagnostic logs; account balances now print only on the first loop and at each new 5-minute market period.
+- Updated BTC spot-price fetching to fail over across multiple live providers before reusing the most recent in-memory BTC price sample, reducing the chance that a single-provider rate limit such as CoinGecko HTTP 429 will crash active paper-order status checks after the process has already collected a recent BTC sample.

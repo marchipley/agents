@@ -9,6 +9,7 @@ import requests
 
 # Simple in-memory history: list of (timestamp, price)
 _PRICE_HISTORY: List[Tuple[datetime, float]] = []
+_LAST_SUCCESSFUL_PROVIDER_INDEX = 0
 
 
 @dataclass
@@ -22,12 +23,7 @@ class BtcFeatures:
     volatility_5m: Optional[float]
 
 
-def _fetch_spot_price() -> float:
-    """
-    Fetch the current BTC/USD price from a public API.
-
-    For now, use CoinGecko's simple endpoint once per run.
-    """
+def _fetch_spot_price_from_coingecko() -> float:
     resp = requests.get(
         "https://api.coingecko.com/api/v3/simple/price",
         params={"ids": "bitcoin", "vs_currencies": "usd"},
@@ -38,8 +34,65 @@ def _fetch_spot_price() -> float:
     return float(data["bitcoin"]["usd"])
 
 
-def fetch_btc_spot_price() -> float:
-    return _fetch_spot_price()
+def _fetch_spot_price_from_coinbase() -> float:
+    resp = requests.get(
+        "https://api.coinbase.com/v2/prices/BTC-USD/spot",
+        timeout=10,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    return float(data["data"]["amount"])
+
+
+def _get_price_providers():
+    return [
+        ("CoinGecko", _fetch_spot_price_from_coingecko),
+        ("Coinbase", _fetch_spot_price_from_coinbase),
+    ]
+
+
+def get_latest_cached_price() -> Optional[float]:
+    if not _PRICE_HISTORY:
+        return None
+    return _PRICE_HISTORY[-1][1]
+
+
+def _record_price_sample(price: float, as_of: Optional[datetime] = None) -> None:
+    global _PRICE_HISTORY
+
+    timestamp = as_of or datetime.now(timezone.utc)
+    _PRICE_HISTORY.append((timestamp, price))
+    if len(_PRICE_HISTORY) > 60:
+        _PRICE_HISTORY = _PRICE_HISTORY[-60:]
+
+
+def fetch_btc_spot_price(allow_cached_fallback: bool = True) -> float:
+    global _LAST_SUCCESSFUL_PROVIDER_INDEX
+
+    providers = _get_price_providers()
+    provider_count = len(providers)
+    last_error = None
+
+    for offset in range(provider_count):
+        provider_index = (_LAST_SUCCESSFUL_PROVIDER_INDEX + offset) % provider_count
+        _, provider = providers[provider_index]
+        try:
+            price = provider()
+            _LAST_SUCCESSFUL_PROVIDER_INDEX = provider_index
+            _record_price_sample(price)
+            return price
+        except requests.RequestException as exc:
+            last_error = exc
+
+    if allow_cached_fallback:
+        cached_price = get_latest_cached_price()
+        if cached_price is not None:
+            return cached_price
+
+    if last_error is not None:
+        raise last_error
+
+    raise RuntimeError("No BTC price provider returned a price")
 
 
 def _compute_rsi(prices: List[float], period: int = 14) -> Optional[float]:
@@ -73,15 +126,8 @@ def build_btc_features(window_start_ts: int) -> BtcFeatures:
     - Uses a short rolling in-memory history for RSI/momentum/vol.
     - Approximates 'window open price' as the earliest price in the last ~N samples.
     """
-    global _PRICE_HISTORY
-
     now = datetime.now(timezone.utc)
-    price_now = _fetch_spot_price()
-
-    # Append to history and keep only the last N samples (e.g., last 60)
-    _PRICE_HISTORY.append((now, price_now))
-    if len(_PRICE_HISTORY) > 60:
-        _PRICE_HISTORY = _PRICE_HISTORY[-60:]
+    price_now = fetch_btc_spot_price()
 
     prices = [p[1] for p in _PRICE_HISTORY]
 
