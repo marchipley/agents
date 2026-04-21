@@ -34,8 +34,10 @@ Execution flow per loop tick:
 6. Fetch current quotes for both outcome tokens.
 7. Build BTC features in [custom/btc_agent/indicators.py](/appl/agents/custom/btc_agent/indicators.py:1).
 8. Request an LLM trade decision in [custom/btc_agent/llm_decision.py](/appl/agents/custom/btc_agent/llm_decision.py:1).
-9. Fetch a decision-time quote snapshot for the selected token, print it, and reuse that same snapshot for paper-trade evaluation within the tick.
-10. Print the execution snapshot and paper-trade decision, then sleep for the configured interval.
+9. If the configured per-period paper-trade limit has already been reached for the current 5-minute market slug, skip quote snapshots and LLM decisioning, print active paper-order status only, and wait for the next loop tick.
+10. Otherwise, fetch a decision-time quote snapshot for the selected token, print it, and reuse that same snapshot for paper-trade evaluation within the tick.
+11. If a paper trade executes, record an in-memory active paper order for the current market window using the configured share size.
+12. Print the execution snapshot, paper-trade decision, and any active paper-order status, then sleep for the configured interval.
 
 There is currently no live order submission in the custom BTC loop.
 
@@ -82,6 +84,8 @@ Optional / supported:
 - `POLYGON_RPC_URLS` optional comma-separated list of Polygon RPC endpoints to try in order
 - `BTC_AGENT_LOOP_INTERVAL` default: `30`
 - `BTC_AGENT_MAX_TRADE_USD` default: `5`
+- `BTC_AGENT_TRADE_SHARES_SIZE` default: `5` and enforced minimum: `5`
+- `BTC_AGENT_MAX_TRADES_PER_PERIOD` default: `1`
 - `BTC_AGENT_MIN_CONFIDENCE` default: `0.7`
 - `BTC_AGENT_MAX_ENTRY_PRICE` default: `0.62`
 - `BTC_AGENT_MAX_SPREAD` default: `0.06`
@@ -105,6 +109,9 @@ What the BTC agent does today:
 - Computes a reference price from quote, midpoint, last trade, and order book data.
 - Reuses a single decision-time token quote snapshot for both the printed `UP/DOWN (with decision)` block and the paper execution gate so those logs cannot diverge within one loop tick.
 - Prints the exact execution snapshot used by the paper-trade path, including the calculated `reference_price`, `target_limit_price`, and `recommended_limit_price`.
+- Uses a fixed paper-trade share size from `BTC_AGENT_TRADE_SHARES_SIZE` instead of deriving the trade size from USD notional.
+- Tracks in-memory active paper orders for the current 5-minute market window and prints each order’s target BTC level plus whether the position is currently winning, losing, or tied.
+- Enforces `BTC_AGENT_MAX_TRADES_PER_PERIOD` per 5-minute market slug; once that limit is reached, subsequent loop ticks skip quote snapshots and LLM trade decisions until the next market window begins.
 - Retrieves Polygon USDC cash balances through a configurable ordered RPC list with public fallback endpoints.
 - Retrieves Polymarket portfolio value separately from the on-chain cash balance lookup so one failure does not suppress the other.
 - Approves or rejects a paper trade based on confidence, entry caps, and quote drift.
@@ -132,6 +139,7 @@ When changing live-trading behavior, prefer reusing vetted primitives from `agen
 
 - `BTC_AGENT_MAX_SPREAD` exists in config but is not currently enforced in `custom/btc_agent/executor.py`.
 - The indicator pipeline depends on process-local memory, so restarts erase context and make RSI/momentum less meaningful until enough samples accumulate.
+- Active paper orders and per-period trade counts are also process-local only, so a restart clears them immediately.
 - The market lookup assumes the current slug format and first market in the event response remain stable.
 - The decision path depends on a single LLM response and does not yet validate response quality beyond JSON parsing and basic coercion.
 - Network/API failures are still only partially hardened; balance lookups now degrade more cleanly, but other external calls remain single-point dependent.
@@ -182,3 +190,4 @@ Do not revert unrelated local changes unless the user explicitly asks for that.
 - Added a hard startup gate in `custom/btc_agent/main.py` that runs the Indonesia public-IP check and aborts execution before any further BTC-agent logic when the detected location is not Indonesia.
 - Adjusted `scripts/python/check_public_ip_indonesia.py` type annotations to remain compatible with the repo’s Python 3.9 runtime after the Indonesia startup gate was added.
 - Updated the BTC paper-trading loop to log the exact execution snapshot and to reuse a single decision-time quote snapshot end-to-end per tick, eliminating mismatches between the printed `UP/DOWN (with decision)` snapshot and the final paper execution result.
+- Added `BTC_AGENT_TRADE_SHARES_SIZE` and `BTC_AGENT_MAX_TRADES_PER_PERIOD`, switched paper-trade sizing to fixed shares with a minimum of 5, and introduced per-period in-memory active paper-order tracking so the loop can stop decisioning after the trade limit is reached and report each active order’s BTC target plus winning/losing status until the next 5-minute window starts.

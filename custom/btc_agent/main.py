@@ -7,13 +7,22 @@ import sys
 
 from .config import get_trading_config
 from .market_lookup import find_current_btc_updown_market
-from .indicators import build_btc_features
+from .indicators import build_btc_features, fetch_btc_spot_price
 from .llm_decision import decide_trade
 from .executor import (
     TokenQuoteSnapshot,
     get_account_balance_snapshot,
     get_token_quote_snapshot,
     maybe_execute_paper_trade,
+)
+from .paper_state import (
+    ActivePaperOrder,
+    classify_position,
+    describe_target,
+    get_active_orders,
+    get_state,
+    record_executed_trade,
+    sync_period_state,
 )
 from scripts.python.check_public_ip_indonesia import (
     check_current_public_ip_location,
@@ -67,13 +76,49 @@ def print_account_snapshot() -> None:
     print(f"  total_account_value_usd= {_fmt(account.total_account_value)}")
     print(f"  balance_error          = {account.error or 'None'}")
 
+
+def print_active_orders(current_btc_price: float) -> None:
+    active_orders = get_active_orders()
+    if not active_orders:
+        print("Active paper orders: None")
+        return
+
+    print("Active paper orders:")
+    for idx, order in enumerate(active_orders, start=1):
+        status = classify_position(order, current_btc_price)
+        print(f"  order_{idx}_market_slug    = {order.market_slug}")
+        print(f"  order_{idx}_market_title   = {order.market_title}")
+        print(f"  order_{idx}_side           = {order.side}")
+        print(f"  order_{idx}_shares         = {_fmt(order.shares)}")
+        print(f"  order_{idx}_entry_price    = {_fmt(order.entry_price)}")
+        print(f"  order_{idx}_entry_btc      = {order.entry_btc_price:.2f}")
+        print(f"  order_{idx}_target         = {describe_target(order)}")
+        print(f"  order_{idx}_current_btc    = {current_btc_price:.2f}")
+        print(f"  order_{idx}_position_state = {status}")
+
+
 def run_once() -> None:
+    cfg = get_trading_config()
     print(f"[{datetime.now(timezone.utc).isoformat()}] BTC up/down agent tick")
     print_account_snapshot()
 
     market = find_current_btc_updown_market()
     if not market:
         print("No BTC Up/Down market found.")
+        return
+
+    period_changed = sync_period_state(market.slug, market.title)
+    state = get_state()
+    if period_changed:
+        print(f"New 5-minute market period detected: {market.slug}")
+
+    if state.trades_executed >= cfg.max_trades_per_period:
+        print(
+            f"Trade limit reached for current period: "
+            f"{state.trades_executed}/{cfg.max_trades_per_period}"
+        )
+        print_active_orders(fetch_btc_spot_price())
+        print("-" * 80)
         return
 
     print("Market found:")
@@ -121,6 +166,24 @@ def run_once() -> None:
     print(f"  price    = {_fmt(result.price)}")
     print(f"  token_id = {result.token_id}")
     print(f"  reason   = {result.reason}")
+
+    if result.executed and decision.side in ("UP", "DOWN") and result.token_id:
+        record_executed_trade(
+            ActivePaperOrder(
+                market_slug=market.slug,
+                market_title=market.title,
+                side=decision.side,
+                shares=result.size,
+                entry_price=result.price,
+                token_id=result.token_id,
+                target_btc_price=features.window_open_price,
+                entry_btc_price=features.price_usd,
+            )
+        )
+
+    active_btc_price = features.price_usd
+    if get_active_orders():
+        print_active_orders(active_btc_price)
     print("-" * 80)
 
 

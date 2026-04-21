@@ -38,6 +38,10 @@ def _fetch_spot_price() -> float:
     return float(data["bitcoin"]["usd"])
 
 
+def fetch_btc_spot_price() -> float:
+    return _fetch_spot_price()
+
+
 def _compute_rsi(prices: List[float], period: int = 14) -> Optional[float]:
     if len(prices) < period + 1:
         return None

@@ -586,7 +586,7 @@ def maybe_execute_paper_trade(
             execution_snapshot=snapshot,
         )
 
-    size = cfg.max_trade_usd / recommended_limit_price
+    size = cfg.trade_shares_size
 
     return PaperTradeResult(
         executed=True,
@@ -596,6 +596,7 @@ def maybe_execute_paper_trade(
         token_id=token_id,
         reason=(
             f"Paper trade approved at recommended limit {recommended_limit_price:.3f} "
+            f"for {size:.4f} shares "
             f"(reference={live_price:.3f}; {snapshot.submit_reason})"
         ),
         execution_snapshot=snapshot,
