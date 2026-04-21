@@ -18,6 +18,7 @@ class PaperTradeResult:
     price: float
     token_id: Optional[str]
     reason: str
+    execution_snapshot: Optional["TokenQuoteSnapshot"] = None
 
 
 @dataclass
@@ -497,6 +498,7 @@ def get_best_buy_price(token_id: str) -> Optional[float]:
 def maybe_execute_paper_trade(
     market: BtcUpDownMarket,
     decision: LlmDecision,
+    snapshot: Optional[TokenQuoteSnapshot] = None,
 ) -> PaperTradeResult:
     cfg = get_trading_config()
 
@@ -508,6 +510,7 @@ def maybe_execute_paper_trade(
             price=0.0,
             token_id=None,
             reason=f"NO_TRADE from LLM: {decision.reason}",
+            execution_snapshot=None,
         )
 
     if decision.confidence < cfg.min_confidence:
@@ -518,10 +521,12 @@ def maybe_execute_paper_trade(
             price=0.0,
             token_id=None,
             reason=f"Confidence {decision.confidence:.2f} < min {cfg.min_confidence:.2f}",
+            execution_snapshot=None,
         )
 
     token_id = market.up_token_id if decision.side == "UP" else market.down_token_id
-    snapshot = get_token_quote_snapshot(token_id, decision=decision)
+    if snapshot is None:
+        snapshot = get_token_quote_snapshot(token_id, decision=decision)
 
     live_price = snapshot.reference_price
     recommended_limit_price = snapshot.recommended_limit_price
@@ -534,6 +539,7 @@ def maybe_execute_paper_trade(
             price=0.0,
             token_id=token_id,
             reason="No buy quote, midpoint, or last trade price available",
+            execution_snapshot=snapshot,
         )
 
     if recommended_limit_price is None:
@@ -544,6 +550,7 @@ def maybe_execute_paper_trade(
             price=live_price,
             token_id=token_id,
             reason="Could not determine recommended limit price",
+            execution_snapshot=snapshot,
         )
 
     if not snapshot.ok_to_submit:
@@ -554,6 +561,7 @@ def maybe_execute_paper_trade(
             price=recommended_limit_price,
             token_id=token_id,
             reason=f"Not safe to submit: {snapshot.submit_reason}",
+            execution_snapshot=snapshot,
         )
 
     if live_price > decision.max_price_to_pay:
@@ -564,6 +572,7 @@ def maybe_execute_paper_trade(
             price=live_price,
             token_id=token_id,
             reason=f"Reference price {live_price:.3f} exceeds LLM max {decision.max_price_to_pay:.3f}",
+            execution_snapshot=snapshot,
         )
 
     if live_price > cfg.max_entry_price:
@@ -574,6 +583,7 @@ def maybe_execute_paper_trade(
             price=live_price,
             token_id=token_id,
             reason=f"Reference price {live_price:.3f} exceeds max entry {cfg.max_entry_price:.3f}",
+            execution_snapshot=snapshot,
         )
 
     size = cfg.max_trade_usd / recommended_limit_price
@@ -588,4 +598,5 @@ def maybe_execute_paper_trade(
             f"Paper trade approved at recommended limit {recommended_limit_price:.3f} "
             f"(reference={live_price:.3f}; {snapshot.submit_reason})"
         ),
+        execution_snapshot=snapshot,
     )

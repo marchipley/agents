@@ -10,6 +10,7 @@ from .market_lookup import find_current_btc_updown_market
 from .indicators import build_btc_features
 from .llm_decision import decide_trade
 from .executor import (
+    TokenQuoteSnapshot,
     get_account_balance_snapshot,
     get_token_quote_snapshot,
     maybe_execute_paper_trade,
@@ -30,6 +31,10 @@ def _fmt(value):
 
 def print_quote_snapshot(label: str, token_id: str, decision=None) -> None:
     q = get_token_quote_snapshot(token_id, decision=decision)
+    print_quote_snapshot_from_snapshot(label, q)
+
+
+def print_quote_snapshot_from_snapshot(label: str, q: TokenQuoteSnapshot) -> None:
     print(f"{label} quote snapshot:")
     print(f"  token_id               = {q.token_id}")
     print(f"  buy_quote              = {_fmt(q.buy_quote)}")
@@ -44,6 +49,11 @@ def print_quote_snapshot(label: str, token_id: str, decision=None) -> None:
     print(f"  best_ask               = {_fmt(q.best_ask)}")
     print(f"  tick_size              = {_fmt(q.tick_size)}")
     print(f"  spread                 = {_fmt(q.spread)}")
+
+
+def get_decision_quote_snapshot(market, decision) -> TokenQuoteSnapshot:
+    token_id = market.up_token_id if decision.side == "UP" else market.down_token_id
+    return get_token_quote_snapshot(token_id, decision=decision)
 
 
 def print_account_snapshot() -> None:
@@ -93,12 +103,17 @@ def run_once() -> None:
     print(f"  max_price_to_pay  = {decision.max_price_to_pay:.3f}")
     print(f"  reason            = {decision.reason}")
 
+    decision_snapshot = None
     if decision.side == "UP":
-        print_quote_snapshot("UP (with decision)", market.up_token_id, decision=decision)
+        decision_snapshot = get_decision_quote_snapshot(market, decision)
+        print_quote_snapshot_from_snapshot("UP (with decision)", decision_snapshot)
     elif decision.side == "DOWN":
-        print_quote_snapshot("DOWN (with decision)", market.down_token_id, decision=decision)
+        decision_snapshot = get_decision_quote_snapshot(market, decision)
+        print_quote_snapshot_from_snapshot("DOWN (with decision)", decision_snapshot)
 
-    result = maybe_execute_paper_trade(market, decision)
+    result = maybe_execute_paper_trade(market, decision, snapshot=decision_snapshot)
+    if result.execution_snapshot is not None:
+        print_quote_snapshot_from_snapshot("Execution", result.execution_snapshot)
     print("Paper execution result:")
     print(f"  executed = {result.executed}")
     print(f"  side     = {result.side}")

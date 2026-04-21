@@ -34,8 +34,8 @@ Execution flow per loop tick:
 6. Fetch current quotes for both outcome tokens.
 7. Build BTC features in [custom/btc_agent/indicators.py](/appl/agents/custom/btc_agent/indicators.py:1).
 8. Request an LLM trade decision in [custom/btc_agent/llm_decision.py](/appl/agents/custom/btc_agent/llm_decision.py:1).
-9. Reprice the selected token and evaluate whether a paper trade would be allowed.
-10. Print the paper-trade decision and sleep for the configured interval.
+9. Fetch a decision-time quote snapshot for the selected token, print it, and reuse that same snapshot for paper-trade evaluation within the tick.
+10. Print the execution snapshot and paper-trade decision, then sleep for the configured interval.
 
 There is currently no live order submission in the custom BTC loop.
 
@@ -103,6 +103,8 @@ What the BTC agent does today:
 - Performs a startup IP geolocation check and refuses to run unless the current public IP resolves to Indonesia.
 - Uses OpenAI chat completions with JSON output to decide `UP`, `DOWN`, or `NO_TRADE`.
 - Computes a reference price from quote, midpoint, last trade, and order book data.
+- Reuses a single decision-time token quote snapshot for both the printed `UP/DOWN (with decision)` block and the paper execution gate so those logs cannot diverge within one loop tick.
+- Prints the exact execution snapshot used by the paper-trade path, including the calculated `reference_price`, `target_limit_price`, and `recommended_limit_price`.
 - Retrieves Polygon USDC cash balances through a configurable ordered RPC list with public fallback endpoints.
 - Retrieves Polymarket portfolio value separately from the on-chain cash balance lookup so one failure does not suppress the other.
 - Approves or rejects a paper trade based on confidence, entry caps, and quote drift.
@@ -179,3 +181,4 @@ Do not revert unrelated local changes unless the user explicitly asks for that.
 - Updated BTC account balance handling to stop using `https://polygon-rpc.com` as the default Polygon RPC, add ordered RPC fallback support via `POLYGON_RPC_URLS`, and separate cash-balance failures from portfolio-balance failures in the printed account snapshot.
 - Added a hard startup gate in `custom/btc_agent/main.py` that runs the Indonesia public-IP check and aborts execution before any further BTC-agent logic when the detected location is not Indonesia.
 - Adjusted `scripts/python/check_public_ip_indonesia.py` type annotations to remain compatible with the repo’s Python 3.9 runtime after the Indonesia startup gate was added.
+- Updated the BTC paper-trading loop to log the exact execution snapshot and to reuse a single decision-time quote snapshot end-to-end per tick, eliminating mismatches between the printed `UP/DOWN (with decision)` snapshot and the final paper execution result.
