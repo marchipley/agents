@@ -27,13 +27,15 @@ Primary module:
 Execution flow per loop tick:
 
 1. Load env/config from [custom/btc_agent/config.py](/appl/agents/custom/btc_agent/config.py:1).
-2. Print wallet/account balances via helpers in [custom/btc_agent/executor.py](/appl/agents/custom/btc_agent/executor.py:1).
-3. Resolve the active BTC Up/Down market slug in [custom/btc_agent/market_lookup.py](/appl/agents/custom/btc_agent/market_lookup.py:1).
-4. Fetch current quotes for both outcome tokens.
-5. Build BTC features in [custom/btc_agent/indicators.py](/appl/agents/custom/btc_agent/indicators.py:1).
-6. Request an LLM trade decision in [custom/btc_agent/llm_decision.py](/appl/agents/custom/btc_agent/llm_decision.py:1).
-7. Reprice the selected token and evaluate whether a paper trade would be allowed.
-8. Print the paper-trade decision and sleep for the configured interval.
+2. Run the public-IP geolocation check from [scripts/python/check_public_ip_indonesia.py](/appl/agents/scripts/python/check_public_ip_indonesia.py:1).
+3. Abort startup immediately if the public IP does not resolve to Indonesia.
+4. Print wallet/account balances via helpers in [custom/btc_agent/executor.py](/appl/agents/custom/btc_agent/executor.py:1).
+5. Resolve the active BTC Up/Down market slug in [custom/btc_agent/market_lookup.py](/appl/agents/custom/btc_agent/market_lookup.py:1).
+6. Fetch current quotes for both outcome tokens.
+7. Build BTC features in [custom/btc_agent/indicators.py](/appl/agents/custom/btc_agent/indicators.py:1).
+8. Request an LLM trade decision in [custom/btc_agent/llm_decision.py](/appl/agents/custom/btc_agent/llm_decision.py:1).
+9. Reprice the selected token and evaluate whether a paper trade would be allowed.
+10. Print the paper-trade decision and sleep for the configured interval.
 
 There is currently no live order submission in the custom BTC loop.
 
@@ -98,6 +100,7 @@ What the BTC agent does today:
 - Maintains an in-memory rolling price history during process lifetime only.
 - Approximates window-open price using the earliest retained sample, not a true historical open for the market window.
 - Uses the current 5-minute BTC Up/Down slug by timestamp alignment, unless overridden.
+- Performs a startup IP geolocation check and refuses to run unless the current public IP resolves to Indonesia.
 - Uses OpenAI chat completions with JSON output to decide `UP`, `DOWN`, or `NO_TRADE`.
 - Computes a reference price from quote, midpoint, last trade, and order book data.
 - Retrieves Polygon USDC cash balances through a configurable ordered RPC list with public fallback endpoints.
@@ -174,3 +177,5 @@ Do not revert unrelated local changes unless the user explicitly asks for that.
 - Added `scripts/python/check_public_ip_indonesia.py` to print the current public IP and geolocation and return success only when the detected location is Indonesia.
 - Recreated `AGENTS.md` after accidental deletion, preserving the prior project context and maintenance guidance.
 - Updated BTC account balance handling to stop using `https://polygon-rpc.com` as the default Polygon RPC, add ordered RPC fallback support via `POLYGON_RPC_URLS`, and separate cash-balance failures from portfolio-balance failures in the printed account snapshot.
+- Added a hard startup gate in `custom/btc_agent/main.py` that runs the Indonesia public-IP check and aborts execution before any further BTC-agent logic when the detected location is not Indonesia.
+- Adjusted `scripts/python/check_public_ip_indonesia.py` type annotations to remain compatible with the repo’s Python 3.9 runtime after the Indonesia startup gate was added.

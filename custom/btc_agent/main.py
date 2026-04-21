@@ -3,6 +3,7 @@
 from datetime import datetime, timezone
 import os
 import time
+import sys
 
 from .config import get_trading_config
 from .market_lookup import find_current_btc_updown_market
@@ -12,6 +13,10 @@ from .executor import (
     get_account_balance_snapshot,
     get_token_quote_snapshot,
     maybe_execute_paper_trade,
+)
+from scripts.python.check_public_ip_indonesia import (
+    check_current_public_ip_location,
+    print_location,
 )
 
 
@@ -104,9 +109,20 @@ def run_once() -> None:
     print("-" * 80)
 
 
+def enforce_indonesia_ip() -> None:
+    print("Checking public IP geolocation...")
+    public_ip, location, ip_is_indonesia = check_current_public_ip_location()
+    print_location(public_ip, location)
+
+    if not ip_is_indonesia:
+        print("ERROR: Public IP geolocation is not Indonesia. Aborting BTC agent startup.")
+        sys.exit(1)
+
+
 def main() -> None:
     cfg = get_trading_config()
     print(f"Starting BTC agent (paper_trading={cfg.paper_trading})")
+    enforce_indonesia_ip()
 
     interval = int(os.getenv("BTC_AGENT_LOOP_INTERVAL", "30"))
 

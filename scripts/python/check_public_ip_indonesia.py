@@ -2,7 +2,7 @@
 
 import argparse
 import sys
-from typing import Any
+from typing import Any, Dict, Optional, Tuple
 
 import requests
 
@@ -11,7 +11,7 @@ IPIFY_URL = "https://api.ipify.org?format=json"
 IPWHOIS_URL_TEMPLATE = "https://ipwho.is/{ip}"
 
 
-def get_public_ip(timeout: float) -> str | None:
+def get_public_ip(timeout: float) -> Optional[str]:
     try:
         response = requests.get(IPIFY_URL, timeout=timeout)
         response.raise_for_status()
@@ -23,7 +23,7 @@ def get_public_ip(timeout: float) -> str | None:
     return ip if isinstance(ip, str) and ip else None
 
 
-def get_ip_location(ip: str, timeout: float) -> dict[str, Any]:
+def get_ip_location(ip: str, timeout: float) -> Dict[str, Any]:
     try:
         response = requests.get(IPWHOIS_URL_TEMPLATE.format(ip=ip), timeout=timeout)
         response.raise_for_status()
@@ -41,7 +41,7 @@ def get_ip_location(ip: str, timeout: float) -> dict[str, Any]:
     return payload
 
 
-def is_indonesia(location: dict[str, Any]) -> bool:
+def is_indonesia(location: Dict[str, Any]) -> bool:
     country = str(location.get("country", "")).strip().lower()
     country_code = str(location.get("country_code", "")).strip().lower()
     continent = str(location.get("continent", "")).strip().lower()
@@ -53,7 +53,23 @@ def is_indonesia(location: dict[str, Any]) -> bool:
     )
 
 
-def print_location(ip: str | None, location: dict[str, Any]) -> None:
+def check_current_public_ip_location(
+    timeout: float = 10.0,
+) -> Tuple[Optional[str], Dict[str, Any], bool]:
+    public_ip = get_public_ip(timeout=timeout)
+
+    if public_ip is None:
+        location = {
+            "success": False,
+            "message": "Unable to determine public IP address.",
+        }
+        return None, location, False
+
+    location = get_ip_location(public_ip, timeout=timeout)
+    return public_ip, location, is_indonesia(location)
+
+
+def print_location(ip: Optional[str], location: Dict[str, Any]) -> None:
     print(f"public_ip: {ip or 'unknown'}")
     print(f"is_indonesia: {str(is_indonesia(location)).lower()}")
     print(f"lookup_success: {str(bool(location.get('success', False))).lower()}")
@@ -90,19 +106,11 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    public_ip = get_public_ip(timeout=args.timeout)
-
-    if public_ip is None:
-        location = {
-            "success": False,
-            "message": "Unable to determine public IP address.",
-        }
-        print_location(None, location)
-        return 1
-
-    location = get_ip_location(public_ip, timeout=args.timeout)
+    public_ip, location, ip_is_indonesia = check_current_public_ip_location(
+        timeout=args.timeout
+    )
     print_location(public_ip, location)
-    return 0 if is_indonesia(location) else 1
+    return 0 if ip_is_indonesia else 1
 
 
 if __name__ == "__main__":
