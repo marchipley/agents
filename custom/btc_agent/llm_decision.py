@@ -195,11 +195,13 @@ def _print_llm_attempt_result(
     total_attempts: int,
     success: bool,
     detail: str,
+    phase: str = "primary",
 ) -> None:
     outcome = "response" if success else "failed"
+    phase_suffix = "" if phase == "primary" else f" [{phase}]"
     print(
         f"LLM attempt {attempt_number}/{total_attempts} "
-        f"({engine}/{model}) {outcome}: {_truncate_log_text(detail)}"
+        f"({engine}/{model}){phase_suffix} {outcome}: {_truncate_log_text(detail)}"
     )
 
 
@@ -293,6 +295,7 @@ def _request_gemini_decision(
     timeout_seconds: float = 10.0,
     retry_attempts: int = 3,
     retry_timer_seconds: float = 2.0,
+    phase: str = "primary",
 ) -> str:
     url = (
         "https://generativelanguage.googleapis.com/v1beta/models/"
@@ -358,6 +361,7 @@ def _request_gemini_decision(
                 retry_attempts,
                 True,
                 raw_text or detail,
+                phase=phase,
             )
             return raw_text
         except requests.RequestException as exc:
@@ -369,6 +373,7 @@ def _request_gemini_decision(
                 retry_attempts,
                 False,
                 str(exc),
+                phase=phase,
             )
             if attempt_number >= retry_attempts:
                 raise RuntimeError(f"Gemini request failed: {exc}") from exc
@@ -382,6 +387,7 @@ def _request_gemini_decision(
                 retry_attempts,
                 False,
                 str(exc),
+                phase=phase,
             )
             if attempt_number >= retry_attempts:
                 raise RuntimeError(f"Gemini request failed: {exc}") from exc
@@ -407,6 +413,7 @@ def _request_gemini_decision_with_parse_retry(
         timeout_seconds=timeout_seconds,
         retry_attempts=retry_attempts,
         retry_timer_seconds=retry_timer_seconds,
+        phase="primary",
     )
     try:
         return _extract_json_payload(raw_text)
@@ -432,6 +439,7 @@ def _request_gemini_decision_with_parse_retry(
             timeout_seconds=timeout_seconds,
             retry_attempts=retry_attempts,
             retry_timer_seconds=retry_timer_seconds,
+            phase="parse-retry",
         )
         return _extract_json_payload(retry_text)
 

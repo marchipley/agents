@@ -138,9 +138,13 @@ class TestBtcLlmDecision(unittest.TestCase):
         ), patch(
             "custom.btc_agent.llm_decision.requests.post",
             side_effect=[bad_response, good_response],
-        ):
+        ), patch(
+            "builtins.print",
+        ) as mock_print:
             decision = decide_trade(DummyFeatures(), DummyMarket())
 
+        printed_lines = [" ".join(str(arg) for arg in call.args) for call in mock_print.call_args_list]
+        self.assertTrue(any("[parse-retry] response" in line for line in printed_lines))
         self.assertEqual(decision.side, "UP")
         self.assertAlmostEqual(decision.confidence, 0.74)
 
