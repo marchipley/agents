@@ -37,9 +37,10 @@ def _parse_bool_env(name: str, default: bool) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 @dataclass
-class OpenAIConfig:
+class LlmConfig:
+    engine: str
     api_key: str
-    model: str = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
+    model: str
 
 @dataclass
 class TradingConfig:
@@ -66,11 +67,24 @@ class PolymarketConfig:
     polygon_rpc_urls: list[str] = None
     chain_id: int = 137
 
-def get_openai_config() -> OpenAIConfig:
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        raise RuntimeError("OPENAI_API_KEY is not set in .env")
-    return OpenAIConfig(api_key=api_key)
+def get_llm_config() -> LlmConfig:
+    raw_engine = os.getenv("AI_ENGINE", "OPENAI").strip().lower()
+
+    if raw_engine == "openai":
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            raise RuntimeError("OPENAI_API_KEY is not set in .env")
+        model = os.getenv("OPENAI_MODEL", "gpt-4.1-mini").strip() or "gpt-4.1-mini"
+        return LlmConfig(engine="openai", api_key=api_key, model=model)
+
+    if raw_engine in {"gemini", "google"}:
+        api_key = os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            raise RuntimeError("GEMINI_API_KEY is not set in .env")
+        model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip() or "gemini-2.5-flash"
+        return LlmConfig(engine="gemini", api_key=api_key, model=model)
+
+    raise RuntimeError("AI_ENGINE must be one of: OPENAI, GEMINI")
 
 def get_polymarket_config() -> PolymarketConfig:
     pk = os.getenv("POLYGON_WALLET_PRIVATE_KEY")

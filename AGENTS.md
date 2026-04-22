@@ -8,7 +8,7 @@ Current intent:
 
 - Analyze the active 5-minute BTC Up/Down market.
 - Build a lightweight BTC feature snapshot.
-- Ask an OpenAI model for a directional decision.
+- Ask the configured AI engine for a directional decision.
 - Support paper trading by default and optional live order submission when explicitly enabled.
 
 The active custom implementation lives under `custom/btc_agent/`. The inherited `agents/` tree remains available, but most of it is upstream framework code and is not the main runtime for the BTC-specific workflow.
@@ -49,7 +49,7 @@ Custom BTC agent:
 - `custom/btc_agent/main.py`: long-running loop and stdout logging.
 - `custom/btc_agent/market_lookup.py`: event slug selection and token ID extraction.
 - `custom/btc_agent/indicators.py`: BTC spot fetch plus simple in-memory indicators.
-- `custom/btc_agent/llm_decision.py`: OpenAI prompt/response handling.
+- `custom/btc_agent/llm_decision.py`: AI-engine prompt/response handling.
 - `custom/btc_agent/executor.py`: account snapshots, quote inspection, limit-price logic, paper-trade gatekeeping.
 
 Inherited upstream framework:
@@ -74,11 +74,15 @@ Tests:
 Required for current BTC agent execution:
 
 - `POLYGON_WALLET_PRIVATE_KEY`
-- `OPENAI_API_KEY`
+- `AI_ENGINE`
+- `OPENAI_API_KEY` when `AI_ENGINE=OPENAI`
+- `GEMINI_API_KEY` when `AI_ENGINE=GEMINI`
 
 Optional / supported:
 
+- `AI_ENGINE` supported values: `OPENAI`, `GEMINI`
 - `OPENAI_MODEL` default: `gpt-4.1-mini`
+- `GEMINI_MODEL` default: `gemini-2.5-flash`
 - `USE_PAPER_TRADES` default: `true`
 - `BTC_AGENT_LIVE_FEE_RATE_BPS` default: `1000`
 - `BTC_AGENT_LIVE_MIN_ORDER_USD` default: `1`
@@ -97,7 +101,6 @@ Optional / supported:
 
 Notes:
 
-- `.env.example` does not yet document the BTC-agent-specific variables and should be updated when configuration is stabilized.
 - `config.py` loads `.env` from the repo root, so local execution assumes a root-level `.env`.
 
 ## Current Behavior
@@ -110,7 +113,7 @@ What the BTC agent does today:
 - Falls back across multiple live BTC spot-price APIs first, then to the most recent in-memory BTC price sample when all configured live price requests fail during the current process lifetime, which prevents active paper-order reporting from aborting immediately on a single-provider rate-limit response after recent successful samples.
 - Uses the current 5-minute BTC Up/Down slug by timestamp alignment, unless overridden.
 - Performs a startup IP geolocation check and refuses to run unless the current public IP resolves to Indonesia.
-- Uses OpenAI chat completions with JSON output to decide `UP`, `DOWN`, or `NO_TRADE`.
+- Uses the configured AI engine with JSON output to decide `UP`, `DOWN`, or `NO_TRADE`.
 - Computes a reference price from quote, midpoint, last trade, and order book data.
 - Reuses a single decision-time token quote snapshot for both the printed `UP/DOWN (with decision)` block and the paper execution gate so those logs cannot diverge within one loop tick.
 - Prints the exact execution snapshot used by the paper-trade path, including the calculated `reference_price`, `target_limit_price`, and `recommended_limit_price`.
@@ -215,3 +218,8 @@ Do not revert unrelated local changes unless the user explicitly asks for that.
 - Tightened the live-trading cash-balance guard to include the estimated maker fee in the required cash calculation before live order submission.
 - Added `BTC_AGENT_LIVE_MIN_ORDER_USD` with a default of `1` and updated the custom BTC live executor to auto-scale live order size upward so the order notional meets the exchange’s minimum marketable buy amount.
 - Corrected the BTC window-open approximation to use the earliest retained sample inside the current 5-minute market window instead of the oldest retained sample across the whole process history, preventing active-order targets from drifting across periods.
+
+### 2026-04-22
+
+- Added `AI_ENGINE`-based LLM selection so the BTC agent can route decisions through OpenAI or Gemini using the matching provider API key from `.env`.
+- Updated `.env.example` to document the active BTC-agent AI-engine and model environment variables.
