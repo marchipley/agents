@@ -41,6 +41,31 @@ class TestBtcLlmConfig(unittest.TestCase):
         self.assertEqual(cfg.engine, "gemini")
         self.assertEqual(cfg.api_key, "gemini-key")
         self.assertEqual(cfg.model, "gemini-2.5-flash")
+        self.assertEqual(cfg.gemini_connect_timeout_seconds, 10.0)
+        self.assertEqual(cfg.gemini_read_timeout_seconds, 45.0)
+        self.assertEqual(cfg.gemini_max_attempts, 4)
+        self.assertEqual(cfg.gemini_retry_backoff_seconds, 2.0)
+
+    def test_gemini_engine_uses_timeout_and_retry_overrides(self):
+        with patch.dict(
+            os.environ,
+            {
+                "AI_ENGINE": "GEMINI",
+                "GEMINI_API_KEY": "gemini-key",
+                "GEMINI_MODEL": "gemini-2.5-flash",
+                "GEMINI_CONNECT_TIMEOUT_SECONDS": "7",
+                "GEMINI_READ_TIMEOUT_SECONDS": "90",
+                "GEMINI_MAX_ATTEMPTS": "5",
+                "GEMINI_RETRY_BACKOFF_SECONDS": "3.5",
+            },
+            clear=False,
+        ):
+            cfg = get_llm_config()
+
+        self.assertEqual(cfg.gemini_connect_timeout_seconds, 7.0)
+        self.assertEqual(cfg.gemini_read_timeout_seconds, 90.0)
+        self.assertEqual(cfg.gemini_max_attempts, 5)
+        self.assertEqual(cfg.gemini_retry_backoff_seconds, 3.5)
 
     def test_unknown_engine_raises(self):
         with patch.dict(

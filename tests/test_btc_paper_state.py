@@ -3,6 +3,7 @@ import unittest
 from custom.btc_agent.paper_state import (
     ActivePaperOrder,
     classify_position,
+    describe_target,
     get_state,
     record_executed_trade,
     sync_period_state,
@@ -79,6 +80,24 @@ class TestBtcPaperState(unittest.TestCase):
         self.assertEqual(classify_position(up_order, 74990.0), "LOSING")
         self.assertEqual(classify_position(down_order, 74990.0), "WINNING")
         self.assertEqual(classify_position(down_order, 75000.0), "TIED")
+
+    def test_describe_target_marks_approximate_threshold(self):
+        order = ActivePaperOrder(
+            market_slug="btc-updown-5m-1",
+            market_title="Period 1",
+            side="DOWN",
+            shares=5.0,
+            entry_price=0.45,
+            token_id="token-down",
+            target_btc_price=75000.0,
+            entry_btc_price=74990.0,
+            target_is_approximate=True,
+        )
+
+        self.assertEqual(
+            describe_target(order),
+            "BTC must finish below approximately 75000.00",
+        )
 
 
 if __name__ == "__main__":

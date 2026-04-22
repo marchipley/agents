@@ -142,6 +142,36 @@ class TestBtcLlmDecision(unittest.TestCase):
         self.assertEqual(decision.confidence, 0.0)
         self.assertEqual(decision.reason, "recovered")
 
+    def test_gemini_read_timeout_retries_and_recovers(self):
+        success_response = requests.Response()
+        success_response.status_code = 200
+        success_response._content = (
+            b'{"candidates":[{"content":{"parts":[{"text":"{\\"decision\\":\\"UP\\",\\"confidence\\":0.77,\\"max_price_to_pay\\":0.58,\\"reason\\":\\"timeout recovered\\"}"}]}}]}'
+        )
+
+        with patch(
+            "custom.btc_agent.llm_decision.get_llm_config",
+            return_value=Mock(
+                engine="gemini",
+                api_key="test-key",
+                model="gemini-2.5-flash",
+                gemini_connect_timeout_seconds=11.0,
+                gemini_read_timeout_seconds=61.0,
+                gemini_max_attempts=4,
+                gemini_retry_backoff_seconds=2.0,
+            ),
+        ), patch(
+            "custom.btc_agent.llm_decision.requests.post",
+            side_effect=[requests.ReadTimeout("read timed out"), success_response],
+        ) as mock_post, patch(
+            "custom.btc_agent.llm_decision.time.sleep",
+        ):
+            decision = decide_trade(DummyFeatures(), DummyMarket())
+
+        self.assertEqual(decision.side, "UP")
+        self.assertAlmostEqual(decision.confidence, 0.77)
+        self.assertEqual(mock_post.call_args_list[0].kwargs["timeout"], (11.0, 61.0))
+
 
 if __name__ == "__main__":
     unittest.main()

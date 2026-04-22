@@ -125,7 +125,16 @@ def _response_error_message(response: requests.Response) -> str:
     return f"HTTP {response.status_code}: {body or response.reason}"
 
 
-def _request_gemini_decision(model: str, api_key: str, system_prompt: str, user_prompt: str) -> str:
+def _request_gemini_decision(
+    model: str,
+    api_key: str,
+    system_prompt: str,
+    user_prompt: str,
+    connect_timeout_seconds: float = 10.0,
+    read_timeout_seconds: float = 45.0,
+    max_attempts: int = 4,
+    retry_backoff_seconds: float = 2.0,
+) -> str:
     url = (
         "https://generativelanguage.googleapis.com/v1beta/models/"
         f"{model}:generateContent"
@@ -161,28 +170,31 @@ def _request_gemini_decision(model: str, api_key: str, system_prompt: str, user_
     }
     last_error = None
 
-    for attempt in range(3):
+    for attempt in range(max_attempts):
         try:
             response = requests.post(
                 url,
                 params={"key": api_key},
                 json=payload,
-                timeout=30,
+                timeout=(connect_timeout_seconds, read_timeout_seconds),
             )
-            if response.status_code in _RETRYABLE_HTTP_STATUS_CODES and attempt < 2:
+            if (
+                response.status_code in _RETRYABLE_HTTP_STATUS_CODES
+                and attempt < max_attempts - 1
+            ):
                 last_error = RuntimeError(
                     f"Gemini request failed: {_response_error_message(response)}"
                 )
-                time.sleep(1.5 * (attempt + 1))
+                time.sleep(retry_backoff_seconds * (attempt + 1))
                 continue
 
             response.raise_for_status()
             break
         except requests.RequestException as exc:
             last_error = exc
-            if attempt >= 2:
+            if attempt >= max_attempts - 1:
                 raise RuntimeError(f"Gemini request failed: {exc}") from exc
-            time.sleep(1.5 * (attempt + 1))
+            time.sleep(retry_backoff_seconds * (attempt + 1))
     else:
         raise RuntimeError(f"Gemini request failed: {last_error}")
 
@@ -204,12 +216,20 @@ def _request_gemini_decision_with_parse_retry(
     api_key: str,
     system_prompt: str,
     user_prompt: str,
+    connect_timeout_seconds: float = 10.0,
+    read_timeout_seconds: float = 45.0,
+    max_attempts: int = 4,
+    retry_backoff_seconds: float = 2.0,
 ) -> dict:
     raw_text = _request_gemini_decision(
         model=model,
         api_key=api_key,
         system_prompt=system_prompt,
         user_prompt=user_prompt,
+        connect_timeout_seconds=connect_timeout_seconds,
+        read_timeout_seconds=read_timeout_seconds,
+        max_attempts=max_attempts,
+        retry_backoff_seconds=retry_backoff_seconds,
     )
     try:
         return _extract_json_payload(raw_text)
@@ -232,14 +252,47 @@ def _request_gemini_decision_with_parse_retry(
             api_key=api_key,
             system_prompt=system_prompt,
             user_prompt=retry_prompt,
+            connect_timeout_seconds=connect_timeout_seconds,
+            read_timeout_seconds=read_timeout_seconds,
+            max_attempts=max_attempts,
+            retry_backoff_seconds=retry_backoff_seconds,
         )
         return _extract_json_payload(retry_text)
+
+
+def _coerce_config_value(raw_value: object, caster, default):
+    try:
+        return caster(raw_value)
+    except (TypeError, ValueError):
+        return default
 
 
 def decide_trade(features: BtcFeatures, market: BtcUpDownMarket) -> LlmDecision:
     cfg = get_llm_config()
     system_prompt = _build_system_prompt()
     user_prompt = _build_user_prompt(features, market)
+    gemini_connect_timeout_seconds = _coerce_config_value(
+        getattr(cfg, "gemini_connect_timeout_seconds", 10.0),
+        float,
+        10.0,
+    )
+    gemini_read_timeout_seconds = _coerce_config_value(
+        getattr(cfg, "gemini_read_timeout_seconds", 45.0),
+        float,
+        45.0,
+    )
+    gemini_max_attempts = max(
+        _coerce_config_value(getattr(cfg, "gemini_max_attempts", 4), int, 4),
+        1,
+    )
+    gemini_retry_backoff_seconds = max(
+        _coerce_config_value(
+            getattr(cfg, "gemini_retry_backoff_seconds", 2.0),
+            float,
+            2.0,
+        ),
+        0.0,
+    )
 
     try:
         if cfg.engine == "openai":
@@ -256,6 +309,10 @@ def decide_trade(features: BtcFeatures, market: BtcUpDownMarket) -> LlmDecision:
                 api_key=cfg.api_key,
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
+                connect_timeout_seconds=gemini_connect_timeout_seconds,
+                read_timeout_seconds=gemini_read_timeout_seconds,
+                max_attempts=gemini_max_attempts,
+                retry_backoff_seconds=gemini_retry_backoff_seconds,
             )
         else:
             raise RuntimeError(f"Unsupported AI engine: {cfg.engine}")

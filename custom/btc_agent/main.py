@@ -26,6 +26,7 @@ from .paper_state import (
 )
 from scripts.python.check_public_ip_indonesia import (
     check_current_public_ip_location,
+    is_allowed_location,
 )
 
 
@@ -42,10 +43,7 @@ def _fmt(value):
 
 def print_ip_location(public_ip, location, debug: bool) -> None:
     print(f"public_ip: {public_ip or 'unknown'}")
-    print(
-        f"is_indonesia: "
-        f"{str(str(location.get('country', '')).strip().lower() == 'indonesia' or str(location.get('country_code', '')).strip().lower() == 'id').lower()}"
-    )
+    print(f"is_allowed_location: {str(is_allowed_location(location)).lower()}")
     print(f"lookup_success: {str(bool(location.get('success', False))).lower()}")
     print(f"country: {location.get('country', 'unknown')}")
     if not debug:
@@ -209,11 +207,13 @@ def run_once() -> None:
     if cfg.debug:
         print("Market found:")
         print(f"  title      = {market.title}")
+        print(f"  question   = {market.question}")
         print(f"  slug       = {market.slug}")
         print(f"  event_id   = {market.event_id}")
         print(f"  market_id  = {market.market_id}")
         print(f"  up_token   = {market.up_token_id}")
         print(f"  down_token = {market.down_token_id}")
+        print(f"  threshold  = {_fmt(market.settlement_threshold)}")
 
     print_quote_snapshot("UP", market.up_token_id, debug=cfg.debug)
     print_quote_snapshot("DOWN", market.down_token_id, debug=cfg.debug)
@@ -244,6 +244,11 @@ def run_once() -> None:
     print_trade_execution_result(result, debug=cfg.debug)
 
     if result.executed and decision.side in ("UP", "DOWN") and result.token_id:
+        target_btc_price = market.settlement_threshold
+        target_is_approximate = target_btc_price is None
+        if target_btc_price is None:
+            target_btc_price = features.window_open_price
+
         record_executed_trade(
             ActivePaperOrder(
                 market_slug=market.slug,
@@ -252,8 +257,9 @@ def run_once() -> None:
                 shares=result.size,
                 entry_price=result.price,
                 token_id=result.token_id,
-                target_btc_price=features.window_open_price,
+                target_btc_price=target_btc_price,
                 entry_btc_price=features.price_usd,
+                target_is_approximate=target_is_approximate,
             )
         )
 
@@ -264,14 +270,17 @@ def run_once() -> None:
         print("-" * 80)
 
 
-def enforce_indonesia_ip() -> None:
+def enforce_allowed_ip_location() -> None:
     cfg = get_trading_config()
     print("Checking public IP geolocation...")
-    public_ip, location, ip_is_indonesia = check_current_public_ip_location()
+    public_ip, location, ip_is_allowed = check_current_public_ip_location()
     print_ip_location(public_ip, location, debug=cfg.debug)
 
-    if not ip_is_indonesia:
-        print("ERROR: Public IP geolocation is not Indonesia. Aborting BTC agent startup.")
+    if not ip_is_allowed:
+        print(
+            "ERROR: Public IP geolocation is not in an allowed country "
+            "(Indonesia or Mexico). Aborting BTC agent startup."
+        )
         sys.exit(1)
 
 
@@ -279,7 +288,7 @@ def main() -> None:
     cfg = get_trading_config()
     if cfg.debug:
         print(f"Starting BTC agent (paper_trading={cfg.paper_trading})")
-    enforce_indonesia_ip()
+    enforce_allowed_ip_location()
 
     interval = int(os.getenv("BTC_AGENT_LOOP_INTERVAL", "30"))
 

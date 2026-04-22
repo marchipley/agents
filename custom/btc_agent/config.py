@@ -41,6 +41,10 @@ class LlmConfig:
     engine: str
     api_key: str
     model: str
+    gemini_connect_timeout_seconds: float = 10.0
+    gemini_read_timeout_seconds: float = 30.0
+    gemini_max_attempts: int = 3
+    gemini_retry_backoff_seconds: float = 1.5
 
 @dataclass
 class TradingConfig:
@@ -82,7 +86,19 @@ def get_llm_config() -> LlmConfig:
         if not api_key:
             raise RuntimeError("GEMINI_API_KEY is not set in .env")
         model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip() or "gemini-2.5-flash"
-        return LlmConfig(engine="gemini", api_key=api_key, model=model)
+        connect_timeout = float(os.getenv("GEMINI_CONNECT_TIMEOUT_SECONDS", "10"))
+        read_timeout = float(os.getenv("GEMINI_READ_TIMEOUT_SECONDS", "45"))
+        max_attempts = max(int(os.getenv("GEMINI_MAX_ATTEMPTS", "4")), 1)
+        retry_backoff = max(float(os.getenv("GEMINI_RETRY_BACKOFF_SECONDS", "2.0")), 0.0)
+        return LlmConfig(
+            engine="gemini",
+            api_key=api_key,
+            model=model,
+            gemini_connect_timeout_seconds=connect_timeout,
+            gemini_read_timeout_seconds=read_timeout,
+            gemini_max_attempts=max_attempts,
+            gemini_retry_backoff_seconds=retry_backoff,
+        )
 
     raise RuntimeError("AI_ENGINE must be one of: OPENAI, GEMINI")
 

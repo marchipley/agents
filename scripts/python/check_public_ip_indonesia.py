@@ -9,6 +9,8 @@ import requests
 
 IPIFY_URL = "https://api.ipify.org?format=json"
 IPWHOIS_URL_TEMPLATE = "https://ipwho.is/{ip}"
+ALLOWED_COUNTRY_CODES = {"id", "mx"}
+ALLOWED_COUNTRY_NAMES = {"indonesia", "mexico"}
 
 
 def get_public_ip(timeout: float) -> Optional[str]:
@@ -41,16 +43,11 @@ def get_ip_location(ip: str, timeout: float) -> Dict[str, Any]:
     return payload
 
 
-def is_indonesia(location: Dict[str, Any]) -> bool:
+def is_allowed_location(location: Dict[str, Any]) -> bool:
     country = str(location.get("country", "")).strip().lower()
     country_code = str(location.get("country_code", "")).strip().lower()
-    continent = str(location.get("continent", "")).strip().lower()
 
-    return (
-        country == "indonesia"
-        or country_code == "id"
-        or (country == "indonesia" and continent == "asia")
-    )
+    return country in ALLOWED_COUNTRY_NAMES or country_code in ALLOWED_COUNTRY_CODES
 
 
 def check_current_public_ip_location(
@@ -66,12 +63,12 @@ def check_current_public_ip_location(
         return None, location, False
 
     location = get_ip_location(public_ip, timeout=timeout)
-    return public_ip, location, is_indonesia(location)
+    return public_ip, location, is_allowed_location(location)
 
 
 def print_location(ip: Optional[str], location: Dict[str, Any]) -> None:
     print(f"public_ip: {ip or 'unknown'}")
-    print(f"is_indonesia: {str(is_indonesia(location)).lower()}")
+    print(f"is_allowed_location: {str(is_allowed_location(location)).lower()}")
     print(f"lookup_success: {str(bool(location.get('success', False))).lower()}")
     print(f"country: {location.get('country', 'unknown')}")
     print(f"country_code: {location.get('country_code', 'unknown')}")
@@ -92,7 +89,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Print the current public IP and its geolocation, then exit with "
-            "status 0 if the IP is in Indonesia and 1 otherwise."
+            "status 0 if the IP is in an allowed country (currently Indonesia or "
+            "Mexico) and 1 otherwise."
         )
     )
     parser.add_argument(
@@ -106,11 +104,11 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    public_ip, location, ip_is_indonesia = check_current_public_ip_location(
+    public_ip, location, ip_is_allowed = check_current_public_ip_location(
         timeout=args.timeout
     )
     print_location(public_ip, location)
-    return 0 if ip_is_indonesia else 1
+    return 0 if ip_is_allowed else 1
 
 
 if __name__ == "__main__":

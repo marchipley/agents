@@ -16,6 +16,7 @@ class ActivePaperOrder:
     token_id: str
     target_btc_price: float
     entry_btc_price: float
+    target_is_approximate: bool = False
     placed_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -70,4 +71,5 @@ def classify_position(order: ActivePaperOrder, current_btc_price: float) -> Posi
 
 def describe_target(order: ActivePaperOrder) -> str:
     direction = "above" if order.side == "UP" else "below"
-    return f"BTC must finish {direction} {order.target_btc_price:.2f}"
+    qualifier = "approximately " if order.target_is_approximate else ""
+    return f"BTC must finish {direction} {qualifier}{order.target_btc_price:.2f}"

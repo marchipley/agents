@@ -27,7 +27,7 @@ Execution flow per loop tick:
 
 1. Load env/config from [custom/btc_agent/config.py](/appl/agents/custom/btc_agent/config.py:1).
 2. Run the public-IP geolocation check from [scripts/python/check_public_ip_indonesia.py](/appl/agents/scripts/python/check_public_ip_indonesia.py:1).
-3. Abort startup immediately if the public IP does not resolve to Indonesia.
+3. Abort startup immediately if the public IP does not resolve to an allowed location, currently Indonesia or Mexico.
 4. Print wallet/account balances via helpers in [custom/btc_agent/executor.py](/appl/agents/custom/btc_agent/executor.py:1).
 5. Resolve the active BTC Up/Down market slug in [custom/btc_agent/market_lookup.py](/appl/agents/custom/btc_agent/market_lookup.py:1).
 6. Fetch current quotes for both outcome tokens.
@@ -62,7 +62,7 @@ Inherited upstream framework:
 Scripts:
 
 - `launch_btc_agent.sh`: local launcher for the BTC agent.
-- `scripts/python/check_public_ip_indonesia.py`: standalone utility to print the public IP and geolocation, then return success only when the geolocation resolves to Indonesia.
+- `scripts/python/check_public_ip_indonesia.py`: standalone utility to print the public IP and geolocation, then return success only when the geolocation resolves to an allowed country, currently Indonesia or Mexico.
 - `scripts/python/cli.py`: inherited Typer CLI for the upstream agent workflow.
 
 Tests:
@@ -83,6 +83,10 @@ Optional / supported:
 - `AI_ENGINE` supported values: `OPENAI`, `GEMINI`
 - `OPENAI_MODEL` default: `gpt-4.1-mini`
 - `GEMINI_MODEL` default: `gemini-2.5-flash`
+- `GEMINI_CONNECT_TIMEOUT_SECONDS` default: `10`
+- `GEMINI_READ_TIMEOUT_SECONDS` default: `45`
+- `GEMINI_MAX_ATTEMPTS` default: `4`
+- `GEMINI_RETRY_BACKOFF_SECONDS` default: `2.0`
 - `USE_PAPER_TRADES` default: `true`
 - `BTC_AGENT_LIVE_FEE_RATE_BPS` default: `1000`
 - `BTC_AGENT_LIVE_MIN_ORDER_USD` default: `1`
@@ -112,8 +116,9 @@ What the BTC agent does today:
 - Approximates window-open price using the earliest retained BTC sample inside the current 5-minute market window, not a true historical open fetched from a historical BTC data source.
 - Falls back across multiple live BTC spot-price APIs first, then to the most recent in-memory BTC price sample when all configured live price requests fail during the current process lifetime, which prevents active paper-order reporting from aborting immediately on a single-provider rate-limit response after recent successful samples.
 - Uses the current 5-minute BTC Up/Down slug by timestamp alignment, unless overridden.
-- Performs a startup IP geolocation check and refuses to run unless the current public IP resolves to Indonesia.
+- Performs a startup IP geolocation check and refuses to run unless the current public IP resolves to an allowed country, currently Indonesia or Mexico.
 - Uses the configured AI engine with JSON output to decide `UP`, `DOWN`, or `NO_TRADE`.
+- Retries Gemini LLM calls across configurable attempts with separate connect/read timeouts before converting the failure into a `NO_TRADE`.
 - Computes a reference price from quote, midpoint, last trade, and order book data.
 - Reuses a single decision-time token quote snapshot for both the printed `UP/DOWN (with decision)` block and the paper execution gate so those logs cannot diverge within one loop tick.
 - Prints the exact execution snapshot used by the paper-trade path, including the calculated `reference_price`, `target_limit_price`, and `recommended_limit_price`.
@@ -207,7 +212,7 @@ Do not revert unrelated local changes unless the user explicitly asks for that.
 - Added `scripts/python/check_public_ip_indonesia.py` to print the current public IP and geolocation and return success only when the detected location is Indonesia.
 - Recreated `AGENTS.md` after accidental deletion, preserving the prior project context and maintenance guidance.
 - Updated BTC account balance handling to stop using `https://polygon-rpc.com` as the default Polygon RPC, add ordered RPC fallback support via `POLYGON_RPC_URLS`, and separate cash-balance failures from portfolio-balance failures in the printed account snapshot.
-- Added a hard startup gate in `custom/btc_agent/main.py` that runs the Indonesia public-IP check and aborts execution before any further BTC-agent logic when the detected location is not Indonesia.
+- Added a hard startup gate in `custom/btc_agent/main.py` that runs the public-IP check and aborts execution before any further BTC-agent logic when the detected location is not in the allowed-country set.
 - Adjusted `scripts/python/check_public_ip_indonesia.py` type annotations to remain compatible with the repo’s Python 3.9 runtime after the Indonesia startup gate was added.
 - Updated the BTC paper-trading loop to log the exact execution snapshot and to reuse a single decision-time quote snapshot end-to-end per tick, eliminating mismatches between the printed `UP/DOWN (with decision)` snapshot and the final paper execution result.
 - Added `BTC_AGENT_TRADE_SHARES_SIZE` and `BTC_AGENT_MAX_TRADES_PER_PERIOD`, switched paper-trade sizing to fixed shares with a minimum of 5, and introduced per-period in-memory active paper-order tracking so the loop can stop decisioning after the trade limit is reached and report each active order’s BTC target plus winning/losing status until the next 5-minute window starts.
@@ -223,3 +228,5 @@ Do not revert unrelated local changes unless the user explicitly asks for that.
 
 - Added `AI_ENGINE`-based LLM selection so the BTC agent can route decisions through OpenAI or Gemini using the matching provider API key from `.env`.
 - Updated `.env.example` to document the active BTC-agent AI-engine and model environment variables.
+- Added configurable Gemini connect/read timeouts plus retry/backoff controls so transient Google API stalls are less likely to degrade the BTC loop into repeated `NO_TRADE` decisions.
+- Expanded the startup geolocation allowlist so the public IP check now accepts Mexico in addition to Indonesia.
