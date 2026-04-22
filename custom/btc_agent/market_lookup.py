@@ -3,12 +3,12 @@
 import json
 import os
 import re
-import requests
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
 
 from .config import get_polymarket_config, get_trading_config
+from .network import http_get
 
 @dataclass
 class BtcUpDownMarket:
@@ -36,7 +36,7 @@ def _current_btc_5m_slug() -> str:
 def _fetch_event_by_slug(slug: str) -> dict:
     cfg = get_polymarket_config()
     url = f"{cfg.gamma_api}/events/slug/{slug}"
-    resp = requests.get(url, timeout=10)
+    resp = http_get(url, timeout=10)
     resp.raise_for_status()
     return resp.json()
 

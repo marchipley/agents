@@ -39,7 +39,14 @@ class TestBtcLlmDecision(unittest.TestCase):
 
         with patch(
             "custom.btc_agent.llm_decision.get_llm_config",
-            return_value=Mock(engine="gemini", api_key="test-key", model="gemini-2.5-flash"),
+            return_value=Mock(
+                engine="gemini",
+                api_key="test-key",
+                model="gemini-2.5-flash",
+                api_connection_timeout_seconds=10.0,
+                api_connection_retry_timer_seconds=2.0,
+                api_connection_retry_attempts=3,
+            ),
         ), patch(
             "custom.btc_agent.llm_decision.requests.post",
             side_effect=[error_response, success_response],
@@ -58,7 +65,14 @@ class TestBtcLlmDecision(unittest.TestCase):
 
         with patch(
             "custom.btc_agent.llm_decision.get_llm_config",
-            return_value=Mock(engine="gemini", api_key="test-key", model="gemini-2.5-flash"),
+            return_value=Mock(
+                engine="gemini",
+                api_key="test-key",
+                model="gemini-2.5-flash",
+                api_connection_timeout_seconds=10.0,
+                api_connection_retry_timer_seconds=2.0,
+                api_connection_retry_attempts=3,
+            ),
         ), patch(
             "custom.btc_agent.llm_decision.requests.post",
             return_value=error_response,
@@ -80,7 +94,14 @@ class TestBtcLlmDecision(unittest.TestCase):
 
         with patch(
             "custom.btc_agent.llm_decision.get_llm_config",
-            return_value=Mock(engine="gemini", api_key="test-key", model="gemini-2.5-flash"),
+            return_value=Mock(
+                engine="gemini",
+                api_key="test-key",
+                model="gemini-2.5-flash",
+                api_connection_timeout_seconds=10.0,
+                api_connection_retry_timer_seconds=2.0,
+                api_connection_retry_attempts=3,
+            ),
         ), patch(
             "custom.btc_agent.llm_decision.requests.post",
             return_value=wrapped_response,
@@ -106,7 +127,14 @@ class TestBtcLlmDecision(unittest.TestCase):
 
         with patch(
             "custom.btc_agent.llm_decision.get_llm_config",
-            return_value=Mock(engine="gemini", api_key="test-key", model="gemini-2.5-flash"),
+            return_value=Mock(
+                engine="gemini",
+                api_key="test-key",
+                model="gemini-2.5-flash",
+                api_connection_timeout_seconds=10.0,
+                api_connection_retry_timer_seconds=2.0,
+                api_connection_retry_attempts=3,
+            ),
         ), patch(
             "custom.btc_agent.llm_decision.requests.post",
             side_effect=[bad_response, good_response],
@@ -131,7 +159,14 @@ class TestBtcLlmDecision(unittest.TestCase):
 
         with patch(
             "custom.btc_agent.llm_decision.get_llm_config",
-            return_value=Mock(engine="gemini", api_key="test-key", model="gemini-2.5-flash"),
+            return_value=Mock(
+                engine="gemini",
+                api_key="test-key",
+                model="gemini-2.5-flash",
+                api_connection_timeout_seconds=10.0,
+                api_connection_retry_timer_seconds=2.0,
+                api_connection_retry_attempts=3,
+            ),
         ), patch(
             "custom.btc_agent.llm_decision.requests.post",
             side_effect=[truncated_response, recovered_response],
@@ -141,6 +176,62 @@ class TestBtcLlmDecision(unittest.TestCase):
         self.assertEqual(decision.side, "NO_TRADE")
         self.assertEqual(decision.confidence, 0.0)
         self.assertEqual(decision.reason, "recovered")
+
+    def test_gemini_truncated_json_salvages_partial_payload(self):
+        partially_truncated_response = requests.Response()
+        partially_truncated_response.status_code = 200
+        partially_truncated_response._content = (
+            b'{"candidates":[{"content":{"parts":[{"text":"{\\"decision\\":\\"NO_TRADE\\",\\"confidence\\":0.8,\\"max_price_to_pay\\":0,\\"reason\\":\\"Insufficient real-time market data to establish a high-confidence directional bias for"}]}}]}'
+        )
+
+        with patch(
+            "custom.btc_agent.llm_decision.get_llm_config",
+            return_value=Mock(
+                engine="gemini",
+                api_key="test-key",
+                model="gemini-3.1-pro-preview",
+                api_connection_timeout_seconds=10.0,
+                api_connection_retry_timer_seconds=2.0,
+                api_connection_retry_attempts=3,
+            ),
+        ), patch(
+            "custom.btc_agent.llm_decision.requests.post",
+            return_value=partially_truncated_response,
+        ):
+            decision = decide_trade(DummyFeatures(), DummyMarket())
+
+        self.assertEqual(decision.side, "NO_TRADE")
+        self.assertEqual(decision.confidence, 0.8)
+        self.assertEqual(decision.max_price_to_pay, 0.0)
+        self.assertIn("Insufficient real-time market data", decision.reason)
+
+    def test_gemini_truncated_no_trade_prefix_defaults_missing_numeric_fields(self):
+        partially_truncated_response = requests.Response()
+        partially_truncated_response.status_code = 200
+        partially_truncated_response._content = (
+            b'{"candidates":[{"content":{"parts":[{"text":"{\\"decision\\":\\"NO_TRADE\\",\\"confidence"}]}}]}'
+        )
+
+        with patch(
+            "custom.btc_agent.llm_decision.get_llm_config",
+            return_value=Mock(
+                engine="gemini",
+                api_key="test-key",
+                model="gemini-3.1-pro-preview",
+                api_connection_timeout_seconds=10.0,
+                api_connection_retry_timer_seconds=2.0,
+                api_connection_retry_attempts=3,
+            ),
+        ), patch(
+            "custom.btc_agent.llm_decision.requests.post",
+            return_value=partially_truncated_response,
+        ):
+            decision = decide_trade(DummyFeatures(), DummyMarket())
+
+        self.assertEqual(decision.side, "NO_TRADE")
+        self.assertEqual(decision.confidence, 0.0)
+        self.assertEqual(decision.max_price_to_pay, 0.0)
+        self.assertEqual(decision.reason, "Truncated NO_TRADE response")
 
     def test_gemini_read_timeout_retries_and_recovers(self):
         success_response = requests.Response()
@@ -155,10 +246,9 @@ class TestBtcLlmDecision(unittest.TestCase):
                 engine="gemini",
                 api_key="test-key",
                 model="gemini-2.5-flash",
-                gemini_connect_timeout_seconds=11.0,
-                gemini_read_timeout_seconds=61.0,
-                gemini_max_attempts=4,
-                gemini_retry_backoff_seconds=2.0,
+                api_connection_timeout_seconds=11.0,
+                api_connection_retry_timer_seconds=2.0,
+                api_connection_retry_attempts=4,
             ),
         ), patch(
             "custom.btc_agent.llm_decision.requests.post",
@@ -170,7 +260,36 @@ class TestBtcLlmDecision(unittest.TestCase):
 
         self.assertEqual(decision.side, "UP")
         self.assertAlmostEqual(decision.confidence, 0.77)
-        self.assertEqual(mock_post.call_args_list[0].kwargs["timeout"], (11.0, 61.0))
+        self.assertEqual(mock_post.call_args_list[0].kwargs["timeout"], 11.0)
+
+    def test_gemini_logs_each_attempt_and_returns_no_trade_after_final_failure(self):
+        with patch(
+            "custom.btc_agent.llm_decision.get_llm_config",
+            return_value=Mock(
+                engine="gemini",
+                api_key="test-key",
+                model="gemini-2.5-flash",
+                api_connection_timeout_seconds=10.0,
+                api_connection_retry_timer_seconds=1.0,
+                api_connection_retry_attempts=2,
+            ),
+        ), patch(
+            "custom.btc_agent.llm_decision.requests.post",
+            side_effect=[
+                requests.ReadTimeout("first timeout"),
+                requests.ReadTimeout("second timeout"),
+            ],
+        ), patch(
+            "custom.btc_agent.llm_decision.time.sleep",
+        ), patch(
+            "builtins.print",
+        ) as mock_print:
+            decision = decide_trade(DummyFeatures(), DummyMarket())
+
+        printed_lines = [" ".join(str(arg) for arg in call.args) for call in mock_print.call_args_list]
+        self.assertTrue(any("LLM attempt 1/2 (gemini/gemini-2.5-flash) failed" in line for line in printed_lines))
+        self.assertTrue(any("LLM attempt 2/2 (gemini/gemini-2.5-flash) failed" in line for line in printed_lines))
+        self.assertEqual(decision.side, "NO_TRADE")
 
 
 if __name__ == "__main__":

@@ -83,10 +83,12 @@ Optional / supported:
 - `AI_ENGINE` supported values: `OPENAI`, `GEMINI`
 - `OPENAI_MODEL` default: `gpt-4.1-mini`
 - `GEMINI_MODEL` default: `gemini-2.5-flash`
-- `GEMINI_CONNECT_TIMEOUT_SECONDS` default: `10`
-- `GEMINI_READ_TIMEOUT_SECONDS` default: `45`
-- `GEMINI_MAX_ATTEMPTS` default: `4`
-- `GEMINI_RETRY_BACKOFF_SECONDS` default: `2.0`
+- `API_CONNECTION_TIMEOUT` default: `10`
+- `API_CONNECTION_RETRY_TIMER` default: `2.0`
+- `API_CONNECTION_RETRY_ATTEMPTS` default: `3`
+- `ALL_PROXY` optional global proxy setting for outbound API calls; for Mullvad WireGuard the intended SOCKS5 value is `socks5h://10.64.0.1:1080`
+- `HTTP_PROXY` / `HTTPS_PROXY` optional proxy settings for outbound API calls, including LLM requests and geolocation checks
+- `NO_PROXY` optional bypass list for local addresses
 - `USE_PAPER_TRADES` default: `true`
 - `BTC_AGENT_LIVE_FEE_RATE_BPS` default: `1000`
 - `BTC_AGENT_LIVE_MIN_ORDER_USD` default: `1`
@@ -106,6 +108,8 @@ Optional / supported:
 Notes:
 
 - `config.py` loads `.env` from the repo root, so local execution assumes a root-level `.env`.
+- `launch_btc_agent.sh` exports `.env` before starting Python so proxy variables such as `HTTP_PROXY` and `HTTPS_PROXY` are available to the full launch path.
+- The active BTC-agent runtime normalizes `ALL_PROXY=socks5://...` to `socks5h://...` for `requests` traffic and to `socks5://...` for the OpenAI HTTPX client so Mullvad SOCKS routing works consistently.
 
 ## Current Behavior
 
@@ -117,8 +121,10 @@ What the BTC agent does today:
 - Falls back across multiple live BTC spot-price APIs first, then to the most recent in-memory BTC price sample when all configured live price requests fail during the current process lifetime, which prevents active paper-order reporting from aborting immediately on a single-provider rate-limit response after recent successful samples.
 - Uses the current 5-minute BTC Up/Down slug by timestamp alignment, unless overridden.
 - Performs a startup IP geolocation check and refuses to run unless the current public IP resolves to an allowed country, currently Indonesia or Mexico.
+- Respects standard proxy environment variables such as `HTTP_PROXY` and `HTTPS_PROXY` for outbound requests when they are exported in the shell or defined in the repo `.env`.
+- Routes outbound BTC-agent requests through `ALL_PROXY` when configured, including geolocation, BTC spot pricing, Polymarket API lookups, and LLM calls.
 - Uses the configured AI engine with JSON output to decide `UP`, `DOWN`, or `NO_TRADE`.
-- Retries Gemini LLM calls across configurable attempts with separate connect/read timeouts before converting the failure into a `NO_TRADE`.
+- Retries LLM API calls across configurable attempts using a single per-attempt timeout, logs each attempt result to stdout, and converts repeated failures into a `NO_TRADE` so the loop can move on to the next tick.
 - Computes a reference price from quote, midpoint, last trade, and order book data.
 - Reuses a single decision-time token quote snapshot for both the printed `UP/DOWN (with decision)` block and the paper execution gate so those logs cannot diverge within one loop tick.
 - Prints the exact execution snapshot used by the paper-trade path, including the calculated `reference_price`, `target_limit_price`, and `recommended_limit_price`.
@@ -228,5 +234,7 @@ Do not revert unrelated local changes unless the user explicitly asks for that.
 
 - Added `AI_ENGINE`-based LLM selection so the BTC agent can route decisions through OpenAI or Gemini using the matching provider API key from `.env`.
 - Updated `.env.example` to document the active BTC-agent AI-engine and model environment variables.
-- Added configurable Gemini connect/read timeouts plus retry/backoff controls so transient Google API stalls are less likely to degrade the BTC loop into repeated `NO_TRADE` decisions.
+- Replaced the Gemini-specific timeout knobs with generic `API_CONNECTION_TIMEOUT`, `API_CONNECTION_RETRY_TIMER`, and `API_CONNECTION_RETRY_ATTEMPTS` controls so each LLM attempt is bounded, logged, and retried consistently before the BTC loop moves to the next tick.
 - Expanded the startup geolocation allowlist so the public IP check now accepts Mexico in addition to Indonesia.
+- Updated the launch path to export `.env` before startup and documented `HTTP_PROXY` / `HTTPS_PROXY` support so VPN or proxy-routed outbound traffic can be configured explicitly.
+- Added explicit SOCKS proxy support for Mullvad-style `ALL_PROXY` usage by routing active BTC-agent requests through normalized proxy settings and adding the required SOCKS client dependencies.

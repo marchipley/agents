@@ -7,6 +7,8 @@ import statistics
 
 import requests
 
+from .network import http_get
+
 # Simple in-memory history: list of (timestamp, price)
 _PRICE_HISTORY: List[Tuple[datetime, float]] = []
 _LAST_SUCCESSFUL_PROVIDER_INDEX = 0
@@ -24,7 +26,7 @@ class BtcFeatures:
 
 
 def _fetch_spot_price_from_coingecko() -> float:
-    resp = requests.get(
+    resp = http_get(
         "https://api.coingecko.com/api/v3/simple/price",
         params={"ids": "bitcoin", "vs_currencies": "usd"},
         timeout=10,
@@ -35,7 +37,7 @@ def _fetch_spot_price_from_coingecko() -> float:
 
 
 def _fetch_spot_price_from_coinbase() -> float:
-    resp = requests.get(
+    resp = http_get(
         "https://api.coinbase.com/v2/prices/BTC-USD/spot",
         timeout=10,
     )

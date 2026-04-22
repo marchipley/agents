@@ -9,6 +9,7 @@ from agents.polymarket.polymarket import Polymarket
 from .config import get_trading_config, get_polymarket_config
 from .llm_decision import LlmDecision
 from .market_lookup import BtcUpDownMarket
+from .network import http_get, http_post
 
 
 @dataclass
@@ -124,7 +125,7 @@ def _get_polygon_usdc_balance(address: str) -> Optional[float]:
         }
 
         try:
-            resp = requests.post(rpc_url, json=payload, timeout=10)
+            resp = http_post(rpc_url, json=payload, timeout=10)
             resp.raise_for_status()
             data = resp.json()
             raw_balance = data.get("result")
@@ -139,7 +140,7 @@ def _get_polygon_usdc_balance(address: str) -> Optional[float]:
 
 def _get_portfolio_value(address: str) -> Optional[float]:
     cfg = get_polymarket_config()
-    resp = requests.get(
+    resp = http_get(
         f"{cfg.data_api}/value",
         params={"user": address},
         timeout=10,
@@ -210,7 +211,7 @@ def get_account_balance_snapshot() -> AccountBalanceSnapshot:
 def _get_price_from_clob_single(token_id: str, side: str) -> Optional[float]:
     cfg = get_polymarket_config()
     url = f"{cfg.clob_api}/price"
-    resp = requests.get(
+    resp = http_get(
         url,
         params={"token_id": token_id, "side": side},
         timeout=10,
@@ -232,7 +233,7 @@ def _get_price_from_clob_multi(token_id: str, side: str) -> Optional[float]:
     cfg = get_polymarket_config()
     url = f"{cfg.clob_api}/prices"
     body: List[Dict[str, Any]] = [{"token_id": token_id, "side": side}]
-    resp = requests.post(url, json=body, timeout=10)
+    resp = http_post(url, json=body, timeout=10)
 
     if resp.status_code == 404:
         return None
@@ -253,7 +254,7 @@ def _get_price_from_clob_multi(token_id: str, side: str) -> Optional[float]:
 def _get_last_trade_price(token_id: str) -> Optional[float]:
     cfg = get_polymarket_config()
     url = f"{cfg.clob_api}/last-trade-price"
-    resp = requests.get(url, params={"token_id": token_id}, timeout=10)
+    resp = http_get(url, params={"token_id": token_id}, timeout=10)
 
     if resp.status_code == 404:
         return None
@@ -270,7 +271,7 @@ def _get_last_trade_price(token_id: str) -> Optional[float]:
 def _get_midpoint_price(token_id: str) -> Optional[float]:
     cfg = get_polymarket_config()
     url = f"{cfg.clob_api}/midpoint"
-    resp = requests.get(url, params={"token_id": token_id}, timeout=10)
+    resp = http_get(url, params={"token_id": token_id}, timeout=10)
 
     if resp.status_code == 404:
         return None
@@ -287,7 +288,7 @@ def _get_midpoint_price(token_id: str) -> Optional[float]:
 def _get_orderbook(token_id: str) -> Dict[str, Any]:
     cfg = get_polymarket_config()
     url = f"{cfg.clob_api}/book"
-    resp = requests.get(url, params={"token_id": token_id}, timeout=10)
+    resp = http_get(url, params={"token_id": token_id}, timeout=10)
 
     if resp.status_code == 404:
         return {}

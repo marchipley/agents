@@ -1,4 +1,8 @@
+import sys
+import types
 import unittest
+
+sys.modules.setdefault("dotenv", types.SimpleNamespace(load_dotenv=lambda *args, **kwargs: None))
 
 from scripts.python.check_public_ip_indonesia import is_allowed_location
 

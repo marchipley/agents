@@ -9,6 +9,7 @@ from .config import get_trading_config
 from .market_lookup import find_current_btc_updown_market
 from .indicators import build_btc_features, fetch_btc_spot_price
 from .llm_decision import decide_trade
+from .network import describe_proxy_configuration
 from .executor import (
     TokenQuoteSnapshot,
     get_account_balance_snapshot,
@@ -46,6 +47,11 @@ def print_ip_location(public_ip, location, debug: bool) -> None:
     print(f"is_allowed_location: {str(is_allowed_location(location)).lower()}")
     print(f"lookup_success: {str(bool(location.get('success', False))).lower()}")
     print(f"country: {location.get('country', 'unknown')}")
+
+    message = location.get("message")
+    if message:
+        print(f"message: {message}")
+
     if not debug:
         return
 
@@ -57,10 +63,6 @@ def print_ip_location(public_ip, location, debug: bool) -> None:
     print(f"longitude: {location.get('longitude', 'unknown')}")
     print(f"asn: {location.get('connection', {}).get('asn', 'unknown')}")
     print(f"org: {location.get('connection', {}).get('org', 'unknown')}")
-
-    message = location.get("message")
-    if message:
-        print(f"message: {message}")
 
 
 def print_quote_snapshot(label: str, token_id: str, decision=None, debug: bool = True) -> None:
@@ -286,6 +288,7 @@ def enforce_allowed_ip_location() -> None:
 
 def main() -> None:
     cfg = get_trading_config()
+    print(f"Network proxy: {describe_proxy_configuration()}")
     if cfg.debug:
         print(f"Starting BTC agent (paper_trading={cfg.paper_trading})")
     enforce_allowed_ip_location()

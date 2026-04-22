@@ -1,11 +1,18 @@
 #!/usr/bin/env python3
 
 import argparse
+import os
 import sys
 from typing import Any, Dict, Optional, Tuple
 
 import requests
+from dotenv import load_dotenv
 
+from custom.btc_agent.network import http_get
+
+
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+load_dotenv(os.path.join(REPO_ROOT, ".env"))
 
 IPIFY_URL = "https://api.ipify.org?format=json"
 IPWHOIS_URL_TEMPLATE = "https://ipwho.is/{ip}"
@@ -13,21 +20,23 @@ ALLOWED_COUNTRY_CODES = {"id", "mx"}
 ALLOWED_COUNTRY_NAMES = {"indonesia", "mexico"}
 
 
-def get_public_ip(timeout: float) -> Optional[str]:
+def get_public_ip(timeout: float) -> Tuple[Optional[str], Optional[str]]:
     try:
-        response = requests.get(IPIFY_URL, timeout=timeout)
+        response = http_get(IPIFY_URL, timeout=timeout)
         response.raise_for_status()
         payload = response.json()
-    except (requests.RequestException, ValueError):
-        return None
+    except (requests.RequestException, ValueError) as exc:
+        return None, f"Unable to determine public IP address: {exc}"
 
     ip = payload.get("ip")
-    return ip if isinstance(ip, str) and ip else None
+    if isinstance(ip, str) and ip:
+        return ip, None
+    return None, "Unable to determine public IP address: response did not include an IP"
 
 
 def get_ip_location(ip: str, timeout: float) -> Dict[str, Any]:
     try:
-        response = requests.get(IPWHOIS_URL_TEMPLATE.format(ip=ip), timeout=timeout)
+        response = http_get(IPWHOIS_URL_TEMPLATE.format(ip=ip), timeout=timeout)
         response.raise_for_status()
         payload = response.json()
     except (requests.RequestException, ValueError) as exc:
@@ -53,12 +62,12 @@ def is_allowed_location(location: Dict[str, Any]) -> bool:
 def check_current_public_ip_location(
     timeout: float = 10.0,
 ) -> Tuple[Optional[str], Dict[str, Any], bool]:
-    public_ip = get_public_ip(timeout=timeout)
+    public_ip, public_ip_error = get_public_ip(timeout=timeout)
 
     if public_ip is None:
         location = {
             "success": False,
-            "message": "Unable to determine public IP address.",
+            "message": public_ip_error or "Unable to determine public IP address.",
         }
         return None, location, False
 
