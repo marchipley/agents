@@ -13,7 +13,7 @@ from .executor import (
     TokenQuoteSnapshot,
     get_account_balance_snapshot,
     get_token_quote_snapshot,
-    maybe_execute_paper_trade,
+    maybe_execute_trade,
 )
 from .paper_state import (
     ActivePaperOrder,
@@ -124,10 +124,10 @@ def print_account_snapshot(debug: bool) -> None:
 def print_active_orders(current_btc_price: float) -> None:
     active_orders = get_active_orders()
     if not active_orders:
-        print("Active paper orders: None")
+        print("Active orders: None")
         return
 
-    print("Active paper orders:")
+    print("Active orders:")
     for idx, order in enumerate(active_orders, start=1):
         status = classify_position(order, current_btc_price)
         print(f"  order_{idx}_market_slug    = {order.market_slug}")
@@ -162,8 +162,8 @@ def print_llm_decision(decision, debug: bool) -> None:
     print(f"  reason            = {decision.reason}")
 
 
-def print_paper_execution_result(result, debug: bool) -> None:
-    print("Paper execution result:")
+def print_trade_execution_result(result, debug: bool) -> None:
+    print("Trade execution result:")
     print(f"  executed = {result.executed}")
     print(f"  side     = {result.side}")
     print(f"  size     = {result.size:.4f}")
@@ -234,10 +234,14 @@ def run_once() -> None:
         if cfg.debug:
             print_quote_snapshot_from_snapshot("DOWN (with decision)", decision_snapshot, debug=True)
 
-    result = maybe_execute_paper_trade(market, decision, snapshot=decision_snapshot)
+    try:
+        result = maybe_execute_trade(market, decision, snapshot=decision_snapshot)
+    except RuntimeError as exc:
+        print(f"ERROR: {exc}")
+        sys.exit(1)
     if result.execution_snapshot is not None and cfg.debug:
         print_quote_snapshot_from_snapshot("Execution", result.execution_snapshot, debug=True)
-    print_paper_execution_result(result, debug=cfg.debug)
+    print_trade_execution_result(result, debug=cfg.debug)
 
     if result.executed and decision.side in ("UP", "DOWN") and result.token_id:
         record_executed_trade(

@@ -43,8 +43,10 @@ class OpenAIConfig:
 
 @dataclass
 class TradingConfig:
-    paper_trading: bool = True
+    paper_trading: bool = _parse_bool_env("USE_PAPER_TRADES", True)
     debug: bool = _parse_bool_env("BTC_AGENT_DEBUG", False)
+    live_fee_rate_bps: int = int(os.getenv("BTC_AGENT_LIVE_FEE_RATE_BPS", "1000"))
+    live_min_order_usd: float = float(os.getenv("BTC_AGENT_LIVE_MIN_ORDER_USD", "1"))
     max_trade_usd: float = float(os.getenv("BTC_AGENT_MAX_TRADE_USD", "5"))
     trade_shares_size: float = max(float(os.getenv("BTC_AGENT_TRADE_SHARES_SIZE", "5")), 5.0)
     max_trades_per_period: int = max(int(os.getenv("BTC_AGENT_MAX_TRADES_PER_PERIOD", "1")), 1)

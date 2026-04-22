@@ -130,14 +130,16 @@ def build_btc_features(window_start_ts: int) -> BtcFeatures:
     price_now = fetch_btc_spot_price()
 
     prices = [p[1] for p in _PRICE_HISTORY]
+    window_start = datetime.fromtimestamp(window_start_ts, tz=timezone.utc)
+    window_prices = [price for ts, price in _PRICE_HISTORY if ts >= window_start]
 
-    # Approximate window open price as the earliest price we still have
-    window_open_price = prices[0] if prices else price_now
+    # Approximate window open price as the earliest retained sample in the current market window.
+    window_open_price = window_prices[0] if window_prices else price_now
 
     delta_pct = (price_now - window_open_price) / window_open_price if window_open_price else 0.0
     rsi = _compute_rsi(prices[-15:])
-    momentum_5m = price_now - window_open_price if len(prices) >= 2 else None
-    volatility_5m = statistics.pstdev(prices[-15:]) if len(prices) >= 2 else None
+    momentum_5m = price_now - window_open_price if len(window_prices) >= 2 else None
+    volatility_5m = statistics.pstdev(window_prices) if len(window_prices) >= 2 else None
 
     return BtcFeatures(
         as_of=now,

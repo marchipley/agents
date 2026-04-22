@@ -44,6 +44,7 @@ class Polymarket:
 
         self.chain_id = 137  # POLYGON
         self.private_key = os.getenv("POLYGON_WALLET_PRIVATE_KEY")
+        self.proxy_address = os.getenv("POLYMKT_PROXY_ADDRESS")
         self.polygon_rpc = "https://polygon-rpc.com"
         self.w3 = Web3(Web3.HTTPProvider(self.polygon_rpc))
 
@@ -70,9 +71,16 @@ class Polymarket:
         self._init_approvals(False)
 
     def _init_api_keys(self) -> None:
-        self.client = ClobClient(
-            self.clob_url, key=self.private_key, chain_id=self.chain_id
-        )
+        client_kwargs = {
+            "host": self.clob_url,
+            "key": self.private_key,
+            "chain_id": self.chain_id,
+        }
+        if self.proxy_address:
+            client_kwargs["signature_type"] = 2
+            client_kwargs["funder"] = self.proxy_address
+
+        self.client = ClobClient(**client_kwargs)
         self.credentials = self.client.create_or_derive_api_creds()
         self.client.set_api_creds(self.credentials)
         # print(self.credentials)
@@ -333,9 +341,15 @@ class Polymarket:
         order = builder.build_signed_order(order_data)
         return order
 
-    def execute_order(self, price, size, side, token_id) -> str:
+    def execute_order(self, price, size, side, token_id, fee_rate_bps: int = 0) -> str:
         return self.client.create_and_post_order(
-            OrderArgs(price=price, size=size, side=side, token_id=token_id)
+            OrderArgs(
+                price=price,
+                size=size,
+                side=side,
+                token_id=token_id,
+                fee_rate_bps=fee_rate_bps,
+            )
         )
 
     def execute_market_order(self, market, amount) -> str:

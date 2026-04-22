@@ -3,21 +3,23 @@
 import math
 import requests
 from dataclasses import dataclass
-from typing import Optional, Any, Dict, List
+from typing import Optional, Any, Dict, List, Tuple
 
+from agents.polymarket.polymarket import Polymarket
 from .config import get_trading_config, get_polymarket_config
 from .llm_decision import LlmDecision
 from .market_lookup import BtcUpDownMarket
 
 
 @dataclass
-class PaperTradeResult:
+class TradeExecutionResult:
     executed: bool
     side: Optional[str]
     size: float
     price: float
     token_id: Optional[str]
     reason: str
+    live_order_response: Optional[Any] = None
     execution_snapshot: Optional["TokenQuoteSnapshot"] = None
 
 
@@ -495,33 +497,52 @@ def get_best_buy_price(token_id: str) -> Optional[float]:
     return snapshot.reference_price
 
 
-def maybe_execute_paper_trade(
+def _build_rejected_trade_result(
+    *,
+    side: Optional[str],
+    size: float,
+    price: float,
+    token_id: Optional[str],
+    reason: str,
+    snapshot: Optional[TokenQuoteSnapshot],
+) -> TradeExecutionResult:
+    return TradeExecutionResult(
+        executed=False,
+        side=side,
+        size=size,
+        price=price,
+        token_id=token_id,
+        reason=reason,
+        live_order_response=None,
+        execution_snapshot=snapshot,
+    )
+
+
+def _validate_trade_candidate(
     market: BtcUpDownMarket,
     decision: LlmDecision,
     snapshot: Optional[TokenQuoteSnapshot] = None,
-) -> PaperTradeResult:
+) -> Tuple[Optional[TokenQuoteSnapshot], Optional[TradeExecutionResult]]:
     cfg = get_trading_config()
 
     if decision.side == "NO_TRADE":
-        return PaperTradeResult(
-            executed=False,
+        return None, _build_rejected_trade_result(
             side=None,
             size=0.0,
             price=0.0,
             token_id=None,
             reason=f"NO_TRADE from LLM: {decision.reason}",
-            execution_snapshot=None,
+            snapshot=None,
         )
 
     if decision.confidence < cfg.min_confidence:
-        return PaperTradeResult(
-            executed=False,
+        return None, _build_rejected_trade_result(
             side=decision.side,
             size=0.0,
             price=0.0,
             token_id=None,
             reason=f"Confidence {decision.confidence:.2f} < min {cfg.min_confidence:.2f}",
-            execution_snapshot=None,
+            snapshot=None,
         )
 
     token_id = market.up_token_id if decision.side == "UP" else market.down_token_id
@@ -532,63 +553,69 @@ def maybe_execute_paper_trade(
     recommended_limit_price = snapshot.recommended_limit_price
 
     if live_price is None:
-        return PaperTradeResult(
-            executed=False,
+        return None, _build_rejected_trade_result(
             side=decision.side,
             size=0.0,
             price=0.0,
             token_id=token_id,
             reason="No buy quote, midpoint, or last trade price available",
-            execution_snapshot=snapshot,
+            snapshot=snapshot,
         )
 
     if recommended_limit_price is None:
-        return PaperTradeResult(
-            executed=False,
+        return None, _build_rejected_trade_result(
             side=decision.side,
             size=0.0,
             price=live_price,
             token_id=token_id,
             reason="Could not determine recommended limit price",
-            execution_snapshot=snapshot,
+            snapshot=snapshot,
         )
 
     if not snapshot.ok_to_submit:
-        return PaperTradeResult(
-            executed=False,
+        return None, _build_rejected_trade_result(
             side=decision.side,
             size=0.0,
             price=recommended_limit_price,
             token_id=token_id,
             reason=f"Not safe to submit: {snapshot.submit_reason}",
-            execution_snapshot=snapshot,
+            snapshot=snapshot,
         )
 
     if live_price > decision.max_price_to_pay:
-        return PaperTradeResult(
-            executed=False,
+        return None, _build_rejected_trade_result(
             side=decision.side,
             size=0.0,
             price=live_price,
             token_id=token_id,
             reason=f"Reference price {live_price:.3f} exceeds LLM max {decision.max_price_to_pay:.3f}",
-            execution_snapshot=snapshot,
+            snapshot=snapshot,
         )
 
     if live_price > cfg.max_entry_price:
-        return PaperTradeResult(
-            executed=False,
+        return None, _build_rejected_trade_result(
             side=decision.side,
             size=0.0,
             price=live_price,
             token_id=token_id,
             reason=f"Reference price {live_price:.3f} exceeds max entry {cfg.max_entry_price:.3f}",
-            execution_snapshot=snapshot,
+            snapshot=snapshot,
         )
 
-    size = cfg.trade_shares_size
+    return snapshot, None
 
-    return PaperTradeResult(
+
+def _execute_paper_trade(
+    decision: LlmDecision,
+    snapshot: TokenQuoteSnapshot,
+) -> TradeExecutionResult:
+    cfg = get_trading_config()
+    live_price = snapshot.reference_price
+    recommended_limit_price = snapshot.recommended_limit_price
+    size = cfg.trade_shares_size
+    token_id = snapshot.token_id
+
+    return TradeExecutionResult(
         executed=True,
         side=decision.side,
         size=size,
@@ -599,5 +626,129 @@ def maybe_execute_paper_trade(
             f"for {size:.4f} shares "
             f"(reference={live_price:.3f}; {snapshot.submit_reason})"
         ),
+        live_order_response=None,
         execution_snapshot=snapshot,
     )
+
+
+def _estimate_live_fee(size: float, limit_price: float, fee_rate_bps: int) -> float:
+    notional = size * limit_price
+    return round(notional * (fee_rate_bps / 10_000), 6)
+
+
+def _get_order_notional(size: float, limit_price: float) -> float:
+    return round(size * limit_price, 6)
+
+
+def _scale_live_size_for_min_notional(
+    base_size: float,
+    limit_price: float,
+    min_order_usd: float,
+) -> float:
+    if limit_price <= 0:
+        raise RuntimeError("Cannot scale live order size with a non-positive limit price.")
+
+    min_size = min_order_usd / limit_price
+    scaled_size = max(base_size, min_size)
+    # Round up to 4 decimals so the post-rounding notional still meets the minimum.
+    return math.ceil(scaled_size * 10_000) / 10_000
+
+
+def _get_required_live_cash(size: float, limit_price: float, fee_rate_bps: int) -> float:
+    notional = _get_order_notional(size, limit_price)
+    estimated_fee = _estimate_live_fee(size, limit_price, fee_rate_bps)
+    return round(notional + estimated_fee, 6)
+
+
+def ensure_live_trade_cash_available(required_cash: float) -> AccountBalanceSnapshot:
+    account = get_account_balance_snapshot()
+    if account.cash_balance is None:
+        raise RuntimeError(
+            "Unable to verify live trading cash balance. Aborting live trading."
+        )
+    if account.cash_balance < required_cash:
+        raise RuntimeError(
+            "Not enough cash_balance_usdc to execute live trade: "
+            f"required={required_cash:.3f}, available={account.cash_balance:.3f}"
+        )
+    return account
+
+
+def _execute_live_trade(
+    decision: LlmDecision,
+    snapshot: TokenQuoteSnapshot,
+) -> TradeExecutionResult:
+    cfg = get_trading_config()
+
+    live_price = snapshot.reference_price
+    recommended_limit_price = snapshot.recommended_limit_price
+
+    if recommended_limit_price is None or live_price is None:
+        raise RuntimeError("Live trade execution called without a valid priced snapshot.")
+
+    size = _scale_live_size_for_min_notional(
+        cfg.trade_shares_size,
+        recommended_limit_price,
+        cfg.live_min_order_usd,
+    )
+    order_notional = _get_order_notional(size, recommended_limit_price)
+
+    estimated_fee = _estimate_live_fee(size, recommended_limit_price, cfg.live_fee_rate_bps)
+    required_cash = _get_required_live_cash(
+        size,
+        recommended_limit_price,
+        cfg.live_fee_rate_bps,
+    )
+    ensure_live_trade_cash_available(required_cash)
+
+    client = Polymarket()
+    try:
+        response = client.execute_order(
+            price=recommended_limit_price,
+            size=size,
+            side="BUY",
+            token_id=snapshot.token_id,
+            fee_rate_bps=cfg.live_fee_rate_bps,
+        )
+    except Exception as exc:
+        raise RuntimeError(f"Live order submission failed: {exc}") from exc
+
+    return TradeExecutionResult(
+        executed=True,
+        side=decision.side,
+        size=size,
+        price=recommended_limit_price,
+        token_id=snapshot.token_id,
+        reason=(
+            f"Live trade submitted at limit {recommended_limit_price:.3f} "
+            f"for {size:.4f} shares "
+            f"(reference={live_price:.3f}; order_notional={order_notional:.3f}; "
+            f"required_cash={required_cash:.3f}; "
+            f"estimated_fee={estimated_fee:.3f}; fee_rate_bps={cfg.live_fee_rate_bps}; "
+            f"{snapshot.submit_reason})"
+        ),
+        live_order_response=response,
+        execution_snapshot=snapshot,
+    )
+
+
+def maybe_execute_trade(
+    market: BtcUpDownMarket,
+    decision: LlmDecision,
+    snapshot: Optional[TokenQuoteSnapshot] = None,
+) -> TradeExecutionResult:
+    validated_snapshot, rejection = _validate_trade_candidate(
+        market=market,
+        decision=decision,
+        snapshot=snapshot,
+    )
+    if rejection is not None:
+        return rejection
+
+    assert validated_snapshot is not None
+
+    cfg = get_trading_config()
+    if cfg.paper_trading:
+        return _execute_paper_trade(decision=decision, snapshot=validated_snapshot)
+
+    return _execute_live_trade(decision=decision, snapshot=validated_snapshot)

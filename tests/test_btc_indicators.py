@@ -1,4 +1,5 @@
 import unittest
+from datetime import datetime, timezone
 from unittest.mock import patch
 
 import requests
@@ -49,6 +50,29 @@ class TestBtcIndicators(unittest.TestCase):
         ):
             with self.assertRaises(requests.HTTPError):
                 indicators.fetch_btc_spot_price()
+
+    def test_build_btc_features_uses_current_window_samples_for_window_open(self):
+        indicators._record_price_sample(
+            75781.0,
+            as_of=datetime.fromtimestamp(1_776_813_300, tz=timezone.utc),
+        )
+        indicators._record_price_sample(
+            75854.11,
+            as_of=datetime.fromtimestamp(1_776_813_600, tz=timezone.utc),
+        )
+
+        with patch(
+            "custom.btc_agent.indicators.fetch_btc_spot_price",
+            return_value=75821.82,
+        ):
+            features = indicators.build_btc_features(window_start_ts=1_776_813_600)
+
+        self.assertEqual(features.window_open_price, 75854.11)
+        self.assertAlmostEqual(
+            features.delta_pct_from_window_open,
+            (75821.82 - 75854.11) / 75854.11,
+            places=6,
+        )
 
 
 if __name__ == "__main__":
