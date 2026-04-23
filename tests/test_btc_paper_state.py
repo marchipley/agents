@@ -81,6 +81,20 @@ class TestBtcPaperState(unittest.TestCase):
         self.assertEqual(classify_position(down_order, 74990.0), "WINNING")
         self.assertEqual(classify_position(down_order, 75000.0), "TIED")
 
+    def test_classify_position_does_not_use_entry_btc_price(self):
+        order = ActivePaperOrder(
+            market_slug="btc-updown-5m-1",
+            market_title="Period 1",
+            side="UP",
+            shares=5.0,
+            entry_price=0.55,
+            token_id="token-up",
+            target_btc_price=75000.0,
+            entry_btc_price=74900.0,
+        )
+
+        self.assertEqual(classify_position(order, 75010.0), "WINNING")
+
     def test_describe_target_marks_approximate_threshold(self):
         order = ActivePaperOrder(
             market_slug="btc-updown-5m-1",

@@ -90,6 +90,7 @@ Optional / supported:
 - `HTTP_PROXY` / `HTTPS_PROXY` optional proxy settings for outbound API calls, including LLM requests and geolocation checks
 - `NO_PROXY` optional bypass list for local addresses
 - `USE_PAPER_TRADES` default: `true`
+- `MINIMUM_WALLET_BALANCE` default: `0`
 - `BTC_AGENT_LIVE_FEE_RATE_BPS` default: `1000`
 - `BTC_AGENT_LIVE_MIN_ORDER_USD` default: `1`
 - `POLYMKT_PROXY_ADDRESS`
@@ -100,6 +101,7 @@ Optional / supported:
 - `BTC_AGENT_MAX_TRADE_USD` default: `5`
 - `BTC_AGENT_TRADE_SHARES_SIZE` default: `5` and enforced minimum: `5`
 - `BTC_AGENT_MAX_TRADES_PER_PERIOD` default: `1`
+- `CONFIDENCE` optional alias for `BTC_AGENT_MIN_CONFIDENCE`
 - `BTC_AGENT_MIN_CONFIDENCE` default: `0.7`
 - `BTC_AGENT_MAX_ENTRY_PRICE` default: `0.62`
 - `BTC_AGENT_MAX_SPREAD` default: `0.06`
@@ -117,26 +119,32 @@ What the BTC agent does today:
 
 - Pulls the current BTC/USD spot price from a small fallback chain of public APIs, currently trying CoinGecko and Coinbase spot pricing.
 - Maintains an in-memory rolling price history during process lifetime only.
-- Approximates window-open price using the earliest retained BTC sample inside the current 5-minute market window, not a true historical open fetched from a historical BTC data source.
+- Approximates market-window open price using the earliest retained BTC sample inside the current 5-minute market window, not a true historical open fetched from a historical BTC data source.
+- Computes 5-minute momentum and volatility from a trailing 5-minute BTC sample window, so analysis continues to reference recent cross-period history even immediately after a new market window begins.
 - Falls back across multiple live BTC spot-price APIs first, then to the most recent in-memory BTC price sample when all configured live price requests fail during the current process lifetime, which prevents active paper-order reporting from aborting immediately on a single-provider rate-limit response after recent successful samples.
 - Uses the current 5-minute BTC Up/Down slug by timestamp alignment, unless overridden.
 - Performs a startup IP geolocation check and refuses to run unless the current public IP resolves to an allowed country, currently Indonesia or Mexico.
 - Respects standard proxy environment variables such as `HTTP_PROXY` and `HTTPS_PROXY` for outbound requests when they are exported in the shell or defined in the repo `.env`.
 - Routes outbound BTC-agent requests through `ALL_PROXY` when configured, including geolocation, BTC spot pricing, Polymarket API lookups, and LLM calls.
 - Uses the configured AI engine with JSON output to decide `UP`, `DOWN`, or `NO_TRADE`.
+- Prints the current market `price_to_beat` in the BTC-agent output and includes that same period baseline in the LLM decision prompt when the threshold is available from Polymarket.
 - Retries LLM API calls across configurable attempts using a single per-attempt timeout, logs each attempt result to stdout, and converts repeated failures into a `NO_TRADE` so the loop can move on to the next tick.
 - Computes a reference price from quote, midpoint, last trade, and order book data.
 - Reuses a single decision-time token quote snapshot for both the printed `UP/DOWN (with decision)` block and the paper execution gate so those logs cannot diverge within one loop tick.
+- Skips LLM decision calls entirely when both the current `UP` and `DOWN` quote snapshots are already not safe to submit, preserving AI API calls when neither side is actionable.
+- Skips LLM decisioning and execution during the last 60 seconds of the current 5-minute market window and only continues collecting trend data for the upcoming period.
 - Prints the exact execution snapshot used by the paper-trade path, including the calculated `reference_price`, `target_limit_price`, and `recommended_limit_price`.
 - Executes paper trades by default and can submit live Polymarket buy orders through `agents/polymarket/polymarket.py` when `USE_PAPER_TRADES=false`.
 - Submits live orders with a configurable maker fee rate from `BTC_AGENT_LIVE_FEE_RATE_BPS`, defaulting to `1000` bps to match the current BTC Up/Down market requirement observed during live submission attempts.
 - Keeps paper trade size fixed at `BTC_AGENT_TRADE_SHARES_SIZE`, but auto-scales live order size upward when needed so the live order notional meets `BTC_AGENT_LIVE_MIN_ORDER_USD`.
 - Uses a fixed paper-trade share size from `BTC_AGENT_TRADE_SHARES_SIZE` instead of deriving the trade size from USD notional.
 - Tracks in-memory active orders for the current 5-minute market window and prints each order’s target BTC level plus whether the position is currently winning, losing, or tied.
+- Evaluates paper-order win/loss status against the market-period settlement reference, preferring Polymarket’s parsed threshold and otherwise falling back to the closest retained BTC sample at the start of the 5-minute period rather than the trade-entry BTC price.
 - Enforces `BTC_AGENT_MAX_TRADES_PER_PERIOD` per 5-minute market slug; once that limit is reached, subsequent loop ticks skip quote snapshots and LLM trade decisions until the next market window begins.
 - When `BTC_AGENT_DEBUG=false`, suppresses most verbose diagnostics and only prints a compact subset of geolocation, balances, quote snapshots, BTC features, LLM decision fields, and final paper execution fields.
 - In non-debug mode, account balances print only on the first loop iteration and again at the start of each new 5-minute market period.
 - Stops the process before live order submission when the account does not have enough `cash_balance_usdc` to cover the configured live trade size at the recommended limit price plus the estimated maker fee.
+- Stops the process when `cash_balance_usdc` falls below `MINIMUM_WALLET_BALANCE`, so no further execution occurs once the configured wallet floor is breached.
 - Retrieves Polygon USDC cash balances through a configurable ordered RPC list with public fallback endpoints.
 - Retrieves Polymarket portfolio value separately from the on-chain cash balance lookup so one failure does not suppress the other.
 - Approves or rejects a trade based on confidence, entry caps, quote drift, and in live mode also account cash availability.
@@ -229,6 +237,10 @@ Do not revert unrelated local changes unless the user explicitly asks for that.
 - Tightened the live-trading cash-balance guard to include the estimated maker fee in the required cash calculation before live order submission.
 - Added `BTC_AGENT_LIVE_MIN_ORDER_USD` with a default of `1` and updated the custom BTC live executor to auto-scale live order size upward so the order notional meets the exchange’s minimum marketable buy amount.
 - Corrected the BTC window-open approximation to use the earliest retained sample inside the current 5-minute market window instead of the oldest retained sample across the whole process history, preventing active-order targets from drifting across periods.
+- Updated BTC feature readiness at 5-minute boundaries to carry the most recent pre-window BTC sample forward as the new window baseline, so the first tick of a new market period can reuse retained history instead of forcing an extra warmup tick.
+- Updated BTC feature analysis so 5-minute momentum and volatility use the last 5 minutes of retained BTC samples regardless of the current market-window boundary, while preserving a separate market-window-open reference for threshold context.
+- Clarified paper-order settlement fallback so active-order status uses the period-start BTC reference when an explicit Polymarket threshold is unavailable, instead of relying on the trade-entry BTC price.
+- Added `price_to_beat` to the runtime market output and to the LLM prompt so each 5-minute decision is made with the market’s displayed baseline when available.
 
 ### 2026-04-22
 
@@ -238,3 +250,6 @@ Do not revert unrelated local changes unless the user explicitly asks for that.
 - Expanded the startup geolocation allowlist so the public IP check now accepts Mexico in addition to Indonesia.
 - Updated the launch path to export `.env` before startup and documented `HTTP_PROXY` / `HTTPS_PROXY` support so VPN or proxy-routed outbound traffic can be configured explicitly.
 - Added explicit SOCKS proxy support for Mullvad-style `ALL_PROXY` usage by routing active BTC-agent requests through normalized proxy settings and adding the required SOCKS client dependencies.
+- Added a pre-LLM quote gate so the BTC loop skips AI decision calls when both outcome tokens are already unsubmitable at current prices.
+- Added `MINIMUM_WALLET_BALANCE` so the BTC loop aborts when available `cash_balance_usdc` falls below the configured wallet floor.
+- Added a last-minute market gate so the BTC loop stops making LLM decisions or trade attempts during the final 60 seconds of a market window.

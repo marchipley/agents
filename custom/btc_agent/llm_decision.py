@@ -46,13 +46,21 @@ def _build_user_prompt(features: BtcFeatures, market: BtcUpDownMarket) -> str:
     return (
         f"Market title: {market.title}\n"
         f"Market slug: {market.slug}\n\n"
+        "Market reference:\n"
+        f"- Price to beat USD: {market.settlement_threshold}\n"
+        f"- Settlement rule: UP wins only if BTC finishes above {market.settlement_threshold}; "
+        f"DOWN wins only if BTC finishes below {market.settlement_threshold}.\n\n"
         "BTC features:\n"
         f"- Current BTC price USD: {features.price_usd:.2f}\n"
-        f"- Window open price USD: {features.window_open_price:.2f}\n"
-        f"- Percent change from window open: {features.delta_pct_from_window_open * 100:.4f}%\n"
+        f"- Market window open price USD: {features.window_open_price:.2f}\n"
+        f"- Percent change from market window open: {features.delta_pct_from_window_open * 100:.4f}%\n"
+        f"- Trailing 5-minute open price USD: {features.trailing_5m_open_price:.2f}\n"
+        f"- Percent change from trailing 5-minute open: {features.delta_pct_from_trailing_5m_open * 100:.4f}%\n"
+        f"- Change from previous tick USD: {features.delta_from_previous_tick}\n"
         f"- RSI(14): {features.rsi_14}\n"
-        f"- 5-minute momentum: {features.momentum_5m}\n"
-        f"- 5-minute volatility: {features.volatility_5m}\n\n"
+        f"- 1-minute momentum USD: {features.momentum_1m}\n"
+        f"- Trailing 5-minute momentum USD: {features.momentum_5m}\n"
+        f"- Trailing 5-minute volatility: {features.volatility_5m}\n\n"
         "Keep `reason` short and concrete.\n"
         "Return ONLY the JSON object described in the system message."
     )
@@ -94,84 +102,7 @@ def _extract_json_payload(raw_text: str) -> dict:
     if start != -1 and end != -1 and end > start:
         return json.loads(cleaned[start : end + 1])
 
-    partial_payload = _extract_partial_json_payload(cleaned)
-    if partial_payload is not None:
-        return partial_payload
-
     raise ValueError(f"Could not find JSON object in LLM response: {cleaned[:220]}")
-
-
-def _extract_partial_json_payload(cleaned: str) -> Optional[dict]:
-    if not cleaned.startswith("{"):
-        return None
-
-    decision_match = re.search(
-        r'"decision"\s*:\s*"(UP|DOWN|NO_TRADE)"',
-        cleaned,
-        flags=re.IGNORECASE,
-    )
-    confidence_match = re.search(
-        r'"confidence"\s*:\s*(-?\d+(?:\.\d+)?)',
-        cleaned,
-    )
-    max_price_match = re.search(
-        r'"max_price_to_pay"\s*:\s*(-?\d+(?:\.\d+)?)',
-        cleaned,
-    )
-
-    if not decision_match:
-        return None
-
-    decision = decision_match.group(1).upper()
-    confidence = float(confidence_match.group(1)) if confidence_match else None
-    max_price_to_pay = float(max_price_match.group(1)) if max_price_match else None
-
-    if decision != "NO_TRADE" and (confidence is None or max_price_to_pay is None):
-        return None
-
-    if confidence is None:
-        confidence = 0.0
-    if max_price_to_pay is None:
-        max_price_to_pay = 0.0
-
-    reason = "Truncated LLM response"
-    found_reason_field = False
-    reason_match = re.search(r'"reason"\s*:\s*"([^"]*)"', cleaned, flags=re.DOTALL)
-    if reason_match:
-        found_reason_field = True
-        reason = reason_match.group(1).strip() or reason
-    else:
-        truncated_reason_match = re.search(
-            r'"reason"\s*:\s*"(.+)$',
-            cleaned,
-            flags=re.DOTALL,
-        )
-        if truncated_reason_match:
-            found_reason_field = True
-            reason = truncated_reason_match.group(1).strip() or reason
-
-    if not found_reason_field and decision != "NO_TRADE":
-        return None
-
-    if not found_reason_field and confidence_match is not None and max_price_match is not None:
-        return None
-
-    if not found_reason_field:
-        reason = "Truncated NO_TRADE response"
-
-    return {
-        "decision": decision,
-        "confidence": confidence,
-        "max_price_to_pay": max_price_to_pay,
-        "reason": reason[:300],
-    }
-
-
-def _looks_like_truncated_json(raw_text: str) -> bool:
-    cleaned = raw_text.strip()
-    if not cleaned:
-        return False
-    return cleaned.startswith("{") and cleaned.count("{") > cleaned.count("}")
 
 
 def _response_error_message(response: requests.Response) -> str:
@@ -293,9 +224,8 @@ def _request_gemini_decision(
     system_prompt: str,
     user_prompt: str,
     timeout_seconds: float = 10.0,
-    retry_attempts: int = 3,
-    retry_timer_seconds: float = 2.0,
-    phase: str = "primary",
+    attempt_number: int = 1,
+    total_attempts: int = 3,
 ) -> str:
     url = (
         "https://generativelanguage.googleapis.com/v1beta/models/"
@@ -330,70 +260,55 @@ def _request_gemini_decision(
             },
         },
     }
-    last_error = None
+    try:
+        response = http_post(
+            url,
+            params={"key": api_key},
+            json=payload,
+            timeout=timeout_seconds,
+        )
+        detail = response.text.strip() or response.reason or "empty response"
+        response.raise_for_status()
+        response_payload = response.json()
+        candidates = response_payload.get("candidates") or []
+        if not candidates:
+            raise RuntimeError("Gemini returned no candidates")
 
-    for attempt in range(retry_attempts):
-        attempt_number = attempt + 1
-        try:
-            response = http_post(
-                url,
-                params={"key": api_key},
-                json=payload,
-                timeout=timeout_seconds,
-            )
-            detail = response.text.strip() or response.reason or "empty response"
-            response.raise_for_status()
-            response_payload = response.json()
-            candidates = response_payload.get("candidates") or []
-            if not candidates:
-                raise RuntimeError("Gemini returned no candidates")
-
-            content = candidates[0].get("content") or {}
-            parts = content.get("parts") or []
-            text_parts = [str(part.get("text", "")) for part in parts if part.get("text")]
-            if not text_parts:
-                raise RuntimeError("Gemini returned no text content")
-            raw_text = "\n".join(text_parts)
-            _print_llm_attempt_result(
-                "gemini",
-                model,
-                attempt_number,
-                retry_attempts,
-                True,
-                raw_text or detail,
-                phase=phase,
-            )
-            return raw_text
-        except requests.RequestException as exc:
-            last_error = exc
-            _print_llm_attempt_result(
-                "gemini",
-                model,
-                attempt_number,
-                retry_attempts,
-                False,
-                str(exc),
-                phase=phase,
-            )
-            if attempt_number >= retry_attempts:
-                raise RuntimeError(f"Gemini request failed: {exc}") from exc
-            time.sleep(retry_timer_seconds)
-        except RuntimeError as exc:
-            last_error = exc
-            _print_llm_attempt_result(
-                "gemini",
-                model,
-                attempt_number,
-                retry_attempts,
-                False,
-                str(exc),
-                phase=phase,
-            )
-            if attempt_number >= retry_attempts:
-                raise RuntimeError(f"Gemini request failed: {exc}") from exc
-            time.sleep(retry_timer_seconds)
-
-    raise RuntimeError(f"Gemini request failed: {last_error}")
+        content = candidates[0].get("content") or {}
+        parts = content.get("parts") or []
+        text_parts = [str(part.get("text", "")) for part in parts if part.get("text")]
+        if not text_parts:
+            raise RuntimeError("Gemini returned no text content")
+        raw_text = "\n".join(text_parts)
+        _print_llm_attempt_result(
+            "gemini",
+            model,
+            attempt_number,
+            total_attempts,
+            True,
+            raw_text or detail,
+        )
+        return raw_text
+    except requests.RequestException as exc:
+        _print_llm_attempt_result(
+            "gemini",
+            model,
+            attempt_number,
+            total_attempts,
+            False,
+            str(exc),
+        )
+        raise RuntimeError(f"Gemini request failed: {exc}") from exc
+    except RuntimeError as exc:
+        _print_llm_attempt_result(
+            "gemini",
+            model,
+            attempt_number,
+            total_attempts,
+            False,
+            str(exc),
+        )
+        raise RuntimeError(f"Gemini request failed: {exc}") from exc
 
 
 def _request_gemini_decision_with_parse_retry(
@@ -405,43 +320,42 @@ def _request_gemini_decision_with_parse_retry(
     retry_attempts: int = 3,
     retry_timer_seconds: float = 2.0,
 ) -> dict:
-    raw_text = _request_gemini_decision(
-        model=model,
-        api_key=api_key,
-        system_prompt=system_prompt,
-        user_prompt=user_prompt,
-        timeout_seconds=timeout_seconds,
-        retry_attempts=retry_attempts,
-        retry_timer_seconds=retry_timer_seconds,
-        phase="primary",
-    )
-    try:
-        return _extract_json_payload(raw_text)
-    except ValueError:
-        if _looks_like_truncated_json(raw_text):
-            retry_prompt = (
-                "Return exactly one complete minified JSON object with keys "
-                '"decision","confidence","max_price_to_pay","reason". '
-                "No markdown. No preamble. No explanation."
+    last_error = None
+
+    for attempt in range(retry_attempts):
+        attempt_number = attempt + 1
+        try:
+            raw_text = _request_gemini_decision(
+                model=model,
+                api_key=api_key,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                timeout_seconds=timeout_seconds,
+                attempt_number=attempt_number,
+                total_attempts=retry_attempts,
             )
-        else:
-            retry_prompt = (
-                f"{user_prompt}\n\n"
-                "IMPORTANT: Return exactly one minified JSON object. "
-                "Do not include markdown fences. "
-                "Do not include introductory text."
+            return _extract_json_payload(raw_text)
+        except ValueError as exc:
+            last_error = exc
+            _print_llm_attempt_result(
+                "gemini",
+                model,
+                attempt_number,
+                retry_attempts,
+                False,
+                f"Incomplete or invalid JSON: {exc}",
+                phase="invalid-json",
             )
-        retry_text = _request_gemini_decision(
-            model=model,
-            api_key=api_key,
-            system_prompt=system_prompt,
-            user_prompt=retry_prompt,
-            timeout_seconds=timeout_seconds,
-            retry_attempts=retry_attempts,
-            retry_timer_seconds=retry_timer_seconds,
-            phase="parse-retry",
-        )
-        return _extract_json_payload(retry_text)
+            if attempt_number >= retry_attempts:
+                raise RuntimeError(f"Gemini request failed: {exc}") from exc
+            time.sleep(retry_timer_seconds)
+        except RuntimeError as exc:
+            last_error = exc
+            if attempt_number >= retry_attempts:
+                raise
+            time.sleep(retry_timer_seconds)
+
+    raise RuntimeError(f"Gemini request failed: {last_error}")
 
 
 def _coerce_config_value(raw_value: object, caster, default):

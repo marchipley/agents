@@ -8,14 +8,18 @@ import requests
 sys.modules.setdefault("dotenv", types.SimpleNamespace(load_dotenv=lambda *args, **kwargs: None))
 sys.modules.setdefault("openai", types.SimpleNamespace(OpenAI=object))
 
-from custom.btc_agent.llm_decision import decide_trade
+from custom.btc_agent.llm_decision import _build_user_prompt, decide_trade
 
 
 class DummyFeatures:
     price_usd = 75000.0
     window_open_price = 74950.0
+    trailing_5m_open_price = 74940.0
     delta_pct_from_window_open = 0.000667
+    delta_pct_from_trailing_5m_open = 0.000801
+    delta_from_previous_tick = 5.0
     rsi_14 = 55.0
+    momentum_1m = 7.0
     momentum_5m = 10.0
     volatility_5m = 22.0
 
@@ -23,9 +27,18 @@ class DummyFeatures:
 class DummyMarket:
     title = "BTC Up or Down"
     slug = "btc-updown-test"
+    settlement_threshold = 74982.25
 
 
 class TestBtcLlmDecision(unittest.TestCase):
+    def test_user_prompt_includes_price_to_beat(self):
+        prompt = _build_user_prompt(DummyFeatures(), DummyMarket())
+
+        self.assertIn("Price to beat USD: 74982.25", prompt)
+        self.assertIn("Market reference:", prompt)
+        self.assertIn("UP wins only if BTC finishes above 74982.25", prompt)
+        self.assertIn("DOWN wins only if BTC finishes below 74982.25", prompt)
+
     def test_gemini_503_returns_no_trade(self):
         error_response = requests.Response()
         error_response.status_code = 503
@@ -144,7 +157,8 @@ class TestBtcLlmDecision(unittest.TestCase):
             decision = decide_trade(DummyFeatures(), DummyMarket())
 
         printed_lines = [" ".join(str(arg) for arg in call.args) for call in mock_print.call_args_list]
-        self.assertTrue(any("[parse-retry] response" in line for line in printed_lines))
+        self.assertTrue(any("[invalid-json] failed" in line for line in printed_lines))
+        self.assertTrue(any("LLM attempt 2/3 (gemini/gemini-2.5-flash) response" in line for line in printed_lines))
         self.assertEqual(decision.side, "UP")
         self.assertAlmostEqual(decision.confidence, 0.74)
 
@@ -181,62 +195,6 @@ class TestBtcLlmDecision(unittest.TestCase):
         self.assertEqual(decision.confidence, 0.0)
         self.assertEqual(decision.reason, "recovered")
 
-    def test_gemini_truncated_json_salvages_partial_payload(self):
-        partially_truncated_response = requests.Response()
-        partially_truncated_response.status_code = 200
-        partially_truncated_response._content = (
-            b'{"candidates":[{"content":{"parts":[{"text":"{\\"decision\\":\\"NO_TRADE\\",\\"confidence\\":0.8,\\"max_price_to_pay\\":0,\\"reason\\":\\"Insufficient real-time market data to establish a high-confidence directional bias for"}]}}]}'
-        )
-
-        with patch(
-            "custom.btc_agent.llm_decision.get_llm_config",
-            return_value=Mock(
-                engine="gemini",
-                api_key="test-key",
-                model="gemini-3.1-pro-preview",
-                api_connection_timeout_seconds=10.0,
-                api_connection_retry_timer_seconds=2.0,
-                api_connection_retry_attempts=3,
-            ),
-        ), patch(
-            "custom.btc_agent.llm_decision.requests.post",
-            return_value=partially_truncated_response,
-        ):
-            decision = decide_trade(DummyFeatures(), DummyMarket())
-
-        self.assertEqual(decision.side, "NO_TRADE")
-        self.assertEqual(decision.confidence, 0.8)
-        self.assertEqual(decision.max_price_to_pay, 0.0)
-        self.assertIn("Insufficient real-time market data", decision.reason)
-
-    def test_gemini_truncated_no_trade_prefix_defaults_missing_numeric_fields(self):
-        partially_truncated_response = requests.Response()
-        partially_truncated_response.status_code = 200
-        partially_truncated_response._content = (
-            b'{"candidates":[{"content":{"parts":[{"text":"{\\"decision\\":\\"NO_TRADE\\",\\"confidence"}]}}]}'
-        )
-
-        with patch(
-            "custom.btc_agent.llm_decision.get_llm_config",
-            return_value=Mock(
-                engine="gemini",
-                api_key="test-key",
-                model="gemini-3.1-pro-preview",
-                api_connection_timeout_seconds=10.0,
-                api_connection_retry_timer_seconds=2.0,
-                api_connection_retry_attempts=3,
-            ),
-        ), patch(
-            "custom.btc_agent.llm_decision.requests.post",
-            return_value=partially_truncated_response,
-        ):
-            decision = decide_trade(DummyFeatures(), DummyMarket())
-
-        self.assertEqual(decision.side, "NO_TRADE")
-        self.assertEqual(decision.confidence, 0.0)
-        self.assertEqual(decision.max_price_to_pay, 0.0)
-        self.assertEqual(decision.reason, "Truncated NO_TRADE response")
-
     def test_gemini_read_timeout_retries_and_recovers(self):
         success_response = requests.Response()
         success_response.status_code = 200
@@ -265,6 +223,41 @@ class TestBtcLlmDecision(unittest.TestCase):
         self.assertEqual(decision.side, "UP")
         self.assertAlmostEqual(decision.confidence, 0.77)
         self.assertEqual(mock_post.call_args_list[0].kwargs["timeout"], 11.0)
+
+    def test_gemini_incomplete_json_retries_full_attempts_then_fails(self):
+        truncated_response = requests.Response()
+        truncated_response.status_code = 200
+        truncated_response._content = (
+            b'{"candidates":[{"content":{"parts":[{"text":"{\\"decision\\":\\"UP\\",\\"confidence\\":0.6"}]}}]}'
+        )
+
+        with patch(
+            "custom.btc_agent.llm_decision.get_llm_config",
+            return_value=Mock(
+                engine="gemini",
+                api_key="test-key",
+                model="gemini-3.1-pro-preview",
+                api_connection_timeout_seconds=10.0,
+                api_connection_retry_timer_seconds=1.0,
+                api_connection_retry_attempts=2,
+            ),
+        ), patch(
+            "custom.btc_agent.llm_decision.requests.post",
+            side_effect=[truncated_response, truncated_response],
+        ), patch(
+            "custom.btc_agent.llm_decision.time.sleep",
+        ), patch(
+            "builtins.print",
+        ) as mock_print:
+            decision = decide_trade(DummyFeatures(), DummyMarket())
+
+        printed_lines = [" ".join(str(arg) for arg in call.args) for call in mock_print.call_args_list]
+        self.assertTrue(any("LLM attempt 1/2 (gemini/gemini-3.1-pro-preview) response" in line for line in printed_lines))
+        self.assertTrue(any("LLM attempt 1/2 (gemini/gemini-3.1-pro-preview) [invalid-json] failed" in line for line in printed_lines))
+        self.assertTrue(any("LLM attempt 2/2 (gemini/gemini-3.1-pro-preview) response" in line for line in printed_lines))
+        self.assertTrue(any("LLM attempt 2/2 (gemini/gemini-3.1-pro-preview) [invalid-json] failed" in line for line in printed_lines))
+        self.assertEqual(decision.side, "NO_TRADE")
+        self.assertIn("LLM request failed", decision.reason)
 
     def test_gemini_logs_each_attempt_and_returns_no_trade_after_final_failure(self):
         with patch(

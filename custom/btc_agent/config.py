@@ -49,12 +49,15 @@ class LlmConfig:
 class TradingConfig:
     paper_trading: bool = _parse_bool_env("USE_PAPER_TRADES", True)
     debug: bool = _parse_bool_env("BTC_AGENT_DEBUG", False)
+    minimum_wallet_balance: float = float(os.getenv("MINIMUM_WALLET_BALANCE", "0"))
     live_fee_rate_bps: int = int(os.getenv("BTC_AGENT_LIVE_FEE_RATE_BPS", "1000"))
     live_min_order_usd: float = float(os.getenv("BTC_AGENT_LIVE_MIN_ORDER_USD", "1"))
     max_trade_usd: float = float(os.getenv("BTC_AGENT_MAX_TRADE_USD", "5"))
     trade_shares_size: float = max(float(os.getenv("BTC_AGENT_TRADE_SHARES_SIZE", "5")), 5.0)
     max_trades_per_period: int = max(int(os.getenv("BTC_AGENT_MAX_TRADES_PER_PERIOD", "1")), 1)
-    min_confidence: float = float(os.getenv("BTC_AGENT_MIN_CONFIDENCE", "0.7"))
+    min_confidence: float = float(
+        os.getenv("CONFIDENCE", os.getenv("BTC_AGENT_MIN_CONFIDENCE", "0.7"))
+    )
     max_entry_price: float = float(os.getenv("BTC_AGENT_MAX_ENTRY_PRICE", "0.62"))
     max_spread: float = float(os.getenv("BTC_AGENT_MAX_SPREAD", "0.06"))
     market_slug_override: Optional[str] = os.getenv("BTC_AGENT_MARKET_SLUG")

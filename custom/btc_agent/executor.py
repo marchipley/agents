@@ -649,7 +649,10 @@ def _scale_live_size_for_min_notional(
     if limit_price <= 0:
         raise RuntimeError("Cannot scale live order size with a non-positive limit price.")
 
-    min_size = min_order_usd / limit_price
+    # Add a small buffer above the venue minimum so downstream rounding on the
+    # exchange side cannot turn a nominal $1.0000 order into a rejected $0.999x order.
+    min_notional_with_buffer = min_order_usd + 0.01
+    min_size = min_notional_with_buffer / limit_price
     scaled_size = max(base_size, min_size)
     # Round up to 4 decimals so the post-rounding notional still meets the minimum.
     return math.ceil(scaled_size * 10_000) / 10_000

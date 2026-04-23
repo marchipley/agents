@@ -6,12 +6,21 @@ import time
 import sys
 
 from .config import get_trading_config
-from .market_lookup import find_current_btc_updown_market
-from .indicators import build_btc_features, fetch_btc_spot_price
+from .market_lookup import build_price_to_beat_debug_report, find_current_btc_updown_market
+from .indicators import (
+    build_btc_features,
+    estimate_market_window_reference_price,
+    fetch_btc_spot_price,
+    get_feature_readiness,
+)
 from .llm_decision import decide_trade
 from .network import describe_proxy_configuration
 from .executor import (
+    AccountBalanceSnapshot,
     TokenQuoteSnapshot,
+    compute_recommended_limit_price,
+    compute_target_limit_price,
+    evaluate_ok_to_submit,
     get_account_balance_snapshot,
     get_token_quote_snapshot,
     maybe_execute_trade,
@@ -40,6 +49,26 @@ def _fmt(value):
     if isinstance(value, float):
         return f"{value:.3f}"
     return str(value)
+
+
+def has_valid_price_to_beat(value) -> bool:
+    if value is None:
+        return False
+    try:
+        numeric_value = float(value)
+    except (TypeError, ValueError):
+        return False
+    return 1000 <= numeric_value <= 1_000_000
+
+
+def write_price_to_beat_debug_file(slug: str) -> None:
+    debug_path = os.path.join(os.getcwd(), "priceToBeatDebug.txt")
+    try:
+        with open(debug_path, "w", encoding="utf-8") as debug_file:
+            debug_file.write(build_price_to_beat_debug_report(slug))
+        print(f"price_to_beat_debug_file: {debug_path}")
+    except Exception as exc:
+        print(f"price_to_beat_debug_file_error: {exc}")
 
 
 def print_ip_location(public_ip, location, debug: bool) -> None:
@@ -98,13 +127,50 @@ def print_quote_snapshot_from_snapshot(
     print(f"  spread                 = {_fmt(q.spread)}")
 
 
-def get_decision_quote_snapshot(market, decision) -> TokenQuoteSnapshot:
-    token_id = market.up_token_id if decision.side == "UP" else market.down_token_id
-    return get_token_quote_snapshot(token_id, decision=decision)
+def get_decision_quote_snapshot(
+    market,
+    decision,
+    up_snapshot: TokenQuoteSnapshot,
+    down_snapshot: TokenQuoteSnapshot,
+) -> TokenQuoteSnapshot:
+    base_snapshot = up_snapshot if decision.side == "UP" else down_snapshot
+    target_limit_price = compute_target_limit_price(
+        base_snapshot.reference_price,
+        decision=decision,
+    )
+    recommended_limit_price = compute_recommended_limit_price(
+        base_snapshot.reference_price,
+        base_snapshot.tick_size,
+        decision=decision,
+    )
+    ok_to_submit, submit_reason = evaluate_ok_to_submit(
+        buy_quote=base_snapshot.buy_quote,
+        recommended_limit_price=recommended_limit_price,
+        tick_size=base_snapshot.tick_size,
+    )
+    return TokenQuoteSnapshot(
+        token_id=base_snapshot.token_id,
+        buy_quote=base_snapshot.buy_quote,
+        midpoint=base_snapshot.midpoint,
+        last_trade_price=base_snapshot.last_trade_price,
+        reference_price=base_snapshot.reference_price,
+        target_limit_price=target_limit_price,
+        recommended_limit_price=recommended_limit_price,
+        ok_to_submit=ok_to_submit,
+        submit_reason=submit_reason,
+        best_bid=base_snapshot.best_bid,
+        best_ask=base_snapshot.best_ask,
+        tick_size=base_snapshot.tick_size,
+        spread=base_snapshot.spread,
+    )
 
 
 def print_account_snapshot(debug: bool) -> None:
     account = get_account_balance_snapshot()
+    print_account_snapshot_from_snapshot(account, debug=debug)
+
+
+def print_account_snapshot_from_snapshot(account: AccountBalanceSnapshot, debug: bool) -> None:
     print("Account balances:")
     if not debug:
         print(f"  cash_balance_usdc      = {_fmt(account.cash_balance)}")
@@ -121,6 +187,26 @@ def print_account_snapshot(debug: bool) -> None:
     print(f"  balance_error          = {account.error or 'None'}")
 
 
+def enforce_minimum_wallet_balance(account: AccountBalanceSnapshot) -> None:
+    cfg = get_trading_config()
+    if cfg.minimum_wallet_balance <= 0:
+        return
+    if account.cash_balance is None:
+        print(
+            "ERROR: Unable to verify cash_balance_usdc for MINIMUM_WALLET_BALANCE "
+            f"check ({cfg.minimum_wallet_balance:.3f}). Aborting BTC agent startup."
+        )
+        sys.exit(1)
+    if account.cash_balance < cfg.minimum_wallet_balance:
+        print(
+            "ERROR: Nothing can be executed because cash_balance_usdc is below "
+            "MINIMUM_WALLET_BALANCE "
+            f"(available={account.cash_balance:.3f}, "
+            f"minimum={cfg.minimum_wallet_balance:.3f})."
+        )
+        sys.exit(1)
+
+
 def print_active_orders(current_btc_price: float) -> None:
     active_orders = get_active_orders()
     if not active_orders:
@@ -130,12 +216,19 @@ def print_active_orders(current_btc_price: float) -> None:
     print("Active orders:")
     for idx, order in enumerate(active_orders, start=1):
         status = classify_position(order, current_btc_price)
+        win_condition = (
+            f"BTC must finish above {order.target_btc_price:.2f}"
+            if order.side == "UP"
+            else f"BTC must finish below {order.target_btc_price:.2f}"
+        )
         print(f"  order_{idx}_market_slug    = {order.market_slug}")
         print(f"  order_{idx}_market_title   = {order.market_title}")
         print(f"  order_{idx}_side           = {order.side}")
         print(f"  order_{idx}_shares         = {_fmt(order.shares)}")
         print(f"  order_{idx}_entry_price    = {_fmt(order.entry_price)}")
         print(f"  order_{idx}_entry_btc      = {order.entry_btc_price:.2f}")
+        print(f"  order_{idx}_period_open_price_to_beat = {order.target_btc_price:.2f}")
+        print(f"  order_{idx}_win_condition  = {win_condition}")
         print(f"  order_{idx}_target         = {describe_target(order)}")
         print(f"  order_{idx}_current_btc    = {current_btc_price:.2f}")
         print(f"  order_{idx}_position_state = {status}")
@@ -144,6 +237,8 @@ def print_active_orders(current_btc_price: float) -> None:
 def print_features(features, debug: bool) -> None:
     print("Features:")
     print(f"  btc_price             = {features.price_usd:.2f}")
+    print(f"  delta_prev_tick       = {features.delta_from_previous_tick}")
+    print(f"  momentum_1m           = {features.momentum_1m}")
     print(f"  momentum_5m           = {features.momentum_5m}")
     print(f"  volatility_5m         = {features.volatility_5m}")
     if not debug:
@@ -151,7 +246,40 @@ def print_features(features, debug: bool) -> None:
 
     print(f"  window_open_price     = {features.window_open_price:.2f}")
     print(f"  delta_from_window_pct = {features.delta_pct_from_window_open * 100:.4f}%")
+    print(f"  trailing_5m_open_price= {features.trailing_5m_open_price:.2f}")
+    print(f"  delta_from_5m_pct     = {features.delta_pct_from_trailing_5m_open * 100:.4f}%")
     print(f"  rsi_14                = {features.rsi_14}")
+    print(f"  retained_samples      = {features.retained_sample_count}")
+    print(f"  window_samples        = {features.window_sample_count}")
+    print(f"  trailing_5m_samples   = {features.trailing_5m_sample_count}")
+
+
+def print_market_context(market, debug: bool) -> None:
+    print("Market:")
+    print(f"  slug                  = {market.slug}")
+    print(f"  period_open_price_to_beat = {_fmt(market.settlement_threshold)}")
+    if not debug:
+        return
+
+    print(f"  title                 = {market.title}")
+    print(f"  question              = {market.question}")
+    print(f"  event_id              = {market.event_id}")
+    print(f"  market_id             = {market.market_id}")
+    print(f"  up_token              = {market.up_token_id}")
+    print(f"  down_token            = {market.down_token_id}")
+
+
+def print_llm_skip_reason(reason: str) -> None:
+    print("LLM decision skipped:")
+    print(f"  reason            = {reason}")
+
+
+def both_sides_untradable_reason(up_snapshot: TokenQuoteSnapshot, down_snapshot: TokenQuoteSnapshot) -> str:
+    return (
+        "Both sides are currently not safe to submit. "
+        f"UP: {up_snapshot.submit_reason} | "
+        f"DOWN: {down_snapshot.submit_reason}"
+    )
 
 
 def print_llm_decision(decision, debug: bool) -> None:
@@ -190,10 +318,21 @@ def run_once() -> None:
     period_changed = sync_period_state(market.slug, market.title)
     state = get_state()
     if _FIRST_LOOP or period_changed:
-        print_account_snapshot(debug=cfg.debug)
+        account = get_account_balance_snapshot()
+        print_account_snapshot_from_snapshot(account, debug=cfg.debug)
+        enforce_minimum_wallet_balance(account)
         _FIRST_LOOP = False
     if period_changed:
         print(f"New 5-minute market period detected: {market.slug}")
+
+    if not has_valid_price_to_beat(market.settlement_threshold):
+        print_market_context(market, debug=cfg.debug)
+        write_price_to_beat_debug_file(market.slug)
+        print(
+            "ERROR: Invalid period_open_price_to_beat for current market. "
+            "Aborting BTC agent execution."
+        )
+        sys.exit(1)
 
     if state.trades_executed >= cfg.max_trades_per_period:
         if cfg.debug:
@@ -206,33 +345,48 @@ def run_once() -> None:
             print("-" * 80)
         return
 
-    if cfg.debug:
-        print("Market found:")
-        print(f"  title      = {market.title}")
-        print(f"  question   = {market.question}")
-        print(f"  slug       = {market.slug}")
-        print(f"  event_id   = {market.event_id}")
-        print(f"  market_id  = {market.market_id}")
-        print(f"  up_token   = {market.up_token_id}")
-        print(f"  down_token = {market.down_token_id}")
-        print(f"  threshold  = {_fmt(market.settlement_threshold)}")
+    print_market_context(market, debug=cfg.debug)
 
-    print_quote_snapshot("UP", market.up_token_id, debug=cfg.debug)
-    print_quote_snapshot("DOWN", market.down_token_id, debug=cfg.debug)
+    up_snapshot = get_token_quote_snapshot(market.up_token_id)
+    down_snapshot = get_token_quote_snapshot(market.down_token_id)
+    print_quote_snapshot_from_snapshot("UP", up_snapshot, debug=cfg.debug)
+    print_quote_snapshot_from_snapshot("DOWN", down_snapshot, debug=cfg.debug)
+
+    if not up_snapshot.ok_to_submit and not down_snapshot.ok_to_submit:
+        print_llm_skip_reason(both_sides_untradable_reason(up_snapshot, down_snapshot))
+        if cfg.debug:
+            print("-" * 80)
+        return
 
     features = build_btc_features(window_start_ts=market.start_ts)
     print_features(features, debug=cfg.debug)
+    features_ready, feature_skip_reason = get_feature_readiness(features)
+    if not features_ready:
+        print_llm_skip_reason(feature_skip_reason)
+        if cfg.debug:
+            print("-" * 80)
+        return
 
     decision = decide_trade(features, market)
     print_llm_decision(decision, debug=cfg.debug)
 
     decision_snapshot = None
     if decision.side == "UP":
-        decision_snapshot = get_decision_quote_snapshot(market, decision)
+        decision_snapshot = get_decision_quote_snapshot(
+            market,
+            decision,
+            up_snapshot,
+            down_snapshot,
+        )
         if cfg.debug:
             print_quote_snapshot_from_snapshot("UP (with decision)", decision_snapshot, debug=True)
     elif decision.side == "DOWN":
-        decision_snapshot = get_decision_quote_snapshot(market, decision)
+        decision_snapshot = get_decision_quote_snapshot(
+            market,
+            decision,
+            up_snapshot,
+            down_snapshot,
+        )
         if cfg.debug:
             print_quote_snapshot_from_snapshot("DOWN (with decision)", decision_snapshot, debug=True)
 
@@ -249,7 +403,13 @@ def run_once() -> None:
         target_btc_price = market.settlement_threshold
         target_is_approximate = target_btc_price is None
         if target_btc_price is None:
-            target_btc_price = features.window_open_price
+            target_btc_price = (
+                estimate_market_window_reference_price(
+                    market.start_ts,
+                    now=features.as_of,
+                )
+                or features.window_open_price
+            )
 
         record_executed_trade(
             ActivePaperOrder(
@@ -292,6 +452,9 @@ def main() -> None:
     if cfg.debug:
         print(f"Starting BTC agent (paper_trading={cfg.paper_trading})")
     enforce_allowed_ip_location()
+
+    startup_account = get_account_balance_snapshot()
+    enforce_minimum_wallet_balance(startup_account)
 
     interval = int(os.getenv("BTC_AGENT_LOOP_INTERVAL", "30"))
 
