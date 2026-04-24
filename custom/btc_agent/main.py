@@ -260,6 +260,7 @@ def print_active_orders(current_btc_price: float) -> None:
 def print_features(features, debug: bool) -> None:
     print("Features:")
     print(f"  btc_price             = {features.price_usd:.2f}")
+    print(f"  btc_price_source      = {features.price_source}")
     print(f"  delta_prev_tick       = {features.delta_from_previous_tick}")
     print(f"  momentum_1m           = {features.momentum_1m}")
     print(f"  momentum_5m           = {features.momentum_5m}")

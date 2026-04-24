@@ -117,7 +117,7 @@ Notes:
 
 What the BTC agent does today:
 
-- Pulls the current BTC/USD spot price from a small fallback chain of public APIs, currently trying CoinGecko and Coinbase spot pricing.
+- Pulls the current BTC/USD spot price from Polymarket RTDS over WebSocket first, then falls back to CoinGecko and Coinbase spot pricing if the RTDS fetch fails.
 - Maintains an in-memory rolling price history during process lifetime only.
 - Approximates market-window open price using the earliest retained BTC sample inside the current 5-minute market window, not a true historical open fetched from a historical BTC data source.
 - Computes 5-minute momentum and volatility from a trailing 5-minute BTC sample window, so analysis continues to reference recent cross-period history even immediately after a new market window begins.
@@ -253,3 +253,7 @@ Do not revert unrelated local changes unless the user explicitly asks for that.
 - Added a pre-LLM quote gate so the BTC loop skips AI decision calls when both outcome tokens are already unsubmitable at current prices.
 - Added `MINIMUM_WALLET_BALANCE` so the BTC loop aborts when available `cash_balance_usdc` falls below the configured wallet floor.
 - Added a last-minute market gate so the BTC loop stops making LLM decisions or trade attempts during the final 60 seconds of a market window.
+
+### 2026-04-24
+
+- Switched the BTC spot-price path to prefer Polymarket RTDS (`wss://ws-live-data.polymarket.com`) with a `crypto_prices` subscription for `btcusdt`, while keeping CoinGecko and Coinbase as HTTP fallbacks and preserving the short-lived cached-price fallback when all live providers fail.

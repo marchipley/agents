@@ -1,6 +1,8 @@
+import os
+import json
 import unittest
-from datetime import datetime, timezone
-from unittest.mock import patch
+from datetime import datetime, timedelta, timezone
+from unittest.mock import MagicMock, patch
 
 import requests
 
@@ -12,6 +14,7 @@ class TestBtcIndicators(unittest.TestCase):
         indicators._PRICE_HISTORY.clear()
         indicators._LAST_SUCCESSFUL_PROVIDER_INDEX = 0
         indicators._PRICE_HISTORY_BACKFILLED = False
+        indicators._LATEST_PRICE_SOURCE = "unknown"
 
     @staticmethod
     def _recorded_price_return(price: float):
@@ -22,43 +25,177 @@ class TestBtcIndicators(unittest.TestCase):
         return _side_effect
 
     def test_fetch_btc_spot_price_uses_secondary_provider_after_primary_failure(self):
+        providers = [
+            ("Polymarket RTDS", MagicMock(side_effect=requests.HTTPError("socket timeout"))),
+            ("Coinbase", MagicMock(return_value=75123.0)),
+        ]
+
         with patch(
-            "custom.btc_agent.indicators._fetch_spot_price_from_coingecko",
-            side_effect=requests.HTTPError("429 Too Many Requests"),
-        ), patch(
-            "custom.btc_agent.indicators._fetch_spot_price_from_coinbase",
-            return_value=75123.0,
+            "custom.btc_agent.indicators._get_price_providers",
+            return_value=providers,
         ):
             price = indicators.fetch_btc_spot_price()
 
         self.assertEqual(price, 75123.0)
         self.assertEqual(indicators.get_latest_cached_price(), 75123.0)
         self.assertEqual(indicators._LAST_SUCCESSFUL_PROVIDER_INDEX, 1)
+        self.assertEqual(indicators._LATEST_PRICE_SOURCE, "Coinbase")
 
     def test_fetch_btc_spot_price_uses_cached_value_when_all_providers_fail(self):
-        indicators._record_price_sample(75000.0)
+        indicators._record_price_sample(
+            75000.0,
+            as_of=datetime.now(timezone.utc),
+        )
+
+        providers = [
+            ("Polymarket RTDS", MagicMock(side_effect=requests.HTTPError("socket timeout"))),
+            ("CoinGecko", MagicMock(side_effect=requests.HTTPError("429 Too Many Requests"))),
+            ("Coinbase", MagicMock(side_effect=requests.HTTPError("503 Service Unavailable"))),
+        ]
 
         with patch(
-            "custom.btc_agent.indicators._fetch_spot_price_from_coingecko",
-            side_effect=requests.HTTPError("429 Too Many Requests"),
-        ), patch(
-            "custom.btc_agent.indicators._fetch_spot_price_from_coinbase",
-            side_effect=requests.HTTPError("503 Service Unavailable"),
+            "custom.btc_agent.indicators._get_price_providers",
+            return_value=providers,
         ):
             price = indicators.fetch_btc_spot_price()
 
         self.assertEqual(price, 75000.0)
+        self.assertTrue(indicators._LATEST_PRICE_SOURCE.startswith("cache:"))
 
-    def test_fetch_btc_spot_price_raises_without_cache_when_all_providers_fail(self):
+    def test_fetch_btc_spot_price_retries_rtds_first_on_each_call(self):
+        rtds_provider = MagicMock(return_value=78019.41)
+        fallback_provider = MagicMock(return_value=75123.0)
+        indicators._LAST_SUCCESSFUL_PROVIDER_INDEX = 1
+
         with patch(
-            "custom.btc_agent.indicators._fetch_spot_price_from_coingecko",
-            side_effect=requests.HTTPError("429 Too Many Requests"),
-        ), patch(
-            "custom.btc_agent.indicators._fetch_spot_price_from_coinbase",
-            side_effect=requests.HTTPError("429 Too Many Requests"),
+            "custom.btc_agent.indicators._get_price_providers",
+            return_value=[
+                ("Polymarket RTDS", rtds_provider),
+                ("Coinbase", fallback_provider),
+            ],
+        ):
+            price = indicators.fetch_btc_spot_price()
+
+        self.assertEqual(price, 78019.41)
+        rtds_provider.assert_called_once()
+        fallback_provider.assert_not_called()
+        self.assertEqual(indicators._LAST_SUCCESSFUL_PROVIDER_INDEX, 0)
+        self.assertEqual(indicators._LATEST_PRICE_SOURCE, "Polymarket RTDS")
+
+    def test_fetch_btc_spot_price_raises_when_cache_is_stale(self):
+        indicators._record_price_sample(
+            75000.0,
+            as_of=datetime.now(timezone.utc) - timedelta(seconds=30),
+        )
+
+        providers = [
+            ("Polymarket RTDS", MagicMock(side_effect=requests.HTTPError("socket timeout"))),
+            ("CoinGecko", MagicMock(side_effect=requests.HTTPError("429 Too Many Requests"))),
+            ("Coinbase", MagicMock(side_effect=requests.HTTPError("503 Service Unavailable"))),
+        ]
+
+        with patch(
+            "custom.btc_agent.indicators._get_price_providers",
+            return_value=providers,
         ):
             with self.assertRaises(requests.HTTPError):
                 indicators.fetch_btc_spot_price()
+
+    def test_fetch_btc_spot_price_raises_without_cache_when_all_providers_fail(self):
+        providers = [
+            ("Polymarket RTDS", MagicMock(side_effect=requests.HTTPError("socket timeout"))),
+            ("CoinGecko", MagicMock(side_effect=requests.HTTPError("429 Too Many Requests"))),
+            ("Coinbase", MagicMock(side_effect=requests.HTTPError("429 Too Many Requests"))),
+        ]
+
+        with patch(
+            "custom.btc_agent.indicators._get_price_providers",
+            return_value=providers,
+        ):
+            with self.assertRaises(requests.HTTPError):
+                indicators.fetch_btc_spot_price()
+
+    def test_fetch_spot_price_from_polymarket_rtds_uses_matching_btc_update(self):
+        fake_socket = MagicMock()
+        fake_socket.recv.side_effect = [
+            json.dumps(
+                {
+                    "topic": "crypto_prices",
+                    "type": "update",
+                    "payload": {"symbol": "ethusdt", "value": 3200.0},
+                }
+            ),
+            json.dumps(
+                {
+                    "topic": "crypto_prices",
+                    "type": "update",
+                    "payload": {"symbol": "btcusdt", "value": 78019.41},
+                }
+            ),
+        ]
+
+        with patch(
+            "custom.btc_agent.indicators._create_polymarket_rtds_connection",
+            return_value=fake_socket,
+        ):
+            price = indicators._fetch_spot_price_from_polymarket_rtds()
+
+        self.assertEqual(price, 78019.41)
+        subscribe_payload = json.loads(fake_socket.send.call_args.args[0])
+        self.assertEqual(subscribe_payload["action"], "subscribe")
+        self.assertEqual(subscribe_payload["subscriptions"][0]["topic"], "crypto_prices")
+        self.assertEqual(
+            json.loads(subscribe_payload["subscriptions"][0]["filters"]),
+            {"symbol": "btcusdt"},
+        )
+        fake_socket.close.assert_called_once()
+
+    def test_fetch_spot_price_from_polymarket_rtds_uses_subscribe_snapshot(self):
+        fake_socket = MagicMock()
+        fake_socket.recv.return_value = json.dumps(
+            {
+                "topic": "crypto_prices",
+                "type": "subscribe",
+                "payload": {
+                    "symbol": "btcusdt",
+                    "data": [
+                        {"timestamp": 1, "value": 77715.34},
+                        {"timestamp": 2, "value": 77753.41},
+                    ],
+                },
+            }
+        )
+
+        with patch(
+            "custom.btc_agent.indicators._create_polymarket_rtds_connection",
+            return_value=fake_socket,
+        ):
+            price = indicators._fetch_spot_price_from_polymarket_rtds()
+
+        self.assertEqual(price, 77753.41)
+        fake_socket.close.assert_called_once()
+
+    def test_create_polymarket_rtds_connection_clears_proxy_env(self):
+        fake_socket = MagicMock()
+        observed_direct_all_proxy = []
+
+        def _create_connection(*args, **kwargs):
+            observed_direct_all_proxy.append(os.environ.get("ALL_PROXY"))
+            return fake_socket
+
+        fake_websocket_module = MagicMock()
+        fake_websocket_module.create_connection.side_effect = _create_connection
+
+        with patch.dict(os.environ, {"ALL_PROXY": "socks5h://10.64.0.1:1080"}, clear=False):
+            with patch(
+                "custom.btc_agent.indicators.websocket",
+                fake_websocket_module,
+            ):
+                connection = indicators._create_polymarket_rtds_connection()
+                self.assertEqual(os.environ.get("ALL_PROXY"), "socks5h://10.64.0.1:1080")
+
+        self.assertIs(connection, fake_socket)
+        self.assertEqual(observed_direct_all_proxy, [None])
 
     def test_build_btc_features_uses_current_window_samples_for_window_open(self):
         indicators._record_price_sample(
@@ -87,6 +224,7 @@ class TestBtcIndicators(unittest.TestCase):
 
         self.assertEqual(features.window_open_price, 75854.11)
         self.assertEqual(features.trailing_5m_open_price, 75854.11)
+        self.assertEqual(features.price_source, "unknown")
         self.assertAlmostEqual(
             features.delta_pct_from_window_open,
             (75821.82 - 75854.11) / 75854.11,
@@ -162,6 +300,7 @@ class TestBtcIndicators(unittest.TestCase):
         features = indicators.BtcFeatures(
             as_of=datetime.now(timezone.utc),
             price_usd=75000.0,
+            price_source="Coinbase",
             window_open_price=74990.0,
             trailing_5m_open_price=74980.0,
             delta_pct_from_window_open=0.0,
@@ -186,6 +325,7 @@ class TestBtcIndicators(unittest.TestCase):
         features = indicators.BtcFeatures(
             as_of=datetime.now(timezone.utc),
             price_usd=75000.0,
+            price_source="Coinbase",
             window_open_price=74990.0,
             trailing_5m_open_price=74980.0,
             delta_pct_from_window_open=0.0,

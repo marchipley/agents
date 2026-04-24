@@ -2,10 +2,17 @@
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+import json
+import os
+import time
 from typing import Optional, List, Tuple
 import statistics
 
 import requests
+try:
+    import websocket
+except ImportError:  # pragma: no cover - optional dependency at import time
+    websocket = None
 
 from .network import http_get
 
@@ -17,12 +24,20 @@ _BACKFILL_WINDOW_SECONDS = 300
 _BACKFILL_BUCKET_SECONDS = 20
 _WINDOW_BASELINE_CARRY_FORWARD_SECONDS = 60
 _WINDOW_BASELINE_LOOKAHEAD_SECONDS = 60
+_LATEST_PRICE_SOURCE = "unknown"
+_CACHED_PRICE_MAX_AGE_SECONDS = 20
+_POLYMARKET_RTDS_URL = "wss://ws-live-data.polymarket.com"
+_POLYMARKET_RTDS_SYMBOL = "btcusdt"
+_POLYMARKET_RTDS_FILTERS = json.dumps({"symbol": _POLYMARKET_RTDS_SYMBOL})
+_POLYMARKET_RTDS_TIMEOUT_SECONDS = 3.0
+_POLYMARKET_RTDS_MAX_MESSAGES = 10
 
 
 @dataclass
 class BtcFeatures:
     as_of: datetime
     price_usd: float
+    price_source: str
     window_open_price: float
     trailing_5m_open_price: float
     delta_pct_from_window_open: float
@@ -58,8 +73,103 @@ def _fetch_spot_price_from_coinbase() -> float:
     return float(data["data"]["amount"])
 
 
+def _create_polymarket_rtds_connection():
+    if websocket is None:
+        raise requests.RequestException("websocket-client is not installed")
+
+    proxy_env_names = (
+        "ALL_PROXY",
+        "all_proxy",
+        "HTTP_PROXY",
+        "http_proxy",
+        "HTTPS_PROXY",
+        "https_proxy",
+    )
+    saved_proxy_env = {name: os.environ.get(name) for name in proxy_env_names}
+    try:
+        for name in proxy_env_names:
+            os.environ.pop(name, None)
+        return websocket.create_connection(
+            _POLYMARKET_RTDS_URL,
+            timeout=_POLYMARKET_RTDS_TIMEOUT_SECONDS,
+        )
+    except Exception as exc:
+        raise requests.RequestException(f"Unable to connect to Polymarket RTDS: {exc}") from exc
+    finally:
+        for name, value in saved_proxy_env.items():
+            if value is not None:
+                os.environ[name] = value
+
+
+def _fetch_spot_price_from_polymarket_rtds() -> float:
+    ws = None
+    subscribe_message = {
+        "action": "subscribe",
+        "subscriptions": [
+            {
+                "topic": "crypto_prices",
+                "type": "update",
+                "filters": _POLYMARKET_RTDS_FILTERS,
+            }
+        ],
+    }
+    deadline = time.monotonic() + _POLYMARKET_RTDS_TIMEOUT_SECONDS
+
+    try:
+        ws = _create_polymarket_rtds_connection()
+        ws.send(json.dumps(subscribe_message))
+
+        for _ in range(_POLYMARKET_RTDS_MAX_MESSAGES):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+
+            ws.settimeout(remaining)
+            raw_message = ws.recv()
+            if not raw_message or raw_message in ("PING", "PONG"):
+                continue
+
+            message = json.loads(raw_message)
+            payload = message.get("payload")
+            if message.get("topic") != "crypto_prices" or not isinstance(payload, dict):
+                continue
+
+            if str(payload.get("symbol", "")).lower() != _POLYMARKET_RTDS_SYMBOL:
+                continue
+
+            if isinstance(payload.get("data"), list) and payload["data"]:
+                latest_item = payload["data"][-1]
+                if isinstance(latest_item, dict) and latest_item.get("value") is not None:
+                    return float(latest_item["value"])
+
+            value = payload.get("value")
+            if value is None:
+                continue
+
+            return float(value)
+    except (
+        OSError,
+        ValueError,
+        requests.RequestException,
+    ) as exc:
+        raise requests.RequestException(f"Polymarket RTDS BTC price fetch failed: {exc}") from exc
+    except Exception as exc:
+        if websocket is not None and isinstance(exc, websocket.WebSocketException):
+            raise requests.RequestException(f"Polymarket RTDS BTC price fetch failed: {exc}") from exc
+        raise
+    finally:
+        if ws is not None:
+            try:
+                ws.close()
+            except Exception:
+                pass
+
+    raise requests.RequestException("Polymarket RTDS returned no BTC price update")
+
+
 def _get_price_providers():
     return [
+        ("Polymarket RTDS", _fetch_spot_price_from_polymarket_rtds),
         ("CoinGecko", _fetch_spot_price_from_coingecko),
         ("Coinbase", _fetch_spot_price_from_coinbase),
     ]
@@ -69,6 +179,14 @@ def get_latest_cached_price() -> Optional[float]:
     if not _PRICE_HISTORY:
         return None
     return _PRICE_HISTORY[-1][1]
+
+
+def get_latest_cached_price_age_seconds(now: Optional[datetime] = None) -> Optional[float]:
+    if not _PRICE_HISTORY:
+        return None
+    as_of = now or datetime.now(timezone.utc)
+    latest_timestamp = _PRICE_HISTORY[-1][0]
+    return max((as_of - latest_timestamp).total_seconds(), 0.0)
 
 
 def _record_price_sample(price: float, as_of: Optional[datetime] = None) -> None:
@@ -201,26 +319,45 @@ def ensure_price_history_backfilled(now: Optional[datetime] = None) -> None:
 
 
 def fetch_btc_spot_price(allow_cached_fallback: bool = True) -> float:
-    global _LAST_SUCCESSFUL_PROVIDER_INDEX
+    global _LAST_SUCCESSFUL_PROVIDER_INDEX, _LATEST_PRICE_SOURCE
 
     providers = _get_price_providers()
     provider_count = len(providers)
+    if provider_count == 0:
+        raise RuntimeError("No BTC price providers are configured")
+
     last_error = None
 
-    for offset in range(provider_count):
-        provider_index = (_LAST_SUCCESSFUL_PROVIDER_INDEX + offset) % provider_count
-        _, provider = providers[provider_index]
+    provider_attempt_order = [0]
+    if provider_count > 1:
+        fallback_count = provider_count - 1
+        fallback_start = 0
+        if _LAST_SUCCESSFUL_PROVIDER_INDEX > 0:
+            fallback_start = (_LAST_SUCCESSFUL_PROVIDER_INDEX - 1) % fallback_count
+
+        for offset in range(fallback_count):
+            provider_attempt_order.append(1 + ((fallback_start + offset) % fallback_count))
+
+    for provider_index in provider_attempt_order:
+        provider_name, provider = providers[provider_index]
         try:
             price = provider()
             _LAST_SUCCESSFUL_PROVIDER_INDEX = provider_index
             _record_price_sample(price)
+            _LATEST_PRICE_SOURCE = provider_name
             return price
         except requests.RequestException as exc:
             last_error = exc
 
     if allow_cached_fallback:
         cached_price = get_latest_cached_price()
-        if cached_price is not None:
+        cached_price_age = get_latest_cached_price_age_seconds()
+        if (
+            cached_price is not None
+            and cached_price_age is not None
+            and cached_price_age <= _CACHED_PRICE_MAX_AGE_SECONDS
+        ):
+            _LATEST_PRICE_SOURCE = f"cache:{cached_price_age:.0f}s"
             return cached_price
 
     if last_error is not None:
@@ -344,6 +481,7 @@ def build_btc_features(window_start_ts: int) -> BtcFeatures:
     return BtcFeatures(
         as_of=now,
         price_usd=price_now,
+        price_source=_LATEST_PRICE_SOURCE,
         window_open_price=window_open_price,
         trailing_5m_open_price=trailing_5m_open_price,
         delta_pct_from_window_open=delta_pct,

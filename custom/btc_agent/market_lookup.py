@@ -299,6 +299,42 @@ def _extract_previous_period_close_from_next_data(payload: dict, slug: str) -> O
     return best_match
 
 
+def _extract_previous_period_final_price_from_next_data(payload: dict, slug: str) -> Optional[float]:
+    slug_match = re.search(r"btc-updown-5m-(\d+)$", slug)
+    if not slug_match:
+        return None
+    current_start_ts = int(slug_match.group(1))
+
+    best_match = None
+
+    def walk(node):
+        nonlocal best_match
+        if best_match is not None:
+            return
+
+        if isinstance(node, dict):
+            event_metadata = node.get("eventMetadata")
+            if isinstance(event_metadata, dict):
+                final_price = _coerce_btc_threshold(event_metadata.get("finalPrice"))
+                end_ts = _coerce_timestamp(
+                    node.get("endDate")
+                    or node.get("endTime")
+                    or node.get("end_ts")
+                )
+                if final_price is not None and end_ts == current_start_ts:
+                    best_match = final_price
+                    return
+
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(payload)
+    return best_match
+
+
 def _fetch_next_data_payload(slug: str, build_id: str) -> Optional[dict]:
     url = f"https://polymarket.com/_next/data/{build_id}/en/event/{slug}.json"
     resp = http_get(url, params={"slug": slug}, timeout=10)
@@ -337,6 +373,9 @@ def build_price_to_beat_debug_report(slug: str) -> str:
         )
         lines.append(
             f"previous_period_close_from_results={_extract_previous_period_close_from_next_data(payload, slug)}"
+        )
+        lines.append(
+            f"previous_period_final_price_from_event_metadata={_extract_previous_period_final_price_from_next_data(payload, slug)}"
         )
         event = _extract_event_from_next_data(payload, slug)
         if isinstance(event, dict):
@@ -570,6 +609,14 @@ def _hydrate_missing_threshold_from_page(market: Optional[BtcUpDownMarket], slug
             previous_period_close = _extract_previous_period_close_from_next_data(next_data_payload, slug)
             if previous_period_close is not None:
                 market.settlement_threshold = previous_period_close
+                return market
+
+            previous_period_final_price = _extract_previous_period_final_price_from_next_data(
+                next_data_payload,
+                slug,
+            )
+            if previous_period_final_price is not None:
+                market.settlement_threshold = previous_period_final_price
                 return market
 
             live_period_open = _extract_live_period_open_from_next_data(next_data_payload, slug)

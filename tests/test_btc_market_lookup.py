@@ -12,6 +12,7 @@ from custom.btc_agent.market_lookup import (
     _extract_live_period_open_from_next_data,
     _extract_market_from_event,
     _extract_previous_period_close_from_next_data,
+    _extract_previous_period_final_price_from_next_data,
     _extract_threshold_from_price_to_beat_response,
     _fetch_event_from_next_data_route,
     _fetch_next_data_payload,
@@ -383,6 +384,37 @@ class TestBtcMarketLookup(unittest.TestCase):
 
         self.assertEqual(threshold, 78019.41)
 
+    def test_extract_previous_period_final_price_from_next_data_uses_matching_end_date(self):
+        payload = {
+            "pageProps": {
+                "events": [
+                    {
+                        "slug": "btc-updown-5m-1777055700",
+                        "endDate": "2026-04-24T18:40:00Z",
+                        "eventMetadata": {
+                            "finalPrice": 77560.75,
+                            "priceToBeat": 77519.716,
+                        },
+                    },
+                    {
+                        "slug": "btc-updown-5m-1777056000",
+                        "endDate": "2026-04-24T18:45:00Z",
+                        "eventMetadata": {
+                            "finalPrice": 77598.79949998436,
+                            "priceToBeat": 77560.75,
+                        },
+                    },
+                ]
+            }
+        }
+
+        threshold = _extract_previous_period_final_price_from_next_data(
+            payload,
+            "btc-updown-5m-1777056000",
+        )
+
+        self.assertEqual(threshold, 77560.75)
+
     def test_build_price_to_beat_debug_report_includes_curl_and_live_open(self):
         payload = {
             "pageProps": {
@@ -405,7 +437,16 @@ class TestBtcMarketLookup(unittest.TestCase):
                             },
                         }
                     ]
-                }
+                },
+                "events": [
+                    {
+                        "slug": "btc-updown-5m-1776982800",
+                        "endDate": "2026-04-23T22:25:00Z",
+                        "eventMetadata": {
+                            "finalPrice": 78210.0,
+                        },
+                    }
+                ],
             }
         }
 
@@ -420,6 +461,7 @@ class TestBtcMarketLookup(unittest.TestCase):
 
         self.assertIn("next_data_curl=curl 'https://polymarket.com/_next/data/build-TfctsWXpff2fKS/en/event/btc-updown-5m-1776983100.json?slug=btc-updown-5m-1776983100'", report)
         self.assertIn("live_period_open=78218.01972274295", report)
+        self.assertIn("previous_period_final_price_from_event_metadata=78210.0", report)
 
     def test_extract_threshold_from_price_to_beat_response_handles_nested_payload(self):
         threshold = _extract_threshold_from_price_to_beat_response(
