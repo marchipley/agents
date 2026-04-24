@@ -11,6 +11,10 @@ from typing import Optional
 from .config import get_polymarket_config, get_trading_config
 from .network import http_get
 
+
+_SETTLEMENT_THRESHOLD_CACHE: dict[str, float] = {}
+
+
 @dataclass
 class BtcUpDownMarket:
     event_id: str
@@ -122,7 +126,20 @@ def _parse_threshold_from_text(*values: Optional[str]) -> Optional[float]:
     return None
 
 
-def _extract_settlement_threshold(event: dict, market: dict, title: str, question: str) -> Optional[float]:
+def _extract_settlement_threshold(
+    event: dict,
+    market: dict,
+    title: str,
+    question: str,
+    slug: Optional[str] = None,
+) -> Optional[float]:
+    if slug and slug.startswith("btc-updown-5m-"):
+        return _parse_threshold_from_text(
+            question,
+            str(market.get("description") or ""),
+            title,
+        )
+
     event_metadata = event.get("eventMetadata") or {}
     return (
         _coerce_btc_threshold(event_metadata.get("priceToBeat"))
@@ -242,7 +259,7 @@ def _extract_live_period_open_from_next_data(payload: dict, slug: str) -> Option
     return None
 
 
-def _extract_current_period_open_from_next_data(payload: dict, slug: str) -> Optional[float]:
+def _extract_previous_period_close_from_next_data(payload: dict, slug: str) -> Optional[float]:
     page_props = payload.get("pageProps")
     if not isinstance(page_props, dict):
         props = payload.get("props") or {}
@@ -268,16 +285,16 @@ def _extract_current_period_open_from_next_data(payload: dict, slug: str) -> Opt
         for item in results:
             if not isinstance(item, dict):
                 continue
-            open_price = _coerce_btc_threshold(item.get("openPrice"))
-            start_time = item.get("startTime")
-            if open_price is None or not start_time:
+            close_price = _coerce_btc_threshold(item.get("closePrice"))
+            end_time = item.get("endTime")
+            if close_price is None or not end_time:
                 continue
 
-            start_ts = _coerce_timestamp(start_time)
-            if start_ts != current_start_ts:
+            end_ts = _coerce_timestamp(end_time)
+            if end_ts != current_start_ts:
                 continue
 
-            best_match = open_price
+            best_match = close_price
 
     return best_match
 
@@ -319,7 +336,7 @@ def build_price_to_beat_debug_report(slug: str) -> str:
             f"live_period_open={_extract_live_period_open_from_next_data(payload, slug)}"
         )
         lines.append(
-            f"current_period_open_from_results={_extract_current_period_open_from_next_data(payload, slug)}"
+            f"previous_period_close_from_results={_extract_previous_period_close_from_next_data(payload, slug)}"
         )
         event = _extract_event_from_next_data(payload, slug)
         if isinstance(event, dict):
@@ -397,13 +414,35 @@ def _fetch_price_to_beat_by_slug(slug: str) -> Optional[float]:
 def _extract_threshold_from_page_html(html: str) -> Optional[float]:
     decoded_html = unescape(html)
 
+    direct_span_match = re.search(
+        r"<span[^>]*class=['\"][^'\"]*\btext-text-secondary\b[^'\"]*\btext-heading-2xl\b[^'\"]*['\"][^>]*>\s*\$([0-9][0-9,]*(?:\.[0-9]+)?)\s*</span>",
+        decoded_html,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if direct_span_match:
+        try:
+            return _coerce_btc_threshold(direct_span_match.group(1).replace(",", ""))
+        except ValueError:
+            pass
+
+    labeled_span_match = re.search(
+        r"Price\s+To\s+Beat.*?<span[^>]*class=\"[^\"]*text-text-secondary[^\"]*text-heading-2xl[^\"]*\"[^>]*>\s*\$([0-9][0-9,]*(?:\.[0-9]+)?)\s*</span>",
+        decoded_html,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if labeled_span_match:
+        try:
+            return _coerce_btc_threshold(labeled_span_match.group(1).replace(",", ""))
+        except ValueError:
+            pass
+
     label_match = re.search(r"Price\s+To\s+Beat|Price\s+to\s+Beat", decoded_html, flags=re.IGNORECASE)
     if label_match:
         trailing_html = decoded_html[label_match.end() : label_match.end() + 2000]
         price_match = re.search(r"\$([0-9][0-9,]*(?:\.[0-9]+)?)", trailing_html)
         if price_match:
             try:
-                return float(price_match.group(1).replace(",", ""))
+                return _coerce_btc_threshold(price_match.group(1).replace(",", ""))
             except ValueError:
                 pass
 
@@ -416,7 +455,7 @@ def _extract_threshold_from_page_html(html: str) -> Optional[float]:
         match = re.search(pattern, decoded_html, flags=re.IGNORECASE)
         if match:
             try:
-                return float(match.group(1).replace(",", ""))
+                return _coerce_btc_threshold(match.group(1).replace(",", ""))
             except ValueError:
                 continue
     return None
@@ -488,7 +527,7 @@ def _extract_market_from_event(event: dict, slug: str) -> Optional[BtcUpDownMark
         or m.get("endDate")
     )
     question = str(m.get("question") or "")
-    settlement_threshold = _extract_settlement_threshold(event, m, title, question)
+    settlement_threshold = _extract_settlement_threshold(event, m, title, question, slug=slug)
 
     return BtcUpDownMarket(
         event_id=str(event.get("id")),
@@ -528,14 +567,14 @@ def _hydrate_missing_threshold_from_page(market: Optional[BtcUpDownMarket], slug
         except Exception:
             next_data_payload = None
         if isinstance(next_data_payload, dict):
+            previous_period_close = _extract_previous_period_close_from_next_data(next_data_payload, slug)
+            if previous_period_close is not None:
+                market.settlement_threshold = previous_period_close
+                return market
+
             live_period_open = _extract_live_period_open_from_next_data(next_data_payload, slug)
             if live_period_open is not None:
                 market.settlement_threshold = live_period_open
-                return market
-
-            current_period_open = _extract_current_period_open_from_next_data(next_data_payload, slug)
-            if current_period_open is not None:
-                market.settlement_threshold = current_period_open
                 return market
 
             next_data_event = _extract_event_from_next_data(next_data_payload, slug)
@@ -579,6 +618,35 @@ def _hydrate_missing_threshold_from_page(market: Optional[BtcUpDownMarket], slug
 
     return market
 
+
+def _apply_cached_settlement_threshold(market: Optional[BtcUpDownMarket]) -> Optional[BtcUpDownMarket]:
+    if market is None:
+        return None
+    cached_threshold = _SETTLEMENT_THRESHOLD_CACHE.get(market.slug)
+    if cached_threshold is not None:
+        market.settlement_threshold = cached_threshold
+    return market
+
+
+def _cache_settlement_threshold(market: Optional[BtcUpDownMarket]) -> Optional[BtcUpDownMarket]:
+    if market is None:
+        return None
+    if _coerce_btc_threshold(market.settlement_threshold) is not None:
+        _SETTLEMENT_THRESHOLD_CACHE[market.slug] = float(market.settlement_threshold)
+    return market
+
+
+def get_btc_updown_market_by_slug(slug: str) -> Optional[BtcUpDownMarket]:
+    event = _fetch_event_by_slug(slug)
+    market = _extract_market_from_event(event, slug)
+    if market is None:
+        return None
+    market = _apply_cached_settlement_threshold(market)
+    if _coerce_btc_threshold(market.settlement_threshold) is not None:
+        return _cache_settlement_threshold(market)
+    market = _hydrate_missing_threshold_from_page(market, slug)
+    return _cache_settlement_threshold(market)
+
 def find_current_btc_updown_market() -> Optional[BtcUpDownMarket]:
     """
     1) If BTC_AGENT_MARKET_SLUG is set, try that first (debugging / backtesting).
@@ -591,20 +659,18 @@ def find_current_btc_updown_market() -> Optional[BtcUpDownMarket]:
     # 1. Try override slug if provided
     if override_slug:
         try:
-            event = _fetch_event_by_slug(override_slug)
-            market = _extract_market_from_event(event, override_slug)
+            market = get_btc_updown_market_by_slug(override_slug)
             if market:
-                return _hydrate_missing_threshold_from_page(market, override_slug)
+                return market
         except requests.HTTPError:
             pass  # fall through to dynamic
 
     # 2. Use dynamic current window slug
     slug = _current_btc_5m_slug()
     try:
-        event = _fetch_event_by_slug(slug)
-        market = _extract_market_from_event(event, slug)
+        market = get_btc_updown_market_by_slug(slug)
         if market:
-            return _hydrate_missing_threshold_from_page(market, slug)
+            return market
     except requests.HTTPError:
         return None
 

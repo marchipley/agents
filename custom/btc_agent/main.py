@@ -6,7 +6,11 @@ import time
 import sys
 
 from .config import get_trading_config
-from .market_lookup import build_price_to_beat_debug_report, find_current_btc_updown_market
+from .market_lookup import (
+    build_price_to_beat_debug_report,
+    find_current_btc_updown_market,
+    get_btc_updown_market_by_slug,
+)
 from .indicators import (
     build_btc_features,
     estimate_market_window_reference_price,
@@ -62,13 +66,32 @@ def has_valid_price_to_beat(value) -> bool:
 
 
 def write_price_to_beat_debug_file(slug: str) -> None:
-    debug_path = os.path.join(os.getcwd(), "priceToBeatDebug.txt")
+    debug_path = os.path.join(os.getcwd(), "logs", "priceToBeatDebug.txt")
     try:
         with open(debug_path, "w", encoding="utf-8") as debug_file:
             debug_file.write(build_price_to_beat_debug_report(slug))
         print(f"price_to_beat_debug_file: {debug_path}")
     except Exception as exc:
         print(f"price_to_beat_debug_file_error: {exc}")
+
+
+def resolve_price_to_beat_with_retries(market, retry_attempts: int = 2, retry_delay_seconds: int = 3):
+    if has_valid_price_to_beat(market.settlement_threshold):
+        return market
+
+    for attempt in range(1, retry_attempts + 1):
+        print(
+            "price_to_beat_retry: "
+            f"attempt {attempt}/{retry_attempts} for {market.slug} after {retry_delay_seconds}s"
+        )
+        time.sleep(retry_delay_seconds)
+        refreshed_market = get_btc_updown_market_by_slug(market.slug)
+        if refreshed_market is not None:
+            market = refreshed_market
+        if has_valid_price_to_beat(market.settlement_threshold):
+            return market
+
+    return market
 
 
 def print_ip_location(public_ip, location, debug: bool) -> None:
@@ -325,6 +348,7 @@ def run_once() -> None:
     if period_changed:
         print(f"New 5-minute market period detected: {market.slug}")
 
+    market = resolve_price_to_beat_with_retries(market)
     if not has_valid_price_to_beat(market.settlement_threshold):
         print_market_context(market, debug=cfg.debug)
         write_price_to_beat_debug_file(market.slug)

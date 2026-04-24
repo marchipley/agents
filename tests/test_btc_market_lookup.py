@@ -6,11 +6,12 @@ from unittest.mock import Mock, patch
 sys.modules.setdefault("dotenv", types.SimpleNamespace(load_dotenv=lambda *args, **kwargs: None))
 
 from custom.btc_agent.market_lookup import (
-    _extract_current_period_open_from_next_data,
+    build_price_to_beat_debug_report,
     _extract_next_build_id,
     _extract_event_from_next_data,
     _extract_live_period_open_from_next_data,
     _extract_market_from_event,
+    _extract_previous_period_close_from_next_data,
     _extract_threshold_from_price_to_beat_response,
     _fetch_event_from_next_data_route,
     _fetch_next_data_payload,
@@ -21,7 +22,7 @@ from custom.btc_agent.market_lookup import (
 
 
 class TestBtcMarketLookup(unittest.TestCase):
-    def test_extract_market_prefers_event_metadata_price_to_beat(self):
+    def test_extract_market_ignores_structured_thresholds_for_btc_updown_markets(self):
         event = {
             "id": "1",
             "title": "Bitcoin Up or Down - April 22, 6:10PM-6:15PM ET",
@@ -46,16 +47,16 @@ class TestBtcMarketLookup(unittest.TestCase):
         market = _extract_market_from_event(event, "btc-updown-5m-1776895800")
 
         self.assertIsNotNone(market)
-        self.assertEqual(market.settlement_threshold, 78842.09031747903)
+        self.assertIsNone(market.settlement_threshold)
 
-    def test_extract_market_prefers_group_item_threshold(self):
+    def test_extract_market_ignores_group_item_threshold_for_btc_updown_markets(self):
         event = {
             "id": "1",
             "title": "Bitcoin Up or Down - April 22, 1:40PM-1:45PM ET",
             "markets": [
                 {
                     "id": "2",
-                    "question": "Will Bitcoin finish above or below 78860?",
+                    "question": "Bitcoin Up or Down - April 22, 1:40PM-1:45PM ET",
                     "groupItemThreshold": 78860,
                     "tokens": [
                         {"outcome": "Up", "token_id": "up-token"},
@@ -70,8 +71,8 @@ class TestBtcMarketLookup(unittest.TestCase):
         market = _extract_market_from_event(event, "btc-updown-5m-1776879600")
 
         self.assertIsNotNone(market)
-        self.assertEqual(market.settlement_threshold, 78860.0)
-        self.assertEqual(market.question, "Will Bitcoin finish above or below 78860?")
+        self.assertIsNone(market.settlement_threshold)
+        self.assertEqual(market.question, "Bitcoin Up or Down - April 22, 1:40PM-1:45PM ET")
 
     def test_extract_market_rejects_unrealistic_small_structured_thresholds(self):
         event = {
@@ -298,7 +299,7 @@ class TestBtcMarketLookup(unittest.TestCase):
 
         self.assertEqual(payload["pageProps"]["key"], '["btc-updown-5m-1776979200"]')
 
-    def test_extract_current_period_open_from_next_data_uses_matching_start_time(self):
+    def test_extract_previous_period_close_from_next_data_uses_matching_end_time(self):
         payload = {
             "pageProps": {
                 "dehydratedState": {
@@ -342,7 +343,7 @@ class TestBtcMarketLookup(unittest.TestCase):
             }
         }
 
-        threshold = _extract_current_period_open_from_next_data(
+        threshold = _extract_previous_period_close_from_next_data(
             payload,
             "btc-updown-5m-1776979200",
         )
@@ -381,6 +382,44 @@ class TestBtcMarketLookup(unittest.TestCase):
         )
 
         self.assertEqual(threshold, 78019.41)
+
+    def test_build_price_to_beat_debug_report_includes_curl_and_live_open(self):
+        payload = {
+            "pageProps": {
+                "dehydratedState": {
+                    "queries": [
+                        {
+                            "queryKey": [
+                                "crypto-prices",
+                                "price",
+                                "BTC",
+                                "2026-04-23T22:25:00Z",
+                                "fiveminute",
+                                "2026-04-23T22:30:00Z",
+                            ],
+                            "state": {
+                                "data": {
+                                    "openPrice": 78218.01972274295,
+                                    "closePrice": None,
+                                }
+                            },
+                        }
+                    ]
+                }
+            }
+        }
+
+        with patch(
+            "custom.btc_agent.market_lookup._fetch_polymarket_page",
+            return_value='<script id="__NEXT_DATA__" type="application/json">{"buildId":"build-TfctsWXpff2fKS"}</script>',
+        ), patch(
+            "custom.btc_agent.market_lookup._fetch_next_data_payload",
+            return_value=payload,
+        ):
+            report = build_price_to_beat_debug_report("btc-updown-5m-1776983100")
+
+        self.assertIn("next_data_curl=curl 'https://polymarket.com/_next/data/build-TfctsWXpff2fKS/en/event/btc-updown-5m-1776983100.json?slug=btc-updown-5m-1776983100'", report)
+        self.assertIn("live_period_open=78218.01972274295", report)
 
     def test_extract_threshold_from_price_to_beat_response_handles_nested_payload(self):
         threshold = _extract_threshold_from_price_to_beat_response(
@@ -451,6 +490,38 @@ class TestBtcMarketLookup(unittest.TestCase):
         threshold = _extract_threshold_from_page_html(html)
 
         self.assertEqual(threshold, 77722.39)
+
+    def test_extract_threshold_from_page_html_prefers_labeled_text_heading_span(self):
+        html = """
+        <div class="flex items-center gap-1 justify-between">
+            <span class="text-body-xs font-semibold">Price To Beat</span>
+        </div>
+        <div>ignore 1 and 5 here</div>
+        <span class="mt-1 tracking-wide font-[620] text-text-secondary text-heading-2xl">$77,722.39</span>
+        """
+
+        threshold = _extract_threshold_from_page_html(html)
+
+        self.assertEqual(threshold, 77722.39)
+
+    def test_extract_threshold_from_page_html_parses_direct_text_heading_span(self):
+        html = """
+        <div>other values like 1 and 5 should be ignored</div>
+        <span class="mt-1 tracking-wide font-[620] text-text-secondary text-heading-2xl">$77,722.39</span>
+        """
+
+        threshold = _extract_threshold_from_page_html(html)
+
+        self.assertEqual(threshold, 77722.39)
+
+    def test_extract_threshold_from_page_html_rejects_small_direct_text_heading_span(self):
+        html = """
+        <span class="mt-1 tracking-wide font-[620] text-text-secondary text-heading-2xl">$1.00</span>
+        """
+
+        threshold = _extract_threshold_from_page_html(html)
+
+        self.assertIsNone(threshold)
 
 
 if __name__ == "__main__":
