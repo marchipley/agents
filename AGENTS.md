@@ -89,6 +89,7 @@ Optional / supported:
 - `ALL_PROXY` optional global proxy setting for outbound API calls; for Mullvad WireGuard the intended SOCKS5 value is `socks5h://10.64.0.1:1080`
 - `HTTP_PROXY` / `HTTPS_PROXY` optional proxy settings for outbound API calls, including LLM requests and geolocation checks
 - `NO_PROXY` optional bypass list for local addresses
+- `USE_PROXY` default: `true`; when set to `false`, the BTC agent ignores `ALL_PROXY`, `HTTP_PROXY`, and `HTTPS_PROXY` for its shared HTTP/LLM network path
 - `USE_PAPER_TRADES` default: `true`
 - `MINIMUM_WALLET_BALANCE` default: `0`
 - `BTC_AGENT_LIVE_FEE_RATE_BPS` default: `1000`
@@ -126,6 +127,7 @@ What the BTC agent does today:
 - Performs a startup IP geolocation check and refuses to run unless the current public IP resolves to an allowed country, currently Indonesia or Mexico.
 - Respects standard proxy environment variables such as `HTTP_PROXY` and `HTTPS_PROXY` for outbound requests when they are exported in the shell or defined in the repo `.env`.
 - Routes outbound BTC-agent requests through `ALL_PROXY` when configured, including geolocation, BTC spot pricing, Polymarket API lookups, and LLM calls.
+- Allows proxy routing to be disabled globally with `USE_PROXY=false`, which causes the agent to use direct connections for shared HTTP/LLM requests even if proxy environment variables are present.
 - Uses the configured AI engine with JSON output to decide `UP`, `DOWN`, or `NO_TRADE`.
 - Prints the current market `price_to_beat` in the BTC-agent output and includes that same period baseline in the LLM decision prompt when the threshold is available from Polymarket.
 - Retries LLM API calls across configurable attempts using a single per-attempt timeout, logs each attempt result to stdout, and converts repeated failures into a `NO_TRADE` so the loop can move on to the next tick.

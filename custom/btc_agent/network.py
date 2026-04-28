@@ -5,7 +5,16 @@ from typing import Any, Optional
 import requests
 
 
+def is_proxy_enabled() -> bool:
+    raw_value = os.getenv("USE_PROXY")
+    if raw_value is None:
+        return True
+    return raw_value.strip().lower() in ("1", "true", "yes", "on")
+
+
 def _get_env_proxy(name: str) -> Optional[str]:
+    if not is_proxy_enabled():
+        return None
     value = os.getenv(name) or os.getenv(name.lower())
     if not value:
         return None
@@ -85,6 +94,9 @@ def mask_proxy_url(proxy_url: Optional[str]) -> str:
 
 
 def describe_proxy_configuration() -> str:
+    if not is_proxy_enabled():
+        return "disabled via USE_PROXY=false"
+
     all_proxy = _get_env_proxy("ALL_PROXY")
     https_proxy = _get_env_proxy("HTTPS_PROXY")
     http_proxy = _get_env_proxy("HTTP_PROXY")
@@ -101,6 +113,13 @@ def describe_proxy_configuration() -> str:
 def http_get(url: str, **kwargs: Any) -> requests.Response:
     request_kwargs = dict(kwargs)
     proxies = request_kwargs.pop("proxies", None)
+    if not is_proxy_enabled():
+        session = requests.Session()
+        session.trust_env = False
+        try:
+            return session.get(url, proxies=proxies, **request_kwargs)
+        finally:
+            session.close()
     if proxies is None:
         proxy_url = get_proxy_url_for_requests("https" if url.startswith("https://") else "http")
         if proxy_url:
@@ -112,9 +131,30 @@ def http_get(url: str, **kwargs: Any) -> requests.Response:
 def http_post(url: str, **kwargs: Any) -> requests.Response:
     request_kwargs = dict(kwargs)
     proxies = request_kwargs.pop("proxies", None)
+    if not is_proxy_enabled():
+        session = requests.Session()
+        session.trust_env = False
+        try:
+            return session.post(url, proxies=proxies, **request_kwargs)
+        finally:
+            session.close()
     if proxies is None:
         proxy_url = get_proxy_url_for_requests("https" if url.startswith("https://") else "http")
         if proxy_url:
             proxies = {"http": proxy_url, "https": proxy_url}
 
     return requests.post(url, proxies=proxies, **request_kwargs)
+
+
+def check_internet_connectivity(timeout: float = 5.0) -> tuple[bool, str]:
+    test_url = "https://www.google.com/generate_204"
+    session = requests.Session()
+    session.trust_env = False
+    try:
+        response = session.get(test_url, timeout=timeout)
+        response.raise_for_status()
+        return True, f"Connectivity OK via {test_url} (HTTP {response.status_code})"
+    except requests.RequestException as exc:
+        return False, f"Connectivity check failed via {test_url}: {exc}"
+    finally:
+        session.close()

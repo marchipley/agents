@@ -12,9 +12,20 @@ from openai import OpenAI  # v1 SDK
 from .config import get_llm_config
 from .indicators import BtcFeatures
 from .market_lookup import BtcUpDownMarket
-from .network import get_proxy_url_for_httpx, http_post
+from .network import (
+    check_internet_connectivity,
+    get_proxy_url_for_httpx,
+    get_proxy_url_for_requests,
+    http_post,
+    is_proxy_enabled,
+    mask_proxy_url,
+)
 
 DecisionSide = Literal["UP", "DOWN", "NO_TRADE"]
+
+
+class ConnectivityCheckFailed(RuntimeError):
+    pass
 
 
 @dataclass
@@ -136,6 +147,26 @@ def _print_llm_attempt_result(
     )
 
 
+def _print_llm_connection_config(
+    engine: str,
+    model: str,
+    timeout_seconds: float,
+    proxy_url: Optional[str],
+) -> None:
+    print("LLM connection:")
+    print(f"  engine            = {engine}")
+    print(f"  model             = {model}")
+    print(f"  timeout_seconds   = {timeout_seconds:.1f}")
+    print(f"  proxy             = {mask_proxy_url(proxy_url)}")
+
+
+def _check_connectivity_after_llm_failure() -> None:
+    is_connected, detail = check_internet_connectivity()
+    print(f"Internet connectivity check: {detail}")
+    if not is_connected:
+        raise ConnectivityCheckFailed(detail)
+
+
 def _request_openai_once(
     model: str,
     api_key: str,
@@ -143,19 +174,31 @@ def _request_openai_once(
     user_prompt: str,
     timeout_seconds: float,
 ) -> str:
+    proxy_url = get_proxy_url_for_httpx()
+    _print_llm_connection_config(
+        "openai",
+        model,
+        timeout_seconds,
+        proxy_url,
+    )
+
     client_kwargs = {
         "api_key": api_key,
         "timeout": timeout_seconds,
         "max_retries": 0,
     }
-    proxy_url = get_proxy_url_for_httpx()
-    if proxy_url:
-        try:
-            from openai import DefaultHttpxClient
+    try:
+        from openai import DefaultHttpxClient
 
-            client_kwargs["http_client"] = DefaultHttpxClient(proxy=proxy_url)
-        except Exception:
-            pass
+        if proxy_url:
+            client_kwargs["http_client"] = DefaultHttpxClient(
+                proxy=proxy_url,
+                trust_env=False,
+            )
+        elif not is_proxy_enabled():
+            client_kwargs["http_client"] = DefaultHttpxClient(trust_env=False)
+    except Exception:
+        pass
 
     client = OpenAI(**client_kwargs)
     resp = client.chat.completions.create(
@@ -211,6 +254,10 @@ def _request_openai_decision(
                 False,
                 str(exc),
             )
+            try:
+                _check_connectivity_after_llm_failure()
+            except ConnectivityCheckFailed as connectivity_exc:
+                raise RuntimeError(f"OpenAI request failed: {connectivity_exc}") from exc
             if attempt_number >= retry_attempts:
                 raise RuntimeError(f"OpenAI request failed: {exc}") from exc
             time.sleep(retry_timer_seconds)
@@ -227,6 +274,14 @@ def _request_gemini_decision(
     attempt_number: int = 1,
     total_attempts: int = 3,
 ) -> str:
+    proxy_url = get_proxy_url_for_requests("https")
+    _print_llm_connection_config(
+        "gemini",
+        model,
+        timeout_seconds,
+        proxy_url,
+    )
+
     url = (
         "https://generativelanguage.googleapis.com/v1beta/models/"
         f"{model}:generateContent"
@@ -298,7 +353,10 @@ def _request_gemini_decision(
             False,
             str(exc),
         )
+        _check_connectivity_after_llm_failure()
         raise RuntimeError(f"Gemini request failed: {exc}") from exc
+    except ConnectivityCheckFailed:
+        raise
     except RuntimeError as exc:
         _print_llm_attempt_result(
             "gemini",
@@ -308,6 +366,7 @@ def _request_gemini_decision(
             False,
             str(exc),
         )
+        _check_connectivity_after_llm_failure()
         raise RuntimeError(f"Gemini request failed: {exc}") from exc
 
 
@@ -351,6 +410,8 @@ def _request_gemini_decision_with_parse_retry(
             time.sleep(retry_timer_seconds)
         except RuntimeError as exc:
             last_error = exc
+            if isinstance(exc, ConnectivityCheckFailed):
+                raise RuntimeError(f"Gemini request failed: {exc}") from exc
             if attempt_number >= retry_attempts:
                 raise
             time.sleep(retry_timer_seconds)
