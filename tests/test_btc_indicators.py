@@ -1,6 +1,7 @@
+import json
 import unittest
 from datetime import datetime, timezone
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import requests
 
@@ -23,7 +24,7 @@ class TestBtcIndicators(unittest.TestCase):
 
     def test_fetch_btc_spot_price_uses_secondary_provider_after_primary_failure(self):
         with patch(
-            "custom.btc_agent.indicators._fetch_spot_price_from_coingecko",
+            "custom.btc_agent.indicators._fetch_spot_price_from_polymarket_rtds",
             side_effect=requests.HTTPError("429 Too Many Requests"),
         ), patch(
             "custom.btc_agent.indicators._fetch_spot_price_from_coinbase",
@@ -39,10 +40,13 @@ class TestBtcIndicators(unittest.TestCase):
         indicators._record_price_sample(75000.0)
 
         with patch(
-            "custom.btc_agent.indicators._fetch_spot_price_from_coingecko",
+            "custom.btc_agent.indicators._fetch_spot_price_from_polymarket_rtds",
             side_effect=requests.HTTPError("429 Too Many Requests"),
         ), patch(
             "custom.btc_agent.indicators._fetch_spot_price_from_coinbase",
+            side_effect=requests.HTTPError("503 Service Unavailable"),
+        ), patch(
+            "custom.btc_agent.indicators._fetch_spot_price_from_coingecko",
             side_effect=requests.HTTPError("503 Service Unavailable"),
         ):
             price = indicators.fetch_btc_spot_price()
@@ -51,14 +55,75 @@ class TestBtcIndicators(unittest.TestCase):
 
     def test_fetch_btc_spot_price_raises_without_cache_when_all_providers_fail(self):
         with patch(
-            "custom.btc_agent.indicators._fetch_spot_price_from_coingecko",
+            "custom.btc_agent.indicators._fetch_spot_price_from_polymarket_rtds",
             side_effect=requests.HTTPError("429 Too Many Requests"),
         ), patch(
             "custom.btc_agent.indicators._fetch_spot_price_from_coinbase",
             side_effect=requests.HTTPError("429 Too Many Requests"),
+        ), patch(
+            "custom.btc_agent.indicators._fetch_spot_price_from_coingecko",
+            side_effect=requests.HTTPError("429 Too Many Requests"),
         ):
             with self.assertRaises(requests.HTTPError):
                 indicators.fetch_btc_spot_price()
+
+    def test_fetch_spot_price_from_polymarket_rtds_prefers_live_update_over_snapshot(self):
+        fake_socket = MagicMock()
+        fake_socket.recv.side_effect = [
+            json.dumps(
+                {
+                    "topic": "crypto_prices",
+                    "type": "subscribe",
+                    "payload": {
+                        "symbol": "btcusdt",
+                        "data": [{"timestamp": 1_777_000_000_000, "value": 75920.0}],
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "topic": "crypto_prices",
+                    "type": "update",
+                    "payload": {"symbol": "btcusdt", "timestamp": 1_777_000_001_000, "value": 75927.0},
+                }
+            ),
+        ]
+
+        with patch(
+            "custom.btc_agent.indicators._create_polymarket_rtds_connection",
+            return_value=fake_socket,
+        ):
+            price = indicators._fetch_spot_price_from_polymarket_rtds()
+
+        self.assertEqual(price, 75927.0)
+
+    def test_fetch_spot_price_from_polymarket_rtds_rejects_stale_snapshot(self):
+        fake_socket = MagicMock()
+        fake_socket.recv.side_effect = [
+            json.dumps(
+                {
+                    "topic": "crypto_prices",
+                    "type": "subscribe",
+                    "payload": {
+                        "symbol": "btcusdt",
+                        "data": [{"timestamp": 1_700_000_000_000, "value": 75920.0}],
+                    },
+                }
+            ),
+            TimeoutError("no fresh update"),
+        ]
+
+        with patch(
+            "custom.btc_agent.indicators._create_polymarket_rtds_connection",
+            return_value=fake_socket,
+        ), patch(
+            "custom.btc_agent.indicators.datetime",
+        ) as mock_datetime:
+            mock_datetime.now.return_value = datetime.fromtimestamp(1_777_000_100, tz=timezone.utc)
+            mock_datetime.fromtimestamp.side_effect = datetime.fromtimestamp
+            mock_datetime.timezone = timezone
+            with self.assertRaises(requests.RequestException):
+                indicators._fetch_spot_price_from_polymarket_rtds()
 
     def test_build_btc_features_uses_current_window_samples_for_window_open(self):
         indicators._record_price_sample(

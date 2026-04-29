@@ -2,10 +2,17 @@
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+import json
+import os
+import time
 from typing import Optional, List, Tuple
 import statistics
 
 import requests
+try:
+    import websocket
+except ImportError:  # pragma: no cover
+    websocket = None
 
 from .network import http_get
 
@@ -17,6 +24,12 @@ _BACKFILL_WINDOW_SECONDS = 300
 _BACKFILL_BUCKET_SECONDS = 20
 _WINDOW_BASELINE_CARRY_FORWARD_SECONDS = 60
 _WINDOW_BASELINE_LOOKAHEAD_SECONDS = 60
+_POLYMARKET_RTDS_URL = "wss://ws-live-data.polymarket.com"
+_POLYMARKET_RTDS_SYMBOL = "btcusdt"
+_POLYMARKET_RTDS_FILTERS = json.dumps({"symbol": _POLYMARKET_RTDS_SYMBOL})
+_POLYMARKET_RTDS_TIMEOUT_SECONDS = 3.0
+_POLYMARKET_RTDS_MAX_MESSAGES = 8
+_POLYMARKET_RTDS_MAX_SNAPSHOT_AGE_SECONDS = 3.0
 
 
 @dataclass
@@ -58,10 +71,153 @@ def _fetch_spot_price_from_coinbase() -> float:
     return float(data["data"]["amount"])
 
 
+def _create_polymarket_rtds_connection():
+    if websocket is None:
+        raise requests.RequestException("websocket-client is not installed")
+
+    proxy_env_names = (
+        "ALL_PROXY",
+        "all_proxy",
+        "HTTP_PROXY",
+        "http_proxy",
+        "HTTPS_PROXY",
+        "https_proxy",
+    )
+    saved_proxy_env = {name: os.environ.get(name) for name in proxy_env_names}
+    try:
+        for name in proxy_env_names:
+            os.environ.pop(name, None)
+        return websocket.create_connection(
+            _POLYMARKET_RTDS_URL,
+            timeout=_POLYMARKET_RTDS_TIMEOUT_SECONDS,
+        )
+    except Exception as exc:
+        raise requests.RequestException(f"Unable to connect to Polymarket RTDS: {exc}") from exc
+    finally:
+        for name, value in saved_proxy_env.items():
+            if value is not None:
+                os.environ[name] = value
+
+
+def _parse_rtds_snapshot_price(message: dict) -> Optional[Tuple[float, datetime]]:
+    payload = message.get("payload")
+    if not isinstance(payload, dict):
+        return None
+    if str(payload.get("symbol", "")).lower() != _POLYMARKET_RTDS_SYMBOL:
+        return None
+    data = payload.get("data")
+    if not isinstance(data, list) or not data:
+        return None
+    latest_item = data[-1]
+    if not isinstance(latest_item, dict):
+        return None
+    value = latest_item.get("value")
+    timestamp_ms = latest_item.get("timestamp")
+    if value is None or timestamp_ms is None:
+        return None
+    return (
+        float(value),
+        datetime.fromtimestamp(float(timestamp_ms) / 1000, tz=timezone.utc),
+    )
+
+
+def _parse_rtds_update_price(message: dict) -> Optional[Tuple[float, datetime]]:
+    payload = message.get("payload")
+    if not isinstance(payload, dict):
+        return None
+    if str(payload.get("symbol", "")).lower() != _POLYMARKET_RTDS_SYMBOL:
+        return None
+    value = payload.get("value")
+    timestamp_ms = payload.get("timestamp")
+    if value is None or timestamp_ms is None:
+        return None
+    return (
+        float(value),
+        datetime.fromtimestamp(float(timestamp_ms) / 1000, tz=timezone.utc),
+    )
+
+
+def _fetch_spot_price_from_polymarket_rtds() -> float:
+    ws = None
+    latest_snapshot: Optional[Tuple[float, datetime]] = None
+    subscribe_message = {
+        "action": "subscribe",
+        "subscriptions": [
+            {
+                "topic": "crypto_prices",
+                "type": "update",
+                "filters": _POLYMARKET_RTDS_FILTERS,
+            }
+        ],
+    }
+    deadline = time.monotonic() + _POLYMARKET_RTDS_TIMEOUT_SECONDS
+
+    try:
+        ws = _create_polymarket_rtds_connection()
+        ws.send(json.dumps(subscribe_message))
+
+        for _ in range(_POLYMARKET_RTDS_MAX_MESSAGES):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+
+            ws.settimeout(remaining)
+            raw_message = ws.recv()
+            if not raw_message or raw_message in ("PING", "PONG"):
+                continue
+
+            message = json.loads(raw_message)
+            if message.get("topic") != "crypto_prices":
+                continue
+
+            if message.get("type") == "update":
+                parsed_update = _parse_rtds_update_price(message)
+                if parsed_update is not None:
+                    price, as_of = parsed_update
+                    _record_price_sample(price, as_of=as_of)
+                    return price
+
+            parsed_snapshot = _parse_rtds_snapshot_price(message)
+            if parsed_snapshot is not None:
+                latest_snapshot = parsed_snapshot
+
+        if latest_snapshot is not None:
+            price, as_of = latest_snapshot
+            snapshot_age_seconds = max(
+                (datetime.now(timezone.utc) - as_of).total_seconds(),
+                0.0,
+            )
+            if snapshot_age_seconds <= _POLYMARKET_RTDS_MAX_SNAPSHOT_AGE_SECONDS:
+                _record_price_sample(price, as_of=as_of)
+                return price
+            raise requests.RequestException(
+                f"Polymarket RTDS snapshot was stale ({snapshot_age_seconds:.1f}s old)"
+            )
+    except (
+        OSError,
+        ValueError,
+        requests.RequestException,
+    ) as exc:
+        raise requests.RequestException(f"Polymarket RTDS BTC price fetch failed: {exc}") from exc
+    except Exception as exc:
+        if websocket is not None and isinstance(exc, websocket.WebSocketException):
+            raise requests.RequestException(f"Polymarket RTDS BTC price fetch failed: {exc}") from exc
+        raise
+    finally:
+        if ws is not None:
+            try:
+                ws.close()
+            except Exception:
+                pass
+
+    raise requests.RequestException("Polymarket RTDS returned no fresh BTC price update")
+
+
 def _get_price_providers():
     return [
-        ("CoinGecko", _fetch_spot_price_from_coingecko),
+        ("Polymarket RTDS", _fetch_spot_price_from_polymarket_rtds),
         ("Coinbase", _fetch_spot_price_from_coinbase),
+        ("CoinGecko", _fetch_spot_price_from_coingecko),
     ]
 
 
