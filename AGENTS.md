@@ -90,6 +90,7 @@ Optional / supported:
 - `HTTP_PROXY` / `HTTPS_PROXY` optional proxy settings for outbound API calls, including LLM requests and geolocation checks
 - `NO_PROXY` optional bypass list for local addresses
 - `USE_PROXY` default: `true`; when set to `false`, the BTC agent ignores `ALL_PROXY`, `HTTP_PROXY`, and `HTTPS_PROXY` for its shared HTTP/LLM network path
+- `LLM_CONNECTION_DEBUG` default: `false`; when set to `true`, the agent skips the normal trading startup flow and runs only an LLM connectivity test
 - `USE_PAPER_TRADES` default: `true`
 - `MINIMUM_WALLET_BALANCE` default: `0`
 - `BTC_AGENT_LIVE_FEE_RATE_BPS` default: `1000`
@@ -125,9 +126,11 @@ What the BTC agent does today:
 - Falls back across multiple live BTC spot-price APIs first, then to the most recent in-memory BTC price sample when all configured live price requests fail during the current process lifetime, which prevents active paper-order reporting from aborting immediately on a single-provider rate-limit response after recent successful samples.
 - Uses the current 5-minute BTC Up/Down slug by timestamp alignment, unless overridden.
 - Performs a startup IP geolocation check and refuses to run unless the current public IP resolves to an allowed country, currently Indonesia or Mexico.
+- Bypasses the startup geolocation check when `LLM_CONNECTION_DEBUG=true` so LLM/provider connectivity can be tested from non-allowed locations.
 - Respects standard proxy environment variables such as `HTTP_PROXY` and `HTTPS_PROXY` for outbound requests when they are exported in the shell or defined in the repo `.env`.
 - Routes outbound BTC-agent requests through `ALL_PROXY` when configured, including geolocation, BTC spot pricing, Polymarket API lookups, and LLM calls.
 - Allows proxy routing to be disabled globally with `USE_PROXY=false`, which causes the agent to use direct connections for shared HTTP/LLM requests even if proxy environment variables are present.
+- Supports a dedicated `LLM_CONNECTION_DEBUG=true` mode that runs only a one-shot LLM connectivity test, prints the active connection settings, runs a direct Google connectivity probe after LLM connection failures, and exits without touching balances, market lookup, or trading execution.
 - Uses the configured AI engine with JSON output to decide `UP`, `DOWN`, or `NO_TRADE`.
 - Prints the current market `price_to_beat` in the BTC-agent output and includes that same period baseline in the LLM decision prompt when the threshold is available from Polymarket.
 - Retries LLM API calls across configurable attempts using a single per-attempt timeout, logs each attempt result to stdout, and converts repeated failures into a `NO_TRADE` so the loop can move on to the next tick.

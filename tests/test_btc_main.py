@@ -13,6 +13,7 @@ sys.modules.setdefault(
 
 from custom.btc_agent.main import (
     has_valid_price_to_beat,
+    main,
     resolve_price_to_beat_with_retries,
     write_price_to_beat_debug_file,
 )
@@ -57,6 +58,58 @@ class TestBtcMain(unittest.TestCase):
 
         self.assertEqual(market.settlement_threshold, 77560.75)
         mock_get_by_slug.assert_called_once_with("btc-updown-5m-1777056000")
+
+    def test_main_llm_connection_debug_bypasses_geolocation_and_exits_successfully(self):
+        with patch(
+            "custom.btc_agent.main.get_trading_config",
+            return_value=SimpleNamespace(
+                debug=False,
+                paper_trading=True,
+                llm_connection_debug=True,
+            ),
+        ), patch(
+            "custom.btc_agent.main.describe_proxy_configuration",
+            return_value="disabled via USE_PROXY=false",
+        ), patch(
+            "custom.btc_agent.main.test_llm_connection",
+            return_value=(True, "LLM connection test succeeded (openai/gpt-4.1-mini)"),
+        ) as mock_test_llm_connection, patch(
+            "custom.btc_agent.main.enforce_allowed_ip_location",
+        ) as mock_enforce_allowed_ip_location, patch(
+            "builtins.print",
+        ) as mock_print:
+            main()
+
+        printed_lines = [" ".join(str(arg) for arg in call.args) for call in mock_print.call_args_list]
+        self.assertTrue(any("LLM connection debug mode enabled." in line for line in printed_lines))
+        self.assertTrue(any("LLM connection test: LLM connection test succeeded" in line for line in printed_lines))
+        mock_test_llm_connection.assert_called_once()
+        mock_enforce_allowed_ip_location.assert_not_called()
+
+    def test_main_llm_connection_debug_exits_nonzero_on_failure(self):
+        with patch(
+            "custom.btc_agent.main.get_trading_config",
+            return_value=SimpleNamespace(
+                debug=False,
+                paper_trading=True,
+                llm_connection_debug=True,
+            ),
+        ), patch(
+            "custom.btc_agent.main.describe_proxy_configuration",
+            return_value="disabled via USE_PROXY=false",
+        ), patch(
+            "custom.btc_agent.main.test_llm_connection",
+            return_value=(False, "Gemini request failed: offline"),
+        ), patch(
+            "custom.btc_agent.main.enforce_allowed_ip_location",
+        ) as mock_enforce_allowed_ip_location, patch(
+            "builtins.print",
+        ):
+            with self.assertRaises(SystemExit) as exc:
+                main()
+
+        self.assertEqual(exc.exception.code, 1)
+        mock_enforce_allowed_ip_location.assert_not_called()
 
 
 if __name__ == "__main__":

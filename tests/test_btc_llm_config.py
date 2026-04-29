@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 sys.modules.setdefault("dotenv", types.SimpleNamespace(load_dotenv=lambda *args, **kwargs: None))
 
-from custom.btc_agent.config import get_llm_config
+from custom.btc_agent.config import get_llm_config, get_trading_config
 
 
 class TestBtcLlmConfig(unittest.TestCase):
@@ -74,6 +74,18 @@ class TestBtcLlmConfig(unittest.TestCase):
         ):
             with self.assertRaises(RuntimeError):
                 get_llm_config()
+
+    def test_trading_config_reads_llm_connection_debug_flag(self):
+        with patch.dict(
+            os.environ,
+            {
+                "LLM_CONNECTION_DEBUG": "true",
+            },
+            clear=False,
+        ):
+            cfg = get_trading_config()
+
+        self.assertTrue(cfg.llm_connection_debug)
 
 
 if __name__ == "__main__":

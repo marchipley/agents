@@ -17,7 +17,7 @@ from .indicators import (
     fetch_btc_spot_price,
     get_feature_readiness,
 )
-from .llm_decision import decide_trade
+from .llm_decision import decide_trade, test_llm_connection
 from .network import describe_proxy_configuration
 from .executor import (
     AccountBalanceSnapshot,
@@ -458,6 +458,10 @@ def run_once() -> None:
 
 def enforce_allowed_ip_location() -> None:
     cfg = get_trading_config()
+    if cfg.llm_connection_debug:
+        print("Skipping public IP geolocation check because LLM_CONNECTION_DEBUG=true")
+        return
+
     print("Checking public IP geolocation...")
     public_ip, location, ip_is_allowed = check_current_public_ip_location()
     print_ip_location(public_ip, location, debug=cfg.debug)
@@ -475,6 +479,16 @@ def main() -> None:
     print(f"Network proxy: {describe_proxy_configuration()}")
     if cfg.debug:
         print(f"Starting BTC agent (paper_trading={cfg.paper_trading})")
+
+    if cfg.llm_connection_debug:
+        print("LLM connection debug mode enabled.")
+        success, detail = test_llm_connection()
+        if success:
+            print(f"LLM connection test: {detail}")
+            return
+        print(f"ERROR: LLM connection test failed: {detail}")
+        sys.exit(1)
+
     enforce_allowed_ip_location()
 
     startup_account = get_account_balance_snapshot()

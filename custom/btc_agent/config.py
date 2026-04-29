@@ -47,20 +47,19 @@ class LlmConfig:
 
 @dataclass
 class TradingConfig:
-    paper_trading: bool = _parse_bool_env("USE_PAPER_TRADES", True)
-    debug: bool = _parse_bool_env("BTC_AGENT_DEBUG", False)
-    minimum_wallet_balance: float = float(os.getenv("MINIMUM_WALLET_BALANCE", "0"))
-    live_fee_rate_bps: int = int(os.getenv("BTC_AGENT_LIVE_FEE_RATE_BPS", "1000"))
-    live_min_order_usd: float = float(os.getenv("BTC_AGENT_LIVE_MIN_ORDER_USD", "1"))
-    max_trade_usd: float = float(os.getenv("BTC_AGENT_MAX_TRADE_USD", "5"))
-    trade_shares_size: float = max(float(os.getenv("BTC_AGENT_TRADE_SHARES_SIZE", "5")), 5.0)
-    max_trades_per_period: int = max(int(os.getenv("BTC_AGENT_MAX_TRADES_PER_PERIOD", "1")), 1)
-    min_confidence: float = float(
-        os.getenv("CONFIDENCE", os.getenv("BTC_AGENT_MIN_CONFIDENCE", "0.7"))
-    )
-    max_entry_price: float = float(os.getenv("BTC_AGENT_MAX_ENTRY_PRICE", "0.62"))
-    max_spread: float = float(os.getenv("BTC_AGENT_MAX_SPREAD", "0.06"))
-    market_slug_override: Optional[str] = os.getenv("BTC_AGENT_MARKET_SLUG")
+    paper_trading: bool = True
+    debug: bool = False
+    llm_connection_debug: bool = False
+    minimum_wallet_balance: float = 0.0
+    live_fee_rate_bps: int = 1000
+    live_min_order_usd: float = 1.0
+    max_trade_usd: float = 5.0
+    trade_shares_size: float = 5.0
+    max_trades_per_period: int = 1
+    min_confidence: float = 0.7
+    max_entry_price: float = 0.62
+    max_spread: float = 0.06
+    market_slug_override: Optional[str] = None
 
 @dataclass
 class PolymarketConfig:
@@ -132,4 +131,20 @@ def get_polymarket_config() -> PolymarketConfig:
     )
 
 def get_trading_config() -> TradingConfig:
-    return TradingConfig()
+    return TradingConfig(
+        paper_trading=_parse_bool_env("USE_PAPER_TRADES", True),
+        debug=_parse_bool_env("BTC_AGENT_DEBUG", False),
+        llm_connection_debug=_parse_bool_env("LLM_CONNECTION_DEBUG", False),
+        minimum_wallet_balance=float(os.getenv("MINIMUM_WALLET_BALANCE", "0")),
+        live_fee_rate_bps=int(os.getenv("BTC_AGENT_LIVE_FEE_RATE_BPS", "1000")),
+        live_min_order_usd=float(os.getenv("BTC_AGENT_LIVE_MIN_ORDER_USD", "1")),
+        max_trade_usd=float(os.getenv("BTC_AGENT_MAX_TRADE_USD", "5")),
+        trade_shares_size=max(float(os.getenv("BTC_AGENT_TRADE_SHARES_SIZE", "5")), 5.0),
+        max_trades_per_period=max(int(os.getenv("BTC_AGENT_MAX_TRADES_PER_PERIOD", "1")), 1),
+        min_confidence=float(
+            os.getenv("CONFIDENCE", os.getenv("BTC_AGENT_MIN_CONFIDENCE", "0.7"))
+        ),
+        max_entry_price=float(os.getenv("BTC_AGENT_MAX_ENTRY_PRICE", "0.62")),
+        max_spread=float(os.getenv("BTC_AGENT_MAX_SPREAD", "0.06")),
+        market_slug_override=os.getenv("BTC_AGENT_MARKET_SLUG"),
+    )

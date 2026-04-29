@@ -1,12 +1,7 @@
-import sys
-import types
 import unittest
 from unittest.mock import Mock, patch
 
 import requests
-
-sys.modules.setdefault("dotenv", types.SimpleNamespace(load_dotenv=lambda *args, **kwargs: None))
-sys.modules.setdefault("openai", types.SimpleNamespace(OpenAI=object))
 
 from custom.btc_agent.llm_decision import _build_user_prompt, decide_trade
 
@@ -61,7 +56,7 @@ class TestBtcLlmDecision(unittest.TestCase):
                 api_connection_retry_attempts=3,
             ),
         ), patch(
-            "custom.btc_agent.llm_decision.requests.post",
+            "custom.btc_agent.llm_decision._direct_http_post",
             side_effect=[error_response, success_response],
         ), patch(
             "custom.btc_agent.llm_decision.check_internet_connectivity",
@@ -90,7 +85,7 @@ class TestBtcLlmDecision(unittest.TestCase):
                 api_connection_retry_attempts=3,
             ),
         ), patch(
-            "custom.btc_agent.llm_decision.requests.post",
+            "custom.btc_agent.llm_decision._direct_http_post",
             return_value=error_response,
         ), patch(
             "custom.btc_agent.llm_decision.check_internet_connectivity",
@@ -122,7 +117,7 @@ class TestBtcLlmDecision(unittest.TestCase):
                 api_connection_retry_attempts=3,
             ),
         ), patch(
-            "custom.btc_agent.llm_decision.requests.post",
+            "custom.btc_agent.llm_decision._direct_http_post",
             return_value=wrapped_response,
         ):
             decision = decide_trade(DummyFeatures(), DummyMarket())
@@ -155,7 +150,7 @@ class TestBtcLlmDecision(unittest.TestCase):
                 api_connection_retry_attempts=3,
             ),
         ), patch(
-            "custom.btc_agent.llm_decision.requests.post",
+            "custom.btc_agent.llm_decision._direct_http_post",
             side_effect=[bad_response, good_response],
         ), patch(
             "builtins.print",
@@ -186,10 +181,7 @@ class TestBtcLlmDecision(unittest.TestCase):
                 api_connection_retry_attempts=1,
             ),
         ), patch(
-            "custom.btc_agent.llm_decision.get_proxy_url_for_requests",
-            return_value="socks5h://user:secret@10.64.0.1:1080",
-        ), patch(
-            "custom.btc_agent.llm_decision.requests.post",
+            "custom.btc_agent.llm_decision._direct_http_post",
             return_value=success_response,
         ), patch(
             "builtins.print",
@@ -201,14 +193,13 @@ class TestBtcLlmDecision(unittest.TestCase):
         self.assertTrue(any("engine            = gemini" in line for line in printed_lines))
         self.assertTrue(any("model             = gemini-2.5-flash" in line for line in printed_lines))
         self.assertTrue(any("timeout_seconds   = 15.0" in line for line in printed_lines))
-        self.assertTrue(any("proxy             = socks5h://user:***@10.64.0.1:1080" in line for line in printed_lines))
+        self.assertTrue(any("proxy             = None" in line for line in printed_lines))
 
     def test_openai_disables_trust_env_when_use_proxy_false(self):
-        fake_http_client = object()
-        fake_openai_client = Mock()
-        fake_default_httpx_client = Mock(return_value=fake_http_client)
-        fake_openai_client.chat.completions.create.return_value = Mock(
-            choices=[Mock(message=Mock(content='{"decision":"UP","confidence":0.8,"max_price_to_pay":0.5,"reason":"ok"}'))]
+        success_response = requests.Response()
+        success_response.status_code = 200
+        success_response._content = (
+            b'{"choices":[{"message":{"content":"{\\"decision\\":\\"UP\\",\\"confidence\\":0.8,\\"max_price_to_pay\\":0.5,\\"reason\\":\\"ok\\"}"}}]}'
         )
 
         with patch(
@@ -222,28 +213,46 @@ class TestBtcLlmDecision(unittest.TestCase):
                 api_connection_retry_attempts=1,
             ),
         ), patch(
-            "custom.btc_agent.llm_decision.get_proxy_url_for_httpx",
-            return_value=None,
-        ), patch(
-            "custom.btc_agent.llm_decision.is_proxy_enabled",
-            return_value=False,
-        ), patch(
-            "custom.btc_agent.llm_decision.OpenAI",
-            return_value=fake_openai_client,
-        ), patch.dict(
-            sys.modules,
-            {
-                "openai": types.SimpleNamespace(
-                    DefaultHttpxClient=fake_default_httpx_client,
-                    OpenAI=object,
-                )
-            },
-            clear=False,
+            "custom.btc_agent.llm_decision._direct_http_post",
+            return_value=success_response,
         ):
             decision = decide_trade(DummyFeatures(), DummyMarket())
 
         self.assertEqual(decision.side, "UP")
-        fake_default_httpx_client.assert_called_once_with(trust_env=False)
+
+    def test_openai_retries_with_compact_prompt_after_connection_error(self):
+        with patch(
+            "custom.btc_agent.llm_decision.get_llm_config",
+            return_value=Mock(
+                engine="openai",
+                api_key="test-key",
+                model="gpt-4.1-mini",
+                api_connection_timeout_seconds=15.0,
+                api_connection_retry_timer_seconds=2.0,
+                api_connection_retry_attempts=2,
+            ),
+        ), patch(
+            "custom.btc_agent.llm_decision._request_openai_once",
+            side_effect=[
+                requests.ConnectionError("Connection reset by peer"),
+                '{"decision":"UP","confidence":0.81,"max_price_to_pay":0.55,"reason":"compact ok"}',
+            ],
+        ) as mock_request_openai_once, patch(
+            "custom.btc_agent.llm_decision.check_internet_connectivity",
+            return_value=(True, "Connectivity OK via https://www.google.com/generate_204 (HTTP 204)"),
+        ), patch(
+            "builtins.print",
+        ) as mock_print:
+            decision = decide_trade(DummyFeatures(), DummyMarket())
+
+        printed_lines = [" ".join(str(arg) for arg in call.args) for call in mock_print.call_args_list]
+        self.assertEqual(decision.side, "UP")
+        self.assertEqual(mock_request_openai_once.call_count, 2)
+        self.assertNotEqual(
+            mock_request_openai_once.call_args_list[0].kwargs["user_prompt"],
+            mock_request_openai_once.call_args_list[1].kwargs["user_prompt"],
+        )
+        self.assertTrue(any("[fallback] response" in line for line in printed_lines))
 
     def test_gemini_truncated_json_retries_with_short_prompt(self):
         truncated_response = requests.Response()
@@ -269,7 +278,7 @@ class TestBtcLlmDecision(unittest.TestCase):
                 api_connection_retry_attempts=3,
             ),
         ), patch(
-            "custom.btc_agent.llm_decision.requests.post",
+            "custom.btc_agent.llm_decision._direct_http_post",
             side_effect=[truncated_response, recovered_response],
         ):
             decision = decide_trade(DummyFeatures(), DummyMarket())
@@ -296,7 +305,7 @@ class TestBtcLlmDecision(unittest.TestCase):
                 api_connection_retry_attempts=4,
             ),
         ), patch(
-            "custom.btc_agent.llm_decision.requests.post",
+            "custom.btc_agent.llm_decision._direct_http_post",
             side_effect=[requests.ReadTimeout("read timed out"), success_response],
         ) as mock_requests_post, patch(
             "custom.btc_agent.llm_decision.check_internet_connectivity",
@@ -328,7 +337,7 @@ class TestBtcLlmDecision(unittest.TestCase):
                 api_connection_retry_attempts=2,
             ),
         ), patch(
-            "custom.btc_agent.llm_decision.requests.post",
+            "custom.btc_agent.llm_decision._direct_http_post",
             side_effect=[truncated_response, truncated_response],
         ), patch(
             "custom.btc_agent.llm_decision.time.sleep",
@@ -357,7 +366,7 @@ class TestBtcLlmDecision(unittest.TestCase):
                 api_connection_retry_attempts=2,
             ),
         ), patch(
-            "custom.btc_agent.llm_decision.requests.post",
+            "custom.btc_agent.llm_decision._direct_http_post",
             side_effect=[
                 requests.ReadTimeout("first timeout"),
                 requests.ReadTimeout("second timeout"),
@@ -395,7 +404,7 @@ class TestBtcLlmDecision(unittest.TestCase):
                 api_connection_retry_attempts=2,
             ),
         ), patch(
-            "custom.btc_agent.llm_decision.requests.post",
+            "custom.btc_agent.llm_decision._direct_http_post",
             side_effect=[requests.ReadTimeout("read timed out"), success_response],
         ), patch(
             "custom.btc_agent.llm_decision.check_internet_connectivity",
@@ -424,7 +433,7 @@ class TestBtcLlmDecision(unittest.TestCase):
                 api_connection_retry_attempts=3,
             ),
         ), patch(
-            "custom.btc_agent.llm_decision.requests.post",
+            "custom.btc_agent.llm_decision._direct_http_post",
             side_effect=requests.ReadTimeout("read timed out"),
         ), patch(
             "custom.btc_agent.llm_decision.check_internet_connectivity",
