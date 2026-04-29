@@ -220,7 +220,7 @@ class TestBtcLlmDecision(unittest.TestCase):
 
         self.assertEqual(decision.side, "UP")
 
-    def test_openai_retries_with_compact_prompt_after_connection_error(self):
+    def test_openai_retries_same_minimal_prompt_after_connection_error(self):
         with patch(
             "custom.btc_agent.llm_decision.get_llm_config",
             return_value=Mock(
@@ -248,11 +248,11 @@ class TestBtcLlmDecision(unittest.TestCase):
         printed_lines = [" ".join(str(arg) for arg in call.args) for call in mock_print.call_args_list]
         self.assertEqual(decision.side, "UP")
         self.assertEqual(mock_request_openai_once.call_count, 2)
-        self.assertNotEqual(
+        self.assertEqual(
             mock_request_openai_once.call_args_list[0].kwargs["user_prompt"],
             mock_request_openai_once.call_args_list[1].kwargs["user_prompt"],
         )
-        self.assertTrue(any("[fallback] response" in line for line in printed_lines))
+        self.assertFalse(any("[fallback]" in line for line in printed_lines))
 
     def test_gemini_truncated_json_retries_with_short_prompt(self):
         truncated_response = requests.Response()
