@@ -15,11 +15,23 @@ from custom.btc_agent.main import (
     has_valid_price_to_beat,
     main,
     resolve_price_to_beat_with_retries,
+    wait_for_next_tick_or_quit,
     write_price_to_beat_debug_file,
 )
 
 
 class TestBtcMain(unittest.TestCase):
+    def test_wait_for_next_tick_or_quit_returns_true_when_q_requested(self):
+        quit_monitor = SimpleNamespace(poll_quit_requested=lambda: True)
+
+        should_quit = wait_for_next_tick_or_quit(
+            30,
+            quit_monitor=quit_monitor,
+            poll_interval_seconds=0.01,
+        )
+
+        self.assertTrue(should_quit)
+
     def test_has_valid_price_to_beat_rejects_none_and_small_values(self):
         self.assertFalse(has_valid_price_to_beat(None))
         self.assertFalse(has_valid_price_to_beat(1))
@@ -110,6 +122,42 @@ class TestBtcMain(unittest.TestCase):
 
         self.assertEqual(exc.exception.code, 1)
         mock_enforce_allowed_ip_location.assert_not_called()
+
+    def test_main_exits_cleanly_when_quit_requested_during_sleep(self):
+        fake_monitor = SimpleNamespace(poll_quit_requested=lambda: True)
+
+        with patch(
+            "custom.btc_agent.main.get_trading_config",
+            return_value=SimpleNamespace(
+                debug=False,
+                paper_trading=True,
+                llm_connection_debug=False,
+            ),
+        ), patch(
+            "custom.btc_agent.main.describe_proxy_configuration",
+            return_value="disabled via USE_PROXY=false",
+        ), patch(
+            "custom.btc_agent.main.enforce_allowed_ip_location",
+        ), patch(
+            "custom.btc_agent.main.get_account_balance_snapshot",
+            return_value=SimpleNamespace(cash_balance=10.0),
+        ), patch(
+            "custom.btc_agent.main.enforce_minimum_wallet_balance",
+        ), patch(
+            "custom.btc_agent.main.run_once",
+        ) as mock_run_once, patch(
+            "custom.btc_agent.main.QuitKeyMonitor",
+        ) as mock_quit_key_monitor, patch(
+            "builtins.print",
+        ) as mock_print:
+            mock_quit_key_monitor.return_value.__enter__.return_value = fake_monitor
+            mock_quit_key_monitor.return_value.__exit__.return_value = None
+            main()
+
+        printed_lines = [" ".join(str(arg) for arg in call.args) for call in mock_print.call_args_list]
+        self.assertTrue(any("Press q to quit." in line for line in printed_lines))
+        self.assertTrue(any("Quit requested via keyboard. Exiting BTC agent." in line for line in printed_lines))
+        mock_run_once.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -1,9 +1,13 @@
 # custom/btc_agent/main.py
 
+from contextlib import nullcontext
 from datetime import datetime, timezone
 import os
+import select
 import time
 import sys
+import termios
+import tty
 
 from .config import get_trading_config
 from .market_lookup import (
@@ -47,12 +51,65 @@ from scripts.python.check_public_ip_indonesia import (
 _FIRST_LOOP = True
 
 
+class QuitKeyMonitor:
+    def __init__(self) -> None:
+        self._fd = None
+        self._saved_termios = None
+        self._enabled = False
+
+    def __enter__(self):
+        try:
+            if not sys.stdin.isatty():
+                return self
+            self._fd = sys.stdin.fileno()
+            self._saved_termios = termios.tcgetattr(self._fd)
+            tty.setcbreak(self._fd)
+            self._enabled = True
+        except Exception:
+            self._enabled = False
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        if self._enabled and self._fd is not None and self._saved_termios is not None:
+            try:
+                termios.tcsetattr(self._fd, termios.TCSADRAIN, self._saved_termios)
+            except Exception:
+                pass
+
+    def poll_quit_requested(self) -> bool:
+        if not self._enabled:
+            return False
+        readable, _, _ = select.select([sys.stdin], [], [], 0)
+        if not readable:
+            return False
+        try:
+            pressed = os.read(self._fd, 32).decode("utf-8", errors="ignore")
+        except Exception:
+            return False
+        return "q" in pressed.lower()
+
+
 def _fmt(value):
     if value is None:
         return "None"
     if isinstance(value, float):
         return f"{value:.3f}"
     return str(value)
+
+
+def wait_for_next_tick_or_quit(
+    interval_seconds: int,
+    quit_monitor=None,
+    poll_interval_seconds: float = 0.25,
+) -> bool:
+    deadline = time.monotonic() + max(interval_seconds, 0)
+    while True:
+        if quit_monitor is not None and quit_monitor.poll_quit_requested():
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(poll_interval_seconds, remaining))
 
 
 def has_valid_price_to_beat(value) -> bool:
@@ -495,11 +552,23 @@ def main() -> None:
     enforce_minimum_wallet_balance(startup_account)
 
     interval = int(os.getenv("BTC_AGENT_LOOP_INTERVAL", "30"))
+    print("Press q to quit.")
 
-    while True:
-        run_once()
-        print(f"Sleeping {interval} seconds before next tick...")
-        time.sleep(interval)
+    monitor_context = QuitKeyMonitor()
+    try:
+        with monitor_context as quit_monitor:
+            while True:
+                if quit_monitor.poll_quit_requested():
+                    print("Quit requested via keyboard. Exiting BTC agent.")
+                    return
+                run_once()
+                print(f"Sleeping {interval} seconds before next tick...")
+                if wait_for_next_tick_or_quit(interval, quit_monitor=quit_monitor):
+                    print("Quit requested via keyboard. Exiting BTC agent.")
+                    return
+    except KeyboardInterrupt:
+        print("Keyboard interrupt received. Exiting BTC agent.")
+        return
 
 
 if __name__ == "__main__":
