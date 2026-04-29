@@ -253,7 +253,8 @@ def print_account_snapshot(debug: bool) -> None:
 def print_account_snapshot_from_snapshot(account: AccountBalanceSnapshot, debug: bool) -> None:
     print("Account balances:")
     if not debug:
-        print(f"  cash_balance_usdc      = {_fmt(account.cash_balance)}")
+        print(f"  cash_balance_pusd      = {_fmt(account.cash_balance)}")
+        print(f"  legacy_usdc_balance    = {_fmt(account.legacy_usdc_balance)}")
         print(f"  portfolio_balance_usd  = {_fmt(account.portfolio_balance)}")
         print(f"  total_account_value_usd= {_fmt(account.total_account_value)}")
         return
@@ -261,7 +262,8 @@ def print_account_snapshot_from_snapshot(account: AccountBalanceSnapshot, debug:
     print(f"  signer_address         = {account.signer_address}")
     print(f"  balance_address        = {account.balance_address}")
     print(f"  proxy_address          = {account.proxy_address or 'None'}")
-    print(f"  cash_balance_usdc      = {_fmt(account.cash_balance)}")
+    print(f"  cash_balance_pusd      = {_fmt(account.cash_balance)}")
+    print(f"  legacy_usdc_balance    = {_fmt(account.legacy_usdc_balance)}")
     print(f"  portfolio_balance_usd  = {_fmt(account.portfolio_balance)}")
     print(f"  total_account_value_usd= {_fmt(account.total_account_value)}")
     print(f"  balance_error          = {account.error or 'None'}")
@@ -273,13 +275,13 @@ def enforce_minimum_wallet_balance(account: AccountBalanceSnapshot) -> None:
         return
     if account.cash_balance is None:
         print(
-            "ERROR: Unable to verify cash_balance_usdc for MINIMUM_WALLET_BALANCE "
+            "ERROR: Unable to verify cash_balance_pusd for MINIMUM_WALLET_BALANCE "
             f"check ({cfg.minimum_wallet_balance:.3f}). Aborting BTC agent startup."
         )
         sys.exit(1)
     if account.cash_balance < cfg.minimum_wallet_balance:
         print(
-            "ERROR: Nothing can be executed because cash_balance_usdc is below "
+            "ERROR: Nothing can be executed because cash_balance_pusd is below "
             "MINIMUM_WALLET_BALANCE "
             f"(available={account.cash_balance:.3f}, "
             f"minimum={cfg.minimum_wallet_balance:.3f})."

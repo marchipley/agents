@@ -92,7 +92,7 @@ Optional / supported:
 - `USE_PROXY` default: `true`; when set to `false`, the BTC agent ignores `ALL_PROXY`, `HTTP_PROXY`, and `HTTPS_PROXY` for its shared HTTP/LLM network path
 - `LLM_CONNECTION_DEBUG` default: `false`; when set to `true`, the agent skips the normal trading startup flow and runs only an LLM connectivity test
 - `USE_PAPER_TRADES` default: `true`
-- `MINIMUM_WALLET_BALANCE` default: `0`
+- `MINIMUM_WALLET_BALANCE` default: `0`; enforced against Polygon pUSD trading cash, not legacy USDC.e
 - `BTC_AGENT_LIVE_FEE_RATE_BPS` default: `1000`
 - `BTC_AGENT_LIVE_MIN_ORDER_USD` default: `1`
 - `POLYMKT_PROXY_ADDRESS`
@@ -150,7 +150,7 @@ What the BTC agent does today:
 - In non-debug mode, account balances print only on the first loop iteration and again at the start of each new 5-minute market period.
 - Stops the process before live order submission when the account does not have enough `cash_balance_usdc` to cover the configured live trade size at the recommended limit price plus the estimated maker fee.
 - Stops the process when `cash_balance_usdc` falls below `MINIMUM_WALLET_BALANCE`, so no further execution occurs once the configured wallet floor is breached.
-- Retrieves Polygon USDC cash balances through a configurable ordered RPC list with public fallback endpoints.
+- Retrieves Polygon pUSD trading cash balances through a configurable ordered RPC list with public fallback endpoints, and also reports legacy USDC.e separately for migration visibility.
 - Retrieves Polymarket portfolio value separately from the on-chain cash balance lookup so one failure does not suppress the other.
 - Approves or rejects a trade based on confidence, entry caps, quote drift, and in live mode also account cash availability.
 - Prints diagnostics for balances, quotes, features, decision, and simulated execution.

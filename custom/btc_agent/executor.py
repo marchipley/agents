@@ -47,6 +47,7 @@ class AccountBalanceSnapshot:
     balance_address: str
     proxy_address: Optional[str]
     cash_balance: Optional[float]
+    legacy_usdc_balance: Optional[float]
     portfolio_balance: Optional[float]
     total_account_value: Optional[float]
     error: Optional[str]
@@ -105,9 +106,8 @@ def _balance_of_call_data(address: str) -> str:
     return f"0x{selector}{encoded_address}"
 
 
-def _get_polygon_usdc_balance(address: str) -> Optional[float]:
+def _get_polygon_erc20_balance(address: str, token_address: str, token_label: str) -> Optional[float]:
     cfg = get_polymarket_config()
-    usdc_address = "0x2791bca1f2de4661ed88a30c99a7a9449aa84174"
     rpc_errors = []
 
     for rpc_url in cfg.polygon_rpc_urls or [cfg.polygon_rpc]:
@@ -116,7 +116,7 @@ def _get_polygon_usdc_balance(address: str) -> Optional[float]:
             "method": "eth_call",
             "params": [
                 {
-                    "to": usdc_address,
+                    "to": token_address,
                     "data": _balance_of_call_data(address),
                 },
                 "latest",
@@ -135,7 +135,25 @@ def _get_polygon_usdc_balance(address: str) -> Optional[float]:
         except Exception as exc:
             rpc_errors.append(f"{rpc_url}: {exc}")
 
-    raise RuntimeError("Failed to fetch Polygon USDC balance from configured RPCs: " + " | ".join(rpc_errors))
+    raise RuntimeError(
+        f"Failed to fetch Polygon {token_label} balance from configured RPCs: " + " | ".join(rpc_errors)
+    )
+
+
+def _get_polygon_pusd_balance(address: str) -> Optional[float]:
+    return _get_polygon_erc20_balance(
+        address=address,
+        token_address="0xc011a7e12a19f7b1f670d46f03b03f3342e82dfb",
+        token_label="pUSD",
+    )
+
+
+def _get_polygon_usdc_balance(address: str) -> Optional[float]:
+    return _get_polygon_erc20_balance(
+        address=address,
+        token_address="0x2791bca1f2de4661ed88a30c99a7a9449aa84174",
+        token_label="USDC.e",
+    )
 
 
 def _get_portfolio_value(address: str) -> Optional[float]:
@@ -167,6 +185,7 @@ def get_account_balance_snapshot() -> AccountBalanceSnapshot:
     balance_address = proxy_address or "Unavailable"
 
     cash_balance = None
+    legacy_usdc_balance = None
     portfolio_balance = None
     errors = []
 
@@ -184,9 +203,14 @@ def get_account_balance_snapshot() -> AccountBalanceSnapshot:
 
     if balance_address != "Unavailable":
         try:
-            cash_balance = _get_polygon_usdc_balance(balance_address)
+            cash_balance = _get_polygon_pusd_balance(balance_address)
         except Exception as exc:
-            errors.append(f"Cash balance lookup failed: {exc}")
+            errors.append(f"pUSD balance lookup failed: {exc}")
+
+        try:
+            legacy_usdc_balance = _get_polygon_usdc_balance(balance_address)
+        except Exception as exc:
+            errors.append(f"USDC.e balance lookup failed: {exc}")
 
         try:
             portfolio_balance = _get_portfolio_value(balance_address)
@@ -194,14 +218,19 @@ def get_account_balance_snapshot() -> AccountBalanceSnapshot:
             errors.append(f"Portfolio balance lookup failed: {exc}")
 
     total_account_value = None
-    if cash_balance is not None and portfolio_balance is not None:
-        total_account_value = cash_balance + portfolio_balance
+    if (
+        cash_balance is not None
+        and legacy_usdc_balance is not None
+        and portfolio_balance is not None
+    ):
+        total_account_value = cash_balance + legacy_usdc_balance + portfolio_balance
 
     return AccountBalanceSnapshot(
         signer_address=signer_address,
         balance_address=balance_address,
         proxy_address=proxy_address,
         cash_balance=cash_balance,
+        legacy_usdc_balance=legacy_usdc_balance,
         portfolio_balance=portfolio_balance,
         total_account_value=total_account_value,
         error=" | ".join(errors) if errors else None,
