@@ -95,6 +95,7 @@ Optional / supported:
 - `MINIMUM_WALLET_BALANCE` default: `0`; enforced against Polygon pUSD trading cash, not legacy USDC.e
 - `BTC_AGENT_LIVE_FEE_RATE_BPS` default: `1000`
 - `BTC_AGENT_LIVE_MIN_ORDER_USD` default: `1`
+- `USE_RECOMMENDED_LIMIT` default: `true`; when `false`, the BTC agent uses the target limit instead of the recommended/snapped limit for submit checks and execution pricing
 - `POLYMKT_PROXY_ADDRESS`
 - `POLYGON_RPC_URL` default: `https://polygon.drpc.org`
 - `POLYGON_RPC_URLS` optional comma-separated list of Polygon RPC endpoints to try in order
@@ -137,7 +138,9 @@ What the BTC agent does today:
 - Retries LLM API calls across configurable attempts using a single per-attempt timeout, logs each attempt result to stdout, and converts repeated failures into a `NO_TRADE` so the loop can move on to the next tick.
 - Computes a reference price from quote, midpoint, last trade, and order book data.
 - Reuses a single decision-time token quote snapshot for both the printed `UP/DOWN (with decision)` block and the paper execution gate so those logs cannot diverge within one loop tick.
+- Uses `USE_RECOMMENDED_LIMIT` to choose whether submit checks and execution use the recommended snapped limit or the raw target limit; when disabled, recommended limit is still computed for visibility but is not used as a gating/execution factor.
 - Skips LLM decision calls entirely when both the current `UP` and `DOWN` quote snapshots are already not safe to submit, preserving AI API calls when neither side is actionable.
+- Provides the LLM with time remaining, window delta, and current `UP` / `DOWN` ask prices so the model can apply EV- and timing-based rules for late-window decisions.
 - Skips LLM decisioning and execution during the last 60 seconds of the current 5-minute market window and only continues collecting trend data for the upcoming period.
 - Prints the exact execution snapshot used by the paper-trade path, including the calculated `reference_price`, `target_limit_price`, and `recommended_limit_price`.
 - Executes paper trades by default and can submit live Polymarket buy orders through `agents/polymarket/polymarket.py` when `USE_PAPER_TRADES=false`.

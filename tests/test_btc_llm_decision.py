@@ -1,4 +1,5 @@
 import unittest
+from datetime import datetime, timezone
 from unittest.mock import Mock, patch
 
 import requests
@@ -17,22 +18,35 @@ class DummyFeatures:
     momentum_1m = 7.0
     momentum_5m = 10.0
     volatility_5m = 22.0
+    as_of = datetime.fromtimestamp(1777513792, tz=timezone.utc)
 
 
 class DummyMarket:
     title = "BTC Up or Down"
     slug = "btc-updown-test"
     settlement_threshold = 74982.25
+    end_ts = 1777513800
 
 
 class TestBtcLlmDecision(unittest.TestCase):
     def test_user_prompt_includes_price_to_beat(self):
-        prompt = _build_user_prompt(DummyFeatures(), DummyMarket())
+        up_snapshot = Mock(buy_quote=0.84)
+        down_snapshot = Mock(buy_quote=0.17)
+        prompt = _build_user_prompt(
+            DummyFeatures(),
+            DummyMarket(),
+            up_snapshot=up_snapshot,
+            down_snapshot=down_snapshot,
+        )
 
         self.assertIn("Price to beat USD: 74982.25", prompt)
         self.assertIn("Market reference:", prompt)
         self.assertIn("UP wins only if BTC finishes above 74982.25", prompt)
         self.assertIn("DOWN wins only if BTC finishes below 74982.25", prompt)
+        self.assertIn("Time remaining seconds: 8", prompt)
+        self.assertIn("UP Polymarket ask/buy quote: 0.84", prompt)
+        self.assertIn("DOWN Polymarket ask/buy quote: 0.17", prompt)
+        self.assertIn("Probability-Edge Override", prompt)
 
     def test_gemini_503_returns_no_trade(self):
         error_response = requests.Response()

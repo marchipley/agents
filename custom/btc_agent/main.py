@@ -30,6 +30,7 @@ from .executor import (
     compute_recommended_limit_price,
     compute_target_limit_price,
     evaluate_ok_to_submit,
+    get_submission_limit_price,
     get_account_balance_snapshot,
     get_token_quote_snapshot,
     maybe_execute_trade,
@@ -371,9 +372,25 @@ def get_decision_quote_snapshot(
         base_snapshot.tick_size,
         decision=decision,
     )
+    provisional_snapshot = TokenQuoteSnapshot(
+        token_id=base_snapshot.token_id,
+        buy_quote=base_snapshot.buy_quote,
+        midpoint=base_snapshot.midpoint,
+        last_trade_price=base_snapshot.last_trade_price,
+        reference_price=base_snapshot.reference_price,
+        target_limit_price=target_limit_price,
+        recommended_limit_price=recommended_limit_price,
+        ok_to_submit=False,
+        submit_reason="",
+        best_bid=base_snapshot.best_bid,
+        best_ask=base_snapshot.best_ask,
+        tick_size=base_snapshot.tick_size,
+        spread=base_snapshot.spread,
+    )
+
     ok_to_submit, submit_reason = evaluate_ok_to_submit(
         buy_quote=base_snapshot.buy_quote,
-        recommended_limit_price=recommended_limit_price,
+        submission_limit_price=get_submission_limit_price(provisional_snapshot),
         tick_size=base_snapshot.tick_size,
     )
     return TokenQuoteSnapshot(
@@ -613,7 +630,7 @@ def run_once() -> None:
             print("-" * 80)
         return
 
-    decision = decide_trade(features, market)
+    decision = decide_trade(features, market, up_snapshot=up_snapshot, down_snapshot=down_snapshot)
     print_llm_decision(decision, debug=cfg.debug)
 
     decision_snapshot = None

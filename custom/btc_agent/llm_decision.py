@@ -43,18 +43,30 @@ def _build_system_prompt() -> str:
         '  "reason": string\n'
         "}\n"
         "Keep the reason concise, ideally under 120 characters.\n"
-        'Be conservative and prefer "NO_TRADE" when signals are weak.'
+        'Be conservative and prefer "NO_TRADE" when signals are weak.\n'
+        "Decision rules:\n"
+        "1. Use a dynamic expected-value check, not a static 0.80 price cap.\n"
+        "2. Treat Window Delta as the primary confidence signal in the final 10 seconds.\n"
+        "3. If Window Delta is below 0.005% near T-10, ignore TA and prefer NO_TRADE.\n"
+        "4. If Window Delta is above 0.15% near T-10, treat confidence as very high.\n"
+        "5. Favor execution only when the probability edge is clearly positive after fees.\n"
+        "6. If time remaining is under 5 seconds and there is no clear edge, prefer NO_TRADE over forcing a bad trade."
     )
 
 
-def _build_user_prompt(features: BtcFeatures, market: BtcUpDownMarket) -> str:
+def _build_user_prompt(features: BtcFeatures, market: BtcUpDownMarket, up_snapshot=None, down_snapshot=None) -> str:
+    time_remaining_seconds = max(market.end_ts - int(features.as_of.timestamp()), 0)
     return (
         f"Market title: {market.title}\n"
         f"Market slug: {market.slug}\n\n"
         "Market reference:\n"
         f"- Price to beat USD: {market.settlement_threshold}\n"
         f"- Settlement rule: UP wins only if BTC finishes above {market.settlement_threshold}; "
-        f"DOWN wins only if BTC finishes below {market.settlement_threshold}.\n\n"
+        f"DOWN wins only if BTC finishes below {market.settlement_threshold}.\n"
+        f"- Time remaining seconds: {time_remaining_seconds}\n"
+        f"- Window Delta pct: {features.delta_pct_from_window_open * 100:.4f}%\n"
+        f"- UP Polymarket ask/buy quote: {getattr(up_snapshot, 'buy_quote', None)}\n"
+        f"- DOWN Polymarket ask/buy quote: {getattr(down_snapshot, 'buy_quote', None)}\n\n"
         "BTC features:\n"
         f"- Current BTC price USD: {features.price_usd:.2f}\n"
         f"- Market window open price USD: {features.window_open_price:.2f}\n"
@@ -66,19 +78,34 @@ def _build_user_prompt(features: BtcFeatures, market: BtcUpDownMarket) -> str:
         f"- 1-minute momentum USD: {features.momentum_1m}\n"
         f"- Trailing 5-minute momentum USD: {features.momentum_5m}\n"
         f"- Trailing 5-minute volatility: {features.volatility_5m}\n\n"
+        "Execution policy:\n"
+        "- Rule 1: Probability-Edge Override. Estimate mathematical win probability from the full feature set.\n"
+        "- Compute implied probability from the relevant Polymarket ask price.\n"
+        "- Approximate effective taker fee with p * (1-p), where p is the ask price.\n"
+        "- Edge = estimated win probability - (implied probability + effective taker fee).\n"
+        "- Execute only if Edge > 0.05 and time remaining is under 12 seconds.\n"
+        "- A price above 0.80 is allowed if the edge is still clearly positive.\n"
+        "- Rule 2: Window Delta Primacy. If Window Delta > 0.15% near T-10, confidence should be 0.95 or higher.\n"
+        "- If Window Delta < 0.005% near T-10, ignore RSI and momentum noise and prefer NO_TRADE.\n"
+        "- Rule 3: Fractional Kelly sizing is external. Use `max_price_to_pay` to reflect the highest price justified by edge, not a fixed static cap.\n"
+        "- Rule 4: T-10 timing. Focus on opportunities from T=290 to T=295, and avoid weak late entries after T=297.\n\n"
         "Keep `reason` short and concrete.\n"
         "Return ONLY the JSON object described in the system message."
     )
 
 
-def _build_compact_user_prompt(features: BtcFeatures, market: BtcUpDownMarket) -> str:
+def _build_compact_user_prompt(features: BtcFeatures, market: BtcUpDownMarket, up_snapshot=None, down_snapshot=None) -> str:
+    time_remaining_seconds = max(market.end_ts - int(features.as_of.timestamp()), 0)
     return (
         f"BTC 5m market slug: {market.slug}\n"
         f"Price to beat USD: {market.settlement_threshold}\n"
+        f"Time remaining seconds: {time_remaining_seconds}\n"
         f"Current BTC price USD: {features.price_usd:.2f}\n"
+        f"Window Delta pct: {features.delta_pct_from_window_open * 100:.4f}%\n"
+        f"UP ask price: {getattr(up_snapshot, 'buy_quote', None)}\n"
+        f"DOWN ask price: {getattr(down_snapshot, 'buy_quote', None)}\n"
         f"Window open price USD: {features.window_open_price:.2f}\n"
         f"Trailing 5-minute open USD: {features.trailing_5m_open_price:.2f}\n"
-        f"Delta from window open pct: {features.delta_pct_from_window_open * 100:.4f}%\n"
         f"Delta from trailing 5-minute open pct: {features.delta_pct_from_trailing_5m_open * 100:.4f}%\n"
         f"Change from previous tick USD: {features.delta_from_previous_tick}\n"
         f"RSI(14): {features.rsi_14}\n"
@@ -86,20 +113,28 @@ def _build_compact_user_prompt(features: BtcFeatures, market: BtcUpDownMarket) -
         f"Trailing 5-minute momentum USD: {features.momentum_5m}\n"
         f"Trailing 5-minute volatility: {features.volatility_5m}\n"
         "Settlement: UP wins only above the price to beat; DOWN wins only below it.\n"
+        "Use EV logic: edge must exceed 0.05 after implied probability and fee adjustment. "
+        "Use Window Delta as the master confidence switch near T-10.\n"
         'Return one JSON object with keys: decision, confidence, max_price_to_pay, reason.'
     )
 
 
-def _build_minimal_user_prompt(features: BtcFeatures, market: BtcUpDownMarket) -> str:
+def _build_minimal_user_prompt(features: BtcFeatures, market: BtcUpDownMarket, up_snapshot=None, down_snapshot=None) -> str:
+    time_remaining_seconds = max(market.end_ts - int(features.as_of.timestamp()), 0)
     return (
         f"BTC price: {features.price_usd:.2f}\n"
         f"Price to beat: {market.settlement_threshold}\n"
+        f"Time remaining seconds: {time_remaining_seconds}\n"
+        f"Window Delta pct: {features.delta_pct_from_window_open * 100:.4f}%\n"
+        f"UP ask: {getattr(up_snapshot, 'buy_quote', None)}\n"
+        f"DOWN ask: {getattr(down_snapshot, 'buy_quote', None)}\n"
         f"Delta pct: {features.delta_pct_from_window_open * 100:.4f}%\n"
         f"RSI14: {features.rsi_14}\n"
         f"Momentum1m: {features.momentum_1m}\n"
         f"Momentum5m: {features.momentum_5m}\n"
         f"Volatility5m: {features.volatility_5m}\n"
         "UP wins above the price to beat. DOWN wins below it.\n"
+        "Use EV logic with a required edge above 0.05, and treat Window Delta as primary near T-10.\n"
         'Return one JSON object with keys: decision, confidence, max_price_to_pay, reason.'
     )
 
@@ -563,12 +598,12 @@ def test_llm_connection() -> tuple[bool, str]:
     return True, f"LLM connection test succeeded ({cfg.engine}/{cfg.model})"
 
 
-def decide_trade(features: BtcFeatures, market: BtcUpDownMarket) -> LlmDecision:
+def decide_trade(features: BtcFeatures, market: BtcUpDownMarket, up_snapshot=None, down_snapshot=None) -> LlmDecision:
     cfg = get_llm_config()
     system_prompt = _build_system_prompt()
-    user_prompt = _build_user_prompt(features, market)
-    compact_user_prompt = _build_compact_user_prompt(features, market)
-    minimal_user_prompt = _build_minimal_user_prompt(features, market)
+    user_prompt = _build_user_prompt(features, market, up_snapshot=up_snapshot, down_snapshot=down_snapshot)
+    compact_user_prompt = _build_compact_user_prompt(features, market, up_snapshot=up_snapshot, down_snapshot=down_snapshot)
+    minimal_user_prompt = _build_minimal_user_prompt(features, market, up_snapshot=up_snapshot, down_snapshot=down_snapshot)
     api_connection_timeout_seconds = _coerce_config_value(
         getattr(cfg, "api_connection_timeout_seconds", 10.0),
         float,

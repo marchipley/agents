@@ -411,9 +411,21 @@ def compute_recommended_limit_price(
     return _snap_down_to_tick(target, tick_size)
 
 
+def get_submission_limit_price(snapshot: TokenQuoteSnapshot) -> Optional[float]:
+    cfg = get_trading_config()
+    if cfg.use_recommended_limit and snapshot.recommended_limit_price is not None:
+        return snapshot.recommended_limit_price
+    return snapshot.target_limit_price
+
+
+def get_submission_limit_label() -> str:
+    cfg = get_trading_config()
+    return "recommended limit" if cfg.use_recommended_limit else "target limit"
+
+
 def evaluate_ok_to_submit(
     buy_quote: Optional[float],
-    recommended_limit_price: Optional[float],
+    submission_limit_price: Optional[float],
     tick_size: Optional[float],
 ) -> (bool, str):
     """
@@ -426,33 +438,35 @@ def evaluate_ok_to_submit(
     - if buy_quote <= recommended_limit_price, OK
     - else allow up to 2 ticks of adverse movement
     """
-    if recommended_limit_price is None:
-        return False, "No recommended limit price available"
+    limit_label = get_submission_limit_label()
+
+    if submission_limit_price is None:
+        return False, f"No {limit_label} available"
 
     if buy_quote is None:
         return False, "No current buy quote available"
 
-    if buy_quote <= recommended_limit_price:
-        return True, "Current buy quote is at or below recommended limit"
+    if buy_quote <= submission_limit_price:
+        return True, f"Current buy quote is at or below {limit_label}"
 
     if tick_size is None or tick_size <= 0:
         return False, (
-            f"Current buy quote {buy_quote:.3f} is above recommended limit "
-            f"{recommended_limit_price:.3f}"
+            f"Current buy quote {buy_quote:.3f} is above {limit_label} "
+            f"{submission_limit_price:.3f}"
         )
 
     allowed_slippage = tick_size * 2
-    diff = buy_quote - recommended_limit_price
+    diff = buy_quote - submission_limit_price
 
     if diff <= allowed_slippage:
         return True, (
-            f"Current buy quote is only {diff:.3f} above recommended limit "
+            f"Current buy quote is only {diff:.3f} above {limit_label} "
             f"(within 2 ticks)"
         )
 
     return False, (
-        f"Current buy quote {buy_quote:.3f} moved too far above recommended limit "
-        f"{recommended_limit_price:.3f} (diff={diff:.3f}, allowed={allowed_slippage:.3f})"
+        f"Current buy quote {buy_quote:.3f} moved too far above {limit_label} "
+        f"{submission_limit_price:.3f} (diff={diff:.3f}, allowed={allowed_slippage:.3f})"
     )
 
 
@@ -501,7 +515,11 @@ def get_token_quote_snapshot(
 
     ok_to_submit, submit_reason = evaluate_ok_to_submit(
         buy_quote=buy_quote,
-        recommended_limit_price=recommended_limit_price,
+        submission_limit_price=(
+            recommended_limit_price
+            if get_trading_config().use_recommended_limit
+            else target_limit_price
+        ),
         tick_size=tick_size,
     )
 
@@ -580,7 +598,8 @@ def _validate_trade_candidate(
         snapshot = get_token_quote_snapshot(token_id, decision=decision)
 
     live_price = snapshot.reference_price
-    recommended_limit_price = snapshot.recommended_limit_price
+    submission_limit_price = get_submission_limit_price(snapshot)
+    submission_limit_label = get_submission_limit_label()
 
     if live_price is None:
         return None, _build_rejected_trade_result(
@@ -592,13 +611,13 @@ def _validate_trade_candidate(
             snapshot=snapshot,
         )
 
-    if recommended_limit_price is None:
+    if submission_limit_price is None:
         return None, _build_rejected_trade_result(
             side=decision.side,
             size=0.0,
             price=live_price,
             token_id=token_id,
-            reason="Could not determine recommended limit price",
+            reason=f"Could not determine {submission_limit_label}",
             snapshot=snapshot,
         )
 
@@ -606,7 +625,7 @@ def _validate_trade_candidate(
         return None, _build_rejected_trade_result(
             side=decision.side,
             size=0.0,
-            price=recommended_limit_price,
+            price=submission_limit_price,
             token_id=token_id,
             reason=f"Not safe to submit: {snapshot.submit_reason}",
             snapshot=snapshot,
@@ -641,7 +660,8 @@ def _execute_paper_trade(
 ) -> TradeExecutionResult:
     cfg = get_trading_config()
     live_price = snapshot.reference_price
-    recommended_limit_price = snapshot.recommended_limit_price
+    submission_limit_price = get_submission_limit_price(snapshot)
+    submission_limit_label = get_submission_limit_label()
     size = cfg.trade_shares_size
     token_id = snapshot.token_id
 
@@ -649,10 +669,10 @@ def _execute_paper_trade(
         executed=True,
         side=decision.side,
         size=size,
-        price=recommended_limit_price,
+        price=submission_limit_price,
         token_id=token_id,
         reason=(
-            f"Paper trade approved at recommended limit {recommended_limit_price:.3f} "
+            f"Paper trade approved at {submission_limit_label} {submission_limit_price:.3f} "
             f"for {size:.4f} shares "
             f"(reference={live_price:.3f}; {snapshot.submit_reason})"
         ),
@@ -714,22 +734,23 @@ def _execute_live_trade(
     cfg = get_trading_config()
 
     live_price = snapshot.reference_price
-    recommended_limit_price = snapshot.recommended_limit_price
+    submission_limit_price = get_submission_limit_price(snapshot)
+    submission_limit_label = get_submission_limit_label()
 
-    if recommended_limit_price is None or live_price is None:
+    if submission_limit_price is None or live_price is None:
         raise RuntimeError("Live trade execution called without a valid priced snapshot.")
 
     size = _scale_live_size_for_min_notional(
         cfg.trade_shares_size,
-        recommended_limit_price,
+        submission_limit_price,
         cfg.live_min_order_usd,
     )
-    order_notional = _get_order_notional(size, recommended_limit_price)
+    order_notional = _get_order_notional(size, submission_limit_price)
 
-    estimated_fee = _estimate_live_fee(size, recommended_limit_price, cfg.live_fee_rate_bps)
+    estimated_fee = _estimate_live_fee(size, submission_limit_price, cfg.live_fee_rate_bps)
     required_cash = _get_required_live_cash(
         size,
-        recommended_limit_price,
+        submission_limit_price,
         cfg.live_fee_rate_bps,
     )
     ensure_live_trade_cash_available(required_cash)
@@ -737,7 +758,7 @@ def _execute_live_trade(
     client = Polymarket()
     try:
         response = client.execute_order(
-            price=recommended_limit_price,
+            price=submission_limit_price,
             size=size,
             side="BUY",
             token_id=snapshot.token_id,
@@ -751,10 +772,10 @@ def _execute_live_trade(
         executed=True,
         side=decision.side,
         size=size,
-        price=recommended_limit_price,
+        price=submission_limit_price,
         token_id=snapshot.token_id,
         reason=(
-            f"Live trade submitted at limit {recommended_limit_price:.3f} "
+            f"Live trade submitted at {submission_limit_label} {submission_limit_price:.3f} "
             f"for {size:.4f} shares "
             f"(reference={live_price:.3f}; order_notional={order_notional:.3f}; "
             f"required_cash={required_cash:.3f}; "

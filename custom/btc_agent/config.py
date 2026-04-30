@@ -54,6 +54,7 @@ class TradingConfig:
     minimum_wallet_balance: float = 0.0
     live_fee_rate_bps: int = 1000
     live_min_order_usd: float = 1.0
+    use_recommended_limit: bool = True
     max_trade_usd: float = 5.0
     trade_shares_size: float = 5.0
     max_trades_per_period: int = 1
@@ -141,6 +142,7 @@ def get_trading_config() -> TradingConfig:
         minimum_wallet_balance=float(os.getenv("MINIMUM_WALLET_BALANCE", "0")),
         live_fee_rate_bps=int(os.getenv("BTC_AGENT_LIVE_FEE_RATE_BPS", "1000")),
         live_min_order_usd=float(os.getenv("BTC_AGENT_LIVE_MIN_ORDER_USD", "1")),
+        use_recommended_limit=_parse_bool_env("USE_RECOMMENDED_LIMIT", True),
         max_trade_usd=float(os.getenv("BTC_AGENT_MAX_TRADE_USD", "5")),
         trade_shares_size=max(float(os.getenv("BTC_AGENT_TRADE_SHARES_SIZE", "5")), 5.0),
         max_trades_per_period=max(int(os.getenv("BTC_AGENT_MAX_TRADES_PER_PERIOD", "1")), 1),
