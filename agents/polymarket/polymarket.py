@@ -4,6 +4,7 @@
 import os
 import ast
 import importlib
+import logging
 from decimal import Decimal
 from contextlib import contextmanager
 from typing import Any, Optional
@@ -23,6 +24,19 @@ load_dotenv()
 
 
 _V2_SDK = None
+
+
+def _configure_v2_sdk_logging() -> None:
+    logger_names = (
+        "py_clob_client_v2",
+        "py_clob_client_v2.client",
+        "py_clob_client_v2.http_helpers",
+        "py_clob_client_v2.http_helpers.helpers",
+    )
+    for logger_name in logger_names:
+        logger = logging.getLogger(logger_name)
+        logger.setLevel(logging.CRITICAL)
+        logger.propagate = False
 
 
 @contextmanager
@@ -58,6 +72,7 @@ def _load_v2_sdk():
 
     with _polymarket_v2_sdk_env():
         module = importlib.import_module("py_clob_client_v2")
+        _configure_v2_sdk_logging()
 
     _V2_SDK = {
         "ApiCreds": module.ApiCreds,

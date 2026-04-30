@@ -1,10 +1,37 @@
 import unittest
+import logging
 from unittest.mock import Mock, patch
 
-from agents.polymarket.polymarket import Polymarket
+from agents.polymarket.polymarket import Polymarket, _configure_v2_sdk_logging
 
 
 class TestPolymarketV2(unittest.TestCase):
+    def test_configure_v2_sdk_logging_suppresses_sdk_loggers(self):
+        logger_names = (
+            "py_clob_client_v2",
+            "py_clob_client_v2.client",
+            "py_clob_client_v2.http_helpers",
+            "py_clob_client_v2.http_helpers.helpers",
+        )
+
+        try:
+            for logger_name in logger_names:
+                logger = logging.getLogger(logger_name)
+                logger.setLevel(logging.NOTSET)
+                logger.propagate = True
+
+            _configure_v2_sdk_logging()
+
+            for logger_name in logger_names:
+                logger = logging.getLogger(logger_name)
+                self.assertEqual(logger.level, logging.CRITICAL)
+                self.assertFalse(logger.propagate)
+        finally:
+            for logger_name in logger_names:
+                logger = logging.getLogger(logger_name)
+                logger.setLevel(logging.NOTSET)
+                logger.propagate = True
+
     def test_init_uses_v2_client_and_derives_api_key(self):
         bootstrap_client = Mock()
         bootstrap_client.create_or_derive_api_key.return_value = "creds"
