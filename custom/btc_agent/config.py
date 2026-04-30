@@ -49,6 +49,7 @@ class LlmConfig:
 class TradingConfig:
     paper_trading: bool = True
     debug: bool = False
+    debug_price_to_beat: bool = False
     llm_connection_debug: bool = False
     minimum_wallet_balance: float = 0.0
     live_fee_rate_bps: int = 1000
@@ -134,6 +135,7 @@ def get_trading_config() -> TradingConfig:
     return TradingConfig(
         paper_trading=_parse_bool_env("USE_PAPER_TRADES", True),
         debug=_parse_bool_env("BTC_AGENT_DEBUG", False),
+        debug_price_to_beat=_parse_bool_env("DEBUG_PRICE_TO_BEAT", False),
         llm_connection_debug=_parse_bool_env("LLM_CONNECTION_DEBUG", False),
         minimum_wallet_balance=float(os.getenv("MINIMUM_WALLET_BALANCE", "0")),
         live_fee_rate_bps=int(os.getenv("BTC_AGENT_LIVE_FEE_RATE_BPS", "1000")),

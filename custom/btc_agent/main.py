@@ -11,7 +11,7 @@ import tty
 
 from .config import get_trading_config
 from .market_lookup import (
-    build_price_to_beat_debug_report,
+    build_price_to_beat_debug_reports,
     find_current_btc_updown_market,
     get_btc_updown_market_by_slug,
 )
@@ -49,6 +49,7 @@ from scripts.python.check_public_ip_indonesia import (
 
 
 _FIRST_LOOP = True
+_DEBUG_WRITTEN_SLUGS = set()
 
 
 class QuitKeyMonitor:
@@ -122,18 +123,54 @@ def has_valid_price_to_beat(value) -> bool:
     return 1000 <= numeric_value <= 1_000_000
 
 
-def write_price_to_beat_debug_file(slug: str) -> None:
-    debug_path = os.path.join(os.getcwd(), "logs", "priceToBeatDebug.txt")
+def write_price_to_beat_debug_file(slug: str, force: bool = False) -> None:
+    if not force and slug in _DEBUG_WRITTEN_SLUGS:
+        return
+
     try:
-        with open(debug_path, "w", encoding="utf-8") as debug_file:
-            debug_file.write(build_price_to_beat_debug_report(slug))
-        print(f"price_to_beat_debug_file: {debug_path}")
+        reports = build_price_to_beat_debug_reports(slug)
+        for index, report in enumerate(reports, start=1):
+            if index == 1:
+                debug_path = os.path.join(os.getcwd(), "logs", "priceToBeatDebug.txt")
+                print(f"price_to_beat_debug_file: {debug_path}")
+            else:
+                debug_path = os.path.join(
+                    os.getcwd(),
+                    "logs",
+                    f"priceToBeatDebugPg{index}.txt",
+                )
+                print(f"price_to_beat_debug_file_pg{index}: {debug_path}")
+            with open(debug_path, "w", encoding="utf-8") as debug_file:
+                debug_file.write(report)
+        _DEBUG_WRITTEN_SLUGS.add(slug)
     except Exception as exc:
         print(f"price_to_beat_debug_file_error: {exc}")
 
 
+def clear_price_to_beat_debug_files() -> None:
+    logs_dir = os.path.join(os.getcwd(), "logs")
+    try:
+        for name in os.listdir(logs_dir):
+            if not (
+                name == "priceToBeatDebug.txt"
+                or (name.startswith("priceToBeatDebugPg") and name.endswith(".txt"))
+            ):
+                continue
+            try:
+                os.remove(os.path.join(logs_dir, name))
+            except FileNotFoundError:
+                pass
+    except FileNotFoundError:
+        return
+
+
 def resolve_price_to_beat_with_retries(market, retry_attempts: int = 2, retry_delay_seconds: int = 3):
     if has_valid_price_to_beat(market.settlement_threshold):
+        return market
+
+    cfg = get_trading_config()
+    if cfg.debug_price_to_beat:
+        print("price_to_beat_retry: skipped because DEBUG_PRICE_TO_BEAT=true")
         return market
 
     for attempt in range(1, retry_attempts + 1):
@@ -406,11 +443,16 @@ def run_once() -> None:
         _FIRST_LOOP = False
     if period_changed:
         print(f"New 5-minute market period detected: {market.slug}")
+        clear_price_to_beat_debug_files()
+        _DEBUG_WRITTEN_SLUGS.clear()
 
     market = resolve_price_to_beat_with_retries(market)
+    if cfg.debug:
+        write_price_to_beat_debug_file(market.slug)
     if not has_valid_price_to_beat(market.settlement_threshold):
         print_market_context(market, debug=cfg.debug)
-        write_price_to_beat_debug_file(market.slug)
+        if not cfg.debug:
+            write_price_to_beat_debug_file(market.slug, force=True)
         print(
             "ERROR: Invalid period_open_price_to_beat for current market. "
             "Aborting BTC agent execution."

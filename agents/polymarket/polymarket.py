@@ -2,10 +2,11 @@
 # https://github.com/Polymarket/py-clob-client/tree/main/examples
 
 import os
-import pdb
-import time
 import ast
-import requests
+import importlib
+from decimal import Decimal
+from contextlib import contextmanager
+from typing import Any, Optional
 
 from dotenv import load_dotenv
 
@@ -14,27 +15,72 @@ from web3.constants import MAX_INT
 from web3.middleware import geth_poa_middleware
 
 import httpx
-from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import ApiCreds
-from py_clob_client.constants import AMOY, POLYGON
-from py_order_utils.builders import OrderBuilder
-from py_order_utils.model import OrderData
-from py_order_utils.signer import Signer
-from py_clob_client.clob_types import (
-    OrderArgs,
-    MarketOrderArgs,
-    OrderType,
-    OrderBookSummary,
-)
-from py_clob_client.order_builder.constants import BUY
 
 from agents.utils.objects import SimpleMarket, SimpleEvent
+from custom.btc_agent.network import get_proxy_url_for_httpx, is_proxy_enabled
 
 load_dotenv()
 
 
+_V2_SDK = None
+
+
+@contextmanager
+def _polymarket_v2_sdk_env():
+    proxy_keys = ("ALL_PROXY", "all_proxy", "HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy")
+    original = {key: os.environ.get(key) for key in proxy_keys}
+    try:
+        if not is_proxy_enabled():
+            for key in proxy_keys:
+                os.environ.pop(key, None)
+        else:
+            httpx_proxy = get_proxy_url_for_httpx()
+            for key in proxy_keys:
+                os.environ.pop(key, None)
+            if httpx_proxy:
+                os.environ["ALL_PROXY"] = httpx_proxy
+                os.environ["HTTPS_PROXY"] = httpx_proxy
+                os.environ["HTTP_PROXY"] = httpx_proxy
+        yield
+    finally:
+        for key in proxy_keys:
+            original_value = original.get(key)
+            if original_value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = original_value
+
+
+def _load_v2_sdk():
+    global _V2_SDK
+    if _V2_SDK is not None:
+        return _V2_SDK
+
+    with _polymarket_v2_sdk_env():
+        module = importlib.import_module("py_clob_client_v2")
+
+    _V2_SDK = {
+        "ApiCreds": module.ApiCreds,
+        "ClobClient": module.ClobClient,
+        "MarketOrderArgs": module.MarketOrderArgs,
+        "OrderArgs": module.OrderArgs,
+        "OrderType": module.OrderType,
+        "PartialCreateOrderOptions": module.PartialCreateOrderOptions,
+        "Side": module.Side,
+    }
+    return _V2_SDK
+
+
 class Polymarket:
     def __init__(self) -> None:
+        sdk = _load_v2_sdk()
+        self._ClobClient = sdk["ClobClient"]
+        self._MarketOrderArgs = sdk["MarketOrderArgs"]
+        self._OrderArgs = sdk["OrderArgs"]
+        self._OrderType = sdk["OrderType"]
+        self._PartialCreateOrderOptions = sdk["PartialCreateOrderOptions"]
+        self._Side = sdk["Side"]
+
         self.gamma_url = "https://gamma-api.polymarket.com"
         self.gamma_markets_endpoint = self.gamma_url + "/markets"
         self.gamma_events_endpoint = self.gamma_url + "/events"
@@ -48,20 +94,20 @@ class Polymarket:
         self.polygon_rpc = "https://polygon-rpc.com"
         self.w3 = Web3(Web3.HTTPProvider(self.polygon_rpc))
 
-        self.exchange_address = "0x4bfb41d5b3570defd03c39a9a4d8de6bd8b8982e"
-        self.neg_risk_exchange_address = "0xC5d563A36AE78145C45a50134d48A1215220f80a"
+        self.exchange_address = "0xE111180000d2663C0091e4f400237545B87B996B"
+        self.neg_risk_exchange_address = "0xe2222d279d744050d28e00520010520000310F59"
 
         self.erc20_approve = """[{"anonymous":false,"inputs":[{"indexed":true,"internalType":"address","name":"owner","type":"address"},{"indexed":true,"internalType":"address","name":"spender","type":"address"},{"indexed":false,"internalType":"uint256","name":"value","type":"uint256"}],"name":"Approval","type":"event"},{"anonymous":false,"inputs":[{"indexed":true,"internalType":"address","name":"authorizer","type":"address"},{"indexed":true,"internalType":"bytes32","name":"nonce","type":"bytes32"}],"name":"AuthorizationCanceled","type":"event"},{"anonymous":false,"inputs":[{"indexed":true,"internalType":"address","name":"authorizer","type":"address"},{"indexed":true,"internalType":"bytes32","name":"nonce","type":"bytes32"}],"name":"AuthorizationUsed","type":"event"},{"anonymous":false,"inputs":[{"indexed":true,"internalType":"address","name":"account","type":"address"}],"name":"Blacklisted","type":"event"},{"anonymous":false,"inputs":[{"indexed":false,"internalType":"address","name":"userAddress","type":"address"},{"indexed":false,"internalType":"address payable","name":"relayerAddress","type":"address"},{"indexed":false,"internalType":"bytes","name":"functionSignature","type":"bytes"}],"name":"MetaTransactionExecuted","type":"event"},{"anonymous":false,"inputs":[],"name":"Pause","type":"event"},{"anonymous":false,"inputs":[{"indexed":true,"internalType":"address","name":"newRescuer","type":"address"}],"name":"RescuerChanged","type":"event"},{"anonymous":false,"inputs":[{"indexed":true,"internalType":"bytes32","name":"role","type":"bytes32"},{"indexed":true,"internalType":"bytes32","name":"previousAdminRole","type":"bytes32"},{"indexed":true,"internalType":"bytes32","name":"newAdminRole","type":"bytes32"}],"name":"RoleAdminChanged","type":"event"},{"anonymous":false,"inputs":[{"indexed":true,"internalType":"bytes32","name":"role","type":"bytes32"},{"indexed":true,"internalType":"address","name":"account","type":"address"},{"indexed":true,"internalType":"address","name":"sender","type":"address"}],"name":"RoleGranted","type":"event"},{"anonymous":false,"inputs":[{"indexed":true,"internalType":"bytes32","name":"role","type":"bytes32"},{"indexed":true,"internalType":"address","name":"account","type":"address"},{"indexed":true,"internalType":"address","name":"sender","type":"address"}],"name":"RoleRevoked","type":"event"},{"anonymous":false,"inputs":[{"indexed":true,"internalType":"address","name":"from","type":"address"},{"indexed":true,"internalType":"address","name":"to","type":"address"},{"indexed":false,"internalType":"uint256","name":"value","type":"uint256"}],"name":"Transfer","type":"event"},{"anonymous":false,"inputs":[{"indexed":true,"internalType":"address","name":"account","type":"address"}],"name":"UnBlacklisted","type":"event"},{"anonymous":false,"inputs":[],"name":"Unpause","type":"event"},{"inputs":[],"name":"APPROVE_WITH_AUTHORIZATION_TYPEHASH","outputs":[{"internalType":"bytes32","name":"","type":"bytes32"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"BLACKLISTER_ROLE","outputs":[{"internalType":"bytes32","name":"","type":"bytes32"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"CANCEL_AUTHORIZATION_TYPEHASH","outputs":[{"internalType":"bytes32","name":"","type":"bytes32"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"DECREASE_ALLOWANCE_WITH_AUTHORIZATION_TYPEHASH","outputs":[{"internalType":"bytes32","name":"","type":"bytes32"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"DEFAULT_ADMIN_ROLE","outputs":[{"internalType":"bytes32","name":"","type":"bytes32"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"DEPOSITOR_ROLE","outputs":[{"internalType":"bytes32","name":"","type":"bytes32"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"DOMAIN_SEPARATOR","outputs":[{"internalType":"bytes32","name":"","type":"bytes32"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"EIP712_VERSION","outputs":[{"internalType":"string","name":"","type":"string"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"INCREASE_ALLOWANCE_WITH_AUTHORIZATION_TYPEHASH","outputs":[{"internalType":"bytes32","name":"","type":"bytes32"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"META_TRANSACTION_TYPEHASH","outputs":[{"internalType":"bytes32","name":"","type":"bytes32"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"PAUSER_ROLE","outputs":[{"internalType":"bytes32","name":"","type":"bytes32"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"PERMIT_TYPEHASH","outputs":[{"internalType":"bytes32","name":"","type":"bytes32"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"RESCUER_ROLE","outputs":[{"internalType":"bytes32","name":"","type":"bytes32"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"TRANSFER_WITH_AUTHORIZATION_TYPEHASH","outputs":[{"internalType":"bytes32","name":"","type":"bytes32"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"WITHDRAW_WITH_AUTHORIZATION_TYPEHASH","outputs":[{"internalType":"bytes32","name":"","type":"bytes32"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"address","name":"owner","type":"address"},{"internalType":"address","name":"spender","type":"address"}],"name":"allowance","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"address","name":"spender","type":"address"},{"internalType":"uint256","name":"amount","type":"uint256"}],"name":"approve","outputs":[{"internalType":"bool","name":"","type":"bool"}],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"address","name":"owner","type":"address"},{"internalType":"address","name":"spender","type":"address"},{"internalType":"uint256","name":"value","type":"uint256"},{"internalType":"uint256","name":"validAfter","type":"uint256"},{"internalType":"uint256","name":"validBefore","type":"uint256"},{"internalType":"bytes32","name":"nonce","type":"bytes32"},{"internalType":"uint8","name":"v","type":"uint8"},{"internalType":"bytes32","name":"r","type":"bytes32"},{"internalType":"bytes32","name":"s","type":"bytes32"}],"name":"approveWithAuthorization","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"address","name":"authorizer","type":"address"},{"internalType":"bytes32","name":"nonce","type":"bytes32"}],"name":"authorizationState","outputs":[{"internalType":"enum GasAbstraction.AuthorizationState","name":"","type":"uint8"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"address","name":"account","type":"address"}],"name":"balanceOf","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"address","name":"account","type":"address"}],"name":"blacklist","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[],"name":"blacklisters","outputs":[{"internalType":"address[]","name":"","type":"address[]"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"address","name":"authorizer","type":"address"},{"internalType":"bytes32","name":"nonce","type":"bytes32"},{"internalType":"uint8","name":"v","type":"uint8"},{"internalType":"bytes32","name":"r","type":"bytes32"},{"internalType":"bytes32","name":"s","type":"bytes32"}],"name":"cancelAuthorization","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[],"name":"decimals","outputs":[{"internalType":"uint8","name":"","type":"uint8"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"address","name":"spender","type":"address"},{"internalType":"uint256","name":"subtractedValue","type":"uint256"}],"name":"decreaseAllowance","outputs":[{"internalType":"bool","name":"","type":"bool"}],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"address","name":"owner","type":"address"},{"internalType":"address","name":"spender","type":"address"},{"internalType":"uint256","name":"decrement","type":"uint256"},{"internalType":"uint256","name":"validAfter","type":"uint256"},{"internalType":"uint256","name":"validBefore","type":"uint256"},{"internalType":"bytes32","name":"nonce","type":"bytes32"},{"internalType":"uint8","name":"v","type":"uint8"},{"internalType":"bytes32","name":"r","type":"bytes32"},{"internalType":"bytes32","name":"s","type":"bytes32"}],"name":"decreaseAllowanceWithAuthorization","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"address","name":"user","type":"address"},{"internalType":"bytes","name":"depositData","type":"bytes"}],"name":"deposit","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"address","name":"userAddress","type":"address"},{"internalType":"bytes","name":"functionSignature","type":"bytes"},{"internalType":"bytes32","name":"sigR","type":"bytes32"},{"internalType":"bytes32","name":"sigS","type":"bytes32"},{"internalType":"uint8","name":"sigV","type":"uint8"}],"name":"executeMetaTransaction","outputs":[{"internalType":"bytes","name":"","type":"bytes"}],"stateMutability":"payable","type":"function"},{"inputs":[{"internalType":"bytes32","name":"role","type":"bytes32"}],"name":"getRoleAdmin","outputs":[{"internalType":"bytes32","name":"","type":"bytes32"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"bytes32","name":"role","type":"bytes32"},{"internalType":"uint256","name":"index","type":"uint256"}],"name":"getRoleMember","outputs":[{"internalType":"address","name":"","type":"address"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"bytes32","name":"role","type":"bytes32"}],"name":"getRoleMemberCount","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"bytes32","name":"role","type":"bytes32"},{"internalType":"address","name":"account","type":"address"}],"name":"grantRole","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"bytes32","name":"role","type":"bytes32"},{"internalType":"address","name":"account","type":"address"}],"name":"hasRole","outputs":[{"internalType":"bool","name":"","type":"bool"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"address","name":"spender","type":"address"},{"internalType":"uint256","name":"addedValue","type":"uint256"}],"name":"increaseAllowance","outputs":[{"internalType":"bool","name":"","type":"bool"}],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"address","name":"owner","type":"address"},{"internalType":"address","name":"spender","type":"address"},{"internalType":"uint256","name":"increment","type":"uint256"},{"internalType":"uint256","name":"validAfter","type":"uint256"},{"internalType":"uint256","name":"validBefore","type":"uint256"},{"internalType":"bytes32","name":"nonce","type":"bytes32"},{"internalType":"uint8","name":"v","type":"uint8"},{"internalType":"bytes32","name":"r","type":"bytes32"},{"internalType":"bytes32","name":"s","type":"bytes32"}],"name":"increaseAllowanceWithAuthorization","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"string","name":"newName","type":"string"},{"internalType":"string","name":"newSymbol","type":"string"},{"internalType":"uint8","name":"newDecimals","type":"uint8"},{"internalType":"address","name":"childChainManager","type":"address"}],"name":"initialize","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[],"name":"initialized","outputs":[{"internalType":"bool","name":"","type":"bool"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"address","name":"account","type":"address"}],"name":"isBlacklisted","outputs":[{"internalType":"bool","name":"","type":"bool"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"name","outputs":[{"internalType":"string","name":"","type":"string"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"address","name":"owner","type":"address"}],"name":"nonces","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"pause","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[],"name":"paused","outputs":[{"internalType":"bool","name":"","type":"bool"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"pausers","outputs":[{"internalType":"address[]","name":"","type":"address[]"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"address","name":"owner","type":"address"},{"internalType":"address","name":"spender","type":"address"},{"internalType":"uint256","name":"value","type":"uint256"},{"internalType":"uint256","name":"deadline","type":"uint256"},{"internalType":"uint8","name":"v","type":"uint8"},{"internalType":"bytes32","name":"r","type":"bytes32"},{"internalType":"bytes32","name":"s","type":"bytes32"}],"name":"permit","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"bytes32","name":"role","type":"bytes32"},{"internalType":"address","name":"account","type":"address"}],"name":"renounceRole","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"contract IERC20","name":"tokenContract","type":"address"},{"internalType":"address","name":"to","type":"address"},{"internalType":"uint256","name":"amount","type":"uint256"}],"name":"rescueERC20","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[],"name":"rescuers","outputs":[{"internalType":"address[]","name":"","type":"address[]"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"bytes32","name":"role","type":"bytes32"},{"internalType":"address","name":"account","type":"address"}],"name":"revokeRole","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[],"name":"symbol","outputs":[{"internalType":"string","name":"","type":"string"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"totalSupply","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"address","name":"recipient","type":"address"},{"internalType":"uint256","name":"amount","type":"uint256"}],"name":"transfer","outputs":[{"internalType":"bool","name":"","type":"bool"}],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"address","name":"sender","type":"address"},{"internalType":"address","name":"recipient","type":"address"},{"internalType":"uint256","name":"amount","type":"uint256"}],"name":"transferFrom","outputs":[{"internalType":"bool","name":"","type":"bool"}],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"address","name":"from","type":"address"},{"internalType":"address","name":"to","type":"address"},{"internalType":"uint256","name":"value","type":"uint256"},{"internalType":"uint256","name":"validAfter","type":"uint256"},{"internalType":"uint256","name":"validBefore","type":"uint256"},{"internalType":"bytes32","name":"nonce","type":"bytes32"},{"internalType":"uint8","name":"v","type":"uint8"},{"internalType":"bytes32","name":"r","type":"bytes32"},{"internalType":"bytes32","name":"s","type":"bytes32"}],"name":"transferWithAuthorization","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"address","name":"account","type":"address"}],"name":"unBlacklist","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[],"name":"unpause","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"string","name":"newName","type":"string"},{"internalType":"string","name":"newSymbol","type":"string"}],"name":"updateMetadata","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"uint256","name":"amount","type":"uint256"}],"name":"withdraw","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"address","name":"owner","type":"address"},{"internalType":"uint256","name":"value","type":"uint256"},{"internalType":"uint256","name":"validAfter","type":"uint256"},{"internalType":"uint256","name":"validBefore","type":"uint256"},{"internalType":"bytes32","name":"nonce","type":"bytes32"},{"internalType":"uint8","name":"v","type":"uint8"},{"internalType":"bytes32","name":"r","type":"bytes32"},{"internalType":"bytes32","name":"s","type":"bytes32"}],"name":"withdrawWithAuthorization","outputs":[],"stateMutability":"nonpayable","type":"function"}]"""
         self.erc1155_set_approval = """[{"inputs": [{ "internalType": "address", "name": "operator", "type": "address" },{ "internalType": "bool", "name": "approved", "type": "bool" }],"name": "setApprovalForAll","outputs": [],"stateMutability": "nonpayable","type": "function"}]"""
 
-        self.usdc_address = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+        self.collateral_address = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB"
         self.ctf_address = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
 
         self.web3 = Web3(Web3.HTTPProvider(self.polygon_rpc))
         self.web3.middleware_onion.inject(geth_poa_middleware, layer=0)
 
-        self.usdc = self.web3.eth.contract(
-            address=self.usdc_address, abi=self.erc20_approve
+        self.collateral_token = self.web3.eth.contract(
+            address=self.collateral_address, abi=self.erc20_approve
         )
         self.ctf = self.web3.eth.contract(
             address=self.ctf_address, abi=self.erc1155_set_approval
@@ -80,10 +126,10 @@ class Polymarket:
             client_kwargs["signature_type"] = 2
             client_kwargs["funder"] = self.proxy_address
 
-        self.client = ClobClient(**client_kwargs)
-        self.credentials = self.client.create_or_derive_api_creds()
-        self.client.set_api_creds(self.credentials)
-        # print(self.credentials)
+        with _polymarket_v2_sdk_env():
+            bootstrap_client = self._ClobClient(**client_kwargs)
+            self.credentials = bootstrap_client.create_or_derive_api_key()
+            self.client = self._ClobClient(**client_kwargs, creds=self.credentials)
 
     def _init_approvals(self, run: bool = False) -> None:
         if not run:
@@ -94,23 +140,23 @@ class Polymarket:
         chain_id = self.chain_id
         web3 = self.web3
         nonce = web3.eth.get_transaction_count(pub_key)
-        usdc = self.usdc
+        collateral_token = self.collateral_token
         ctf = self.ctf
 
         # CTF Exchange
-        raw_usdc_approve_txn = usdc.functions.approve(
-            "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E", int(MAX_INT, 0)
+        raw_collateral_approve_txn = collateral_token.functions.approve(
+            self.exchange_address, int(MAX_INT, 0)
         ).build_transaction({"chainId": chain_id, "from": pub_key, "nonce": nonce})
-        signed_usdc_approve_tx = web3.eth.account.sign_transaction(
-            raw_usdc_approve_txn, private_key=priv_key
+        signed_collateral_approve_tx = web3.eth.account.sign_transaction(
+            raw_collateral_approve_txn, private_key=priv_key
         )
-        send_usdc_approve_tx = web3.eth.send_raw_transaction(
-            signed_usdc_approve_tx.raw_transaction
+        send_collateral_approve_tx = web3.eth.send_raw_transaction(
+            signed_collateral_approve_tx.raw_transaction
         )
-        usdc_approve_tx_receipt = web3.eth.wait_for_transaction_receipt(
-            send_usdc_approve_tx, 600
+        collateral_approve_tx_receipt = web3.eth.wait_for_transaction_receipt(
+            send_collateral_approve_tx, 600
         )
-        print(usdc_approve_tx_receipt)
+        print(collateral_approve_tx_receipt)
 
         nonce = web3.eth.get_transaction_count(pub_key)
 
@@ -131,19 +177,19 @@ class Polymarket:
         nonce = web3.eth.get_transaction_count(pub_key)
 
         # Neg Risk CTF Exchange
-        raw_usdc_approve_txn = usdc.functions.approve(
-            "0xC5d563A36AE78145C45a50134d48A1215220f80a", int(MAX_INT, 0)
+        raw_collateral_approve_txn = collateral_token.functions.approve(
+            self.neg_risk_exchange_address, int(MAX_INT, 0)
         ).build_transaction({"chainId": chain_id, "from": pub_key, "nonce": nonce})
-        signed_usdc_approve_tx = web3.eth.account.sign_transaction(
-            raw_usdc_approve_txn, private_key=priv_key
+        signed_collateral_approve_tx = web3.eth.account.sign_transaction(
+            raw_collateral_approve_txn, private_key=priv_key
         )
-        send_usdc_approve_tx = web3.eth.send_raw_transaction(
-            signed_usdc_approve_tx.raw_transaction
+        send_collateral_approve_tx = web3.eth.send_raw_transaction(
+            signed_collateral_approve_tx.raw_transaction
         )
-        usdc_approve_tx_receipt = web3.eth.wait_for_transaction_receipt(
-            send_usdc_approve_tx, 600
+        collateral_approve_tx_receipt = web3.eth.wait_for_transaction_receipt(
+            send_collateral_approve_tx, 600
         )
-        print(usdc_approve_tx_receipt)
+        print(collateral_approve_tx_receipt)
 
         nonce = web3.eth.get_transaction_count(pub_key)
 
@@ -164,19 +210,19 @@ class Polymarket:
         nonce = web3.eth.get_transaction_count(pub_key)
 
         # Neg Risk Adapter
-        raw_usdc_approve_txn = usdc.functions.approve(
+        raw_collateral_approve_txn = collateral_token.functions.approve(
             "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296", int(MAX_INT, 0)
         ).build_transaction({"chainId": chain_id, "from": pub_key, "nonce": nonce})
-        signed_usdc_approve_tx = web3.eth.account.sign_transaction(
-            raw_usdc_approve_txn, private_key=priv_key
+        signed_collateral_approve_tx = web3.eth.account.sign_transaction(
+            raw_collateral_approve_txn, private_key=priv_key
         )
-        send_usdc_approve_tx = web3.eth.send_raw_transaction(
-            signed_usdc_approve_tx.raw_transaction
+        send_collateral_approve_tx = web3.eth.send_raw_transaction(
+            signed_collateral_approve_tx.raw_transaction
         )
-        usdc_approve_tx_receipt = web3.eth.wait_for_transaction_receipt(
-            send_usdc_approve_tx, 600
+        collateral_approve_tx_receipt = web3.eth.wait_for_transaction_receipt(
+            send_collateral_approve_tx, 600
         )
-        print(usdc_approve_tx_receipt)
+        print(collateral_approve_tx_receipt)
 
         nonce = web3.eth.get_transaction_count(pub_key)
 
@@ -303,7 +349,7 @@ class Polymarket:
             markets.append(market)
         return markets
 
-    def get_orderbook(self, token_id: str) -> OrderBookSummary:
+    def get_orderbook(self, token_id: str) -> Any:
         return self.client.get_order_book(token_id)
 
     def get_orderbook_price(self, token_id: str) -> float:
@@ -313,60 +359,88 @@ class Polymarket:
         account = self.w3.eth.account.from_key(str(self.private_key))
         return account.address
 
+    @staticmethod
+    def _normalize_side(side: str) -> str:
+        sdk = _load_v2_sdk()
+        side_enum = sdk["Side"]
+        return side_enum.BUY if str(side).upper() == "BUY" else side_enum.SELL
+
+    @staticmethod
+    def _normalize_tick_size(tick_size: Optional[float], price: Optional[float] = None) -> str:
+        allowed = {"0.1", "0.01", "0.001", "0.0001"}
+        if tick_size is not None:
+            normalized = format(Decimal(str(tick_size)).normalize(), "f")
+            if normalized in allowed:
+                return normalized
+
+        if price is not None:
+            price_text = format(Decimal(str(price)).normalize(), "f")
+            decimals = len(price_text.split(".", 1)[1]) if "." in price_text else 0
+            decimals = min(max(decimals, 1), 4)
+            candidate = format(Decimal("1").scaleb(-decimals).normalize(), "f")
+            if candidate in allowed:
+                return candidate
+
+        return "0.01"
+
     def build_order(
         self,
         market_token: str,
         amount: float,
-        nonce: str = str(round(time.time())),  # for cancellations
         side: str = "BUY",
-        expiration: str = "0",  # timestamp after which order expires
+        expiration: int = 0,
+        tick_size: Optional[float] = None,
     ):
-        signer = Signer(self.private_key)
-        builder = OrderBuilder(self.exchange_address, self.chain_id, signer)
-
-        buy = side == "BUY"
-        side = 0 if buy else 1
-        maker_amount = amount if buy else 0
-        taker_amount = amount if not buy else 0
-        order_data = OrderData(
-            maker=self.get_address_for_private_key(),
-            tokenId=market_token,
-            makerAmount=maker_amount,
-            takerAmount=taker_amount,
-            feeRateBps="1",
-            nonce=nonce,
-            side=side,
-            expiration=expiration,
+        return self.client.create_order(
+            order_args=self._OrderArgs(
+                token_id=market_token,
+                price=float(amount),
+                side=self._normalize_side(side),
+                size=float(amount),
+                expiration=expiration,
+            ),
+            options=self._PartialCreateOrderOptions(
+                tick_size=self._normalize_tick_size(tick_size, price=float(amount))
+            ),
         )
-        order = builder.build_signed_order(order_data)
-        return order
 
-    def execute_order(self, price, size, side, token_id, fee_rate_bps: int = 0) -> str:
+    def execute_order(
+        self,
+        price,
+        size,
+        side,
+        token_id,
+        fee_rate_bps: int = 0,
+        tick_size: Optional[float] = None,
+    ) -> str:
         return self.client.create_and_post_order(
-            OrderArgs(
+            order_args=self._OrderArgs(
                 price=price,
                 size=size,
-                side=side,
+                side=self._normalize_side(side),
                 token_id=token_id,
-                fee_rate_bps=fee_rate_bps,
-            )
+            ),
+            options=self._PartialCreateOrderOptions(
+                tick_size=self._normalize_tick_size(tick_size, price=price)
+            ),
+            order_type=self._OrderType.GTC,
         )
 
     def execute_market_order(self, market, amount) -> str:
         token_id = ast.literal_eval(market[0].dict()["metadata"]["clob_token_ids"])[1]
-        order_args = MarketOrderArgs(
-            token_id=token_id,
-            amount=amount,
+        return self.client.create_and_post_market_order(
+            order_args=self._MarketOrderArgs(
+                token_id=token_id,
+                amount=amount,
+                side=self._Side.BUY,
+                order_type=self._OrderType.FOK,
+            ),
+            options=self._PartialCreateOrderOptions(tick_size="0.01"),
+            order_type=self._OrderType.FOK,
         )
-        signed_order = self.client.create_market_order(order_args)
-        print("Execute market order... signed_order ", signed_order)
-        resp = self.client.post_order(signed_order, orderType=OrderType.FOK)
-        print(resp)
-        print("Done!")
-        return resp
 
     def get_usdc_balance(self) -> float:
-        balance_res = self.usdc.functions.balanceOf(
+        balance_res = self.collateral_token.functions.balanceOf(
             self.get_address_for_private_key()
         ).call()
         return float(balance_res / 10e5)
@@ -376,7 +450,7 @@ def test():
     host = "https://clob.polymarket.com"
     key = os.getenv("POLYGON_WALLET_PRIVATE_KEY")
     print(key)
-    chain_id = POLYGON
+    chain_id = 137
 
     # Create CLOB client and get/set API credentials
     client = ClobClient(host, key=key, chain_id=chain_id)

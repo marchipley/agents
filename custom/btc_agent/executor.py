@@ -701,7 +701,7 @@ def ensure_live_trade_cash_available(required_cash: float) -> AccountBalanceSnap
         )
     if account.cash_balance < required_cash:
         raise RuntimeError(
-            "Not enough cash_balance_usdc to execute live trade: "
+            "Not enough cash_balance_pusd to execute live trade: "
             f"required={required_cash:.3f}, available={account.cash_balance:.3f}"
         )
     return account
@@ -742,6 +742,7 @@ def _execute_live_trade(
             side="BUY",
             token_id=snapshot.token_id,
             fee_rate_bps=cfg.live_fee_rate_bps,
+            tick_size=snapshot.tick_size,
         )
     except Exception as exc:
         raise RuntimeError(f"Live order submission failed: {exc}") from exc

@@ -38,7 +38,7 @@ Execution flow per loop tick:
 11. If a trade executes, record an in-memory active order for the current market window using the configured share size.
 12. In non-debug mode, print only compact operational output for geolocation, balances, quotes, features, the LLM decision, and the final execution result; in debug mode, print the fuller diagnostic output.
 13. Execute a paper trade when `USE_PAPER_TRADES=true`, or submit a live Polymarket buy order through the upstream client when `USE_PAPER_TRADES=false`.
-14. For live mode, abort the process immediately if the required live trade cash, including the estimated maker fee, exceeds the available `cash_balance_usdc`, or if the flow cannot safely support the configured wallet path.
+14. For live mode, abort the process immediately if the required live trade cash, including the estimated taker-fee buffer, exceeds the available `cash_balance_pusd`, or if the flow cannot safely support the configured wallet path.
 15. Print the execution snapshot, execution result, and any active order status, then sleep for the configured interval.
 
 ## Repository Map
@@ -132,7 +132,7 @@ What the BTC agent does today:
 - Allows proxy routing to be disabled globally with `USE_PROXY=false`, which causes the agent to use direct connections for shared HTTP/LLM requests even if proxy environment variables are present.
 - Supports a dedicated `LLM_CONNECTION_DEBUG=true` mode that runs only a one-shot LLM connectivity test, prints the active connection settings, runs a direct Google connectivity probe after LLM connection failures, and exits without touching balances, market lookup, or trading execution.
 - Uses the configured AI engine with JSON output to decide `UP`, `DOWN`, or `NO_TRADE`.
-- Prints the current market `price_to_beat` in the BTC-agent output and includes that same period baseline in the LLM decision prompt when the threshold is available from Polymarket.
+- Prints the current market `price_to_beat` in the BTC-agent output and includes that same period baseline in the LLM decision prompt, now preferring Vatic's BTC 5-minute timestamp target API and only falling back to Polymarket page / `_next/data` parsing when that external target lookup is unavailable.
 - Retries LLM API calls across configurable attempts using a single per-attempt timeout, logs each attempt result to stdout, and converts repeated failures into a `NO_TRADE` so the loop can move on to the next tick.
 - Computes a reference price from quote, midpoint, last trade, and order book data.
 - Reuses a single decision-time token quote snapshot for both the printed `UP/DOWN (with decision)` block and the paper execution gate so those logs cannot diverge within one loop tick.
@@ -148,8 +148,8 @@ What the BTC agent does today:
 - Enforces `BTC_AGENT_MAX_TRADES_PER_PERIOD` per 5-minute market slug; once that limit is reached, subsequent loop ticks skip quote snapshots and LLM trade decisions until the next market window begins.
 - When `BTC_AGENT_DEBUG=false`, suppresses most verbose diagnostics and only prints a compact subset of geolocation, balances, quote snapshots, BTC features, LLM decision fields, and final paper execution fields.
 - In non-debug mode, account balances print only on the first loop iteration and again at the start of each new 5-minute market period.
-- Stops the process before live order submission when the account does not have enough `cash_balance_usdc` to cover the configured live trade size at the recommended limit price plus the estimated maker fee.
-- Stops the process when `cash_balance_usdc` falls below `MINIMUM_WALLET_BALANCE`, so no further execution occurs once the configured wallet floor is breached.
+- Stops the process before live order submission when the account does not have enough `cash_balance_pusd` to cover the configured live trade size at the recommended limit price plus the estimated fee buffer.
+- Stops the process when `cash_balance_pusd` falls below `MINIMUM_WALLET_BALANCE`, so no further execution occurs once the configured wallet floor is breached.
 - Retrieves Polygon pUSD trading cash balances through a configurable ordered RPC list with public fallback endpoints, and also reports legacy USDC.e separately for migration visibility.
 - Retrieves Polymarket portfolio value separately from the on-chain cash balance lookup so one failure does not suppress the other.
 - Approves or rejects a trade based on confidence, entry caps, quote drift, and in live mode also account cash availability.
@@ -183,7 +183,7 @@ When changing live-trading behavior, prefer reusing vetted primitives from `agen
 - Network/API failures are still only partially hardened; balance lookups now degrade more cleanly, but other external calls remain single-point dependent.
 - Multi-provider spot-price fallback still only has cached-price protection when the current process already has a recent BTC price in memory; a cold start where all configured BTC price providers fail immediately can still abort the loop.
 - Live order submission depends on the wallet already having the required Polymarket / CTF approvals; the custom BTC flow does not auto-run approvals before submitting a live order.
-- Live fee requirements can vary by market; `BTC_AGENT_LIVE_FEE_RATE_BPS` is currently a configurable static value rather than a dynamically fetched market-specific fee.
+- Live fee requirements can vary by market; `BTC_AGENT_LIVE_FEE_RATE_BPS` is currently only an estimated cash-buffer input for the BTC agent, while live order creation itself now relies on the Polymarket CLOB V2 SDK fee model.
 - Live minimum order requirements can also vary by venue or product; `BTC_AGENT_LIVE_MIN_ORDER_USD` is currently a configurable static target used to scale live order size upward based on the observed Polymarket rejection threshold.
 - There are no BTC-agent tests for market parsing, pricing, decision normalization, or paper-trade gating.
 - The inherited repo still contains placeholder tests and unused upstream surfaces, which can mislead future work if not distinguished from the active BTC path.
@@ -200,11 +200,11 @@ When modifying this repo, future Codex runs should:
 
 Current live trading path notes:
 
-- Orders are submitted from `custom/btc_agent/executor.py` through the upstream client in `agents/polymarket/polymarket.py`.
+- Orders are submitted from `custom/btc_agent/executor.py` through the upstream client in `agents/polymarket/polymarket.py`, which now uses the Polymarket CLOB V2 Python SDK.
 - Required approvals/allowances are not auto-initialized by the custom BTC flow; the wallet must already be approved for Polymarket / CTF execution.
 - Proxy wallets are supported in the custom BTC live path through `POLYMKT_PROXY_ADDRESS`, which is passed to the CLOB client as the `funder` with `signature_type=2`.
 - Live execution is gated by `USE_PAPER_TRADES=false`, the normal trade-quality checks, successful cash-balance verification, and a cash balance large enough to fund the configured share size at the recommended limit price plus the estimated maker fee.
-- Live execution currently also depends on `BTC_AGENT_LIVE_FEE_RATE_BPS` matching the market’s required maker fee.
+- Live execution no longer embeds `feeRateBps` in signed orders; the current BTC agent still uses `BTC_AGENT_LIVE_FEE_RATE_BPS` only as a conservative cash-availability estimate before submission.
 - Live execution also depends on the trade size being auto-scaled enough to meet `BTC_AGENT_LIVE_MIN_ORDER_USD`.
 
 ## Recent Project History
@@ -256,5 +256,5 @@ Do not revert unrelated local changes unless the user explicitly asks for that.
 - Updated the launch path to export `.env` before startup and documented `HTTP_PROXY` / `HTTPS_PROXY` support so VPN or proxy-routed outbound traffic can be configured explicitly.
 - Added explicit SOCKS proxy support for Mullvad-style `ALL_PROXY` usage by routing active BTC-agent requests through normalized proxy settings and adding the required SOCKS client dependencies.
 - Added a pre-LLM quote gate so the BTC loop skips AI decision calls when both outcome tokens are already unsubmitable at current prices.
-- Added `MINIMUM_WALLET_BALANCE` so the BTC loop aborts when available `cash_balance_usdc` falls below the configured wallet floor.
+- Added `MINIMUM_WALLET_BALANCE` so the BTC loop aborts when available trading cash falls below the configured wallet floor.
 - Added a last-minute market gate so the BTC loop stops making LLM decisions or trade attempts during the final 60 seconds of a market window.

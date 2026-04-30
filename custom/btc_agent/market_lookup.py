@@ -3,7 +3,8 @@
 import json
 import os
 import re
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from html import unescape
 from typing import Optional
@@ -13,6 +14,11 @@ from .network import http_get
 
 
 _SETTLEMENT_THRESHOLD_CACHE: dict[str, float] = {}
+_MARKET_CACHE: dict[str, "BtcUpDownMarket"] = {}
+_BTC_LIVE_PERIOD_OPEN_ATTEMPTS = 3
+_BTC_LIVE_PERIOD_OPEN_RETRY_DELAY_SECONDS = 1.0
+_NEXT_DATA_CHAIN_MAX_PAGES = 3
+_NEXT_DATA_CHAIN_INTER_REQUEST_DELAY_SECONDS = 1.0
 
 
 @dataclass
@@ -207,6 +213,42 @@ def _extract_next_build_id(html: str) -> Optional[str]:
     return match.group(1)
 
 
+def _extract_embedded_next_data_payload(html: str) -> Optional[dict]:
+    next_data_match = re.search(
+        r'<script id="__NEXT_DATA__" type="application/json"(?:\s+crossorigin="anonymous")?>(.*?)</script>',
+        html,
+        flags=re.DOTALL,
+    )
+    if not next_data_match:
+        return None
+
+    try:
+        payload = json.loads(next_data_match.group(1))
+    except Exception:
+        return None
+
+    return payload if isinstance(payload, dict) else None
+
+
+def _extract_build_id_from_payload(payload: object) -> Optional[str]:
+    if isinstance(payload, dict):
+        build_id = payload.get("buildId")
+        if isinstance(build_id, str) and build_id:
+            return build_id
+        for value in payload.values():
+            nested_build_id = _extract_build_id_from_payload(value)
+            if nested_build_id:
+                return nested_build_id
+
+    if isinstance(payload, list):
+        for value in payload:
+            nested_build_id = _extract_build_id_from_payload(value)
+            if nested_build_id:
+                return nested_build_id
+
+    return None
+
+
 def _fetch_event_from_next_data_route(slug: str, build_id: str) -> Optional[dict]:
     url = f"https://polymarket.com/_next/data/{build_id}/en/event/{slug}.json"
     resp = http_get(url, params={"slug": slug}, timeout=10)
@@ -215,6 +257,33 @@ def _fetch_event_from_next_data_route(slug: str, build_id: str) -> Optional[dict
     resp.raise_for_status()
     payload = resp.json()
     return _extract_event_from_next_data(payload, slug)
+
+
+def _apply_threshold_from_next_data_payload(
+    market: BtcUpDownMarket,
+    slug: str,
+    payload: dict,
+) -> bool:
+    live_period_open = _extract_live_period_open_from_next_data(payload, slug)
+    if live_period_open is not None:
+        market.settlement_threshold = live_period_open
+        return True
+
+    current_period_open = _extract_current_period_open_from_next_data(payload, slug)
+    if current_period_open is not None:
+        market.settlement_threshold = current_period_open
+        return True
+
+    previous_period_close = _extract_previous_period_close_from_next_data(
+        payload,
+        slug,
+        allow_latest_prior_fallback=False,
+    )
+    if previous_period_close is not None:
+        market.settlement_threshold = previous_period_close
+        return True
+
+    return False
 
 
 def _extract_live_period_open_from_next_data(payload: dict, slug: str) -> Optional[float]:
@@ -259,7 +328,7 @@ def _extract_live_period_open_from_next_data(payload: dict, slug: str) -> Option
     return None
 
 
-def _extract_previous_period_close_from_next_data(payload: dict, slug: str) -> Optional[float]:
+def _extract_current_period_open_from_next_data(payload: dict, slug: str) -> Optional[float]:
     page_props = payload.get("pageProps")
     if not isinstance(page_props, dict):
         props = payload.get("props") or {}
@@ -273,95 +342,379 @@ def _extract_previous_period_close_from_next_data(payload: dict, slug: str) -> O
         return None
     current_start_ts = int(slug_match.group(1))
 
-    best_match = None
     for query in queries:
         state = query.get("state") or {}
         data = state.get("data") or {}
-        inner_data = data.get("data") if isinstance(data, dict) else None
-        results = inner_data.get("results") if isinstance(inner_data, dict) else None
-        if not isinstance(results, list):
+        if not isinstance(data, dict):
             continue
 
-        for item in results:
-            if not isinstance(item, dict):
-                continue
-            close_price = _coerce_btc_threshold(item.get("closePrice"))
-            end_time = item.get("endTime")
-            if close_price is None or not end_time:
-                continue
+        open_price = _coerce_btc_threshold(data.get("openPrice"))
+        close_price = data.get("closePrice")
+        if open_price is None or close_price not in (None, ""):
+            continue
 
-            end_ts = _coerce_timestamp(end_time)
-            if end_ts != current_start_ts:
-                continue
+        query_key = query.get("queryKey") or []
+        if (
+            isinstance(query_key, list)
+            and len(query_key) >= 4
+            and _coerce_timestamp(query_key[3]) == current_start_ts
+        ):
+            return open_price
 
-            best_match = close_price
+    for query in queries:
+        state = query.get("state") or {}
+        data = state.get("data") or {}
+        if not isinstance(data, dict):
+            continue
 
+        open_price = _coerce_btc_threshold(data.get("openPrice"))
+        close_price = data.get("closePrice")
+        if open_price is not None and close_price in (None, ""):
+            return open_price
+
+    return None
+
+
+def _extract_previous_period_close_from_next_data(
+    payload: dict,
+    slug: str,
+    *,
+    allow_latest_prior_fallback: bool = True,
+) -> Optional[float]:
+    slug_match = re.search(r"btc-updown-5m-(\d+)$", slug)
+    if not slug_match:
+        return None
+    current_start_ts = int(slug_match.group(1))
+    best_match: Optional[float] = None
+    best_match_end_ts: Optional[int] = None
+
+    def _walk(node) -> Optional[float]:
+        nonlocal best_match
+        nonlocal best_match_end_ts
+        if isinstance(node, dict):
+            results = node.get("results")
+            if isinstance(results, list):
+                for item in results:
+                    if not isinstance(item, dict):
+                        continue
+                    close_price = _coerce_btc_threshold(item.get("closePrice"))
+                    end_ts = _coerce_timestamp(item.get("endTime") or item.get("endDate"))
+                    if close_price is None or end_ts is None or end_ts > current_start_ts:
+                        continue
+
+                    if end_ts == current_start_ts:
+                        return close_price
+
+                    if allow_latest_prior_fallback and (
+                        best_match_end_ts is None or end_ts > best_match_end_ts
+                    ):
+                        best_match = close_price
+                        best_match_end_ts = end_ts
+
+            for value in node.values():
+                match = _walk(value)
+                if match is not None:
+                    return match
+
+        if isinstance(node, list):
+            for value in node:
+                match = _walk(value)
+                if match is not None:
+                    return match
+
+        return None
+
+    exact_match = _walk(payload)
+    if exact_match is not None:
+        return exact_match
     return best_match
 
 
-def _fetch_next_data_payload(slug: str, build_id: str) -> Optional[dict]:
+def _extract_previous_period_final_price_from_next_data(
+    payload: dict,
+    slug: str,
+    *,
+    allow_latest_prior_fallback: bool = True,
+) -> Optional[float]:
+    slug_match = re.search(r"btc-updown-5m-(\d+)$", slug)
+    if not slug_match:
+        return None
+    current_start_ts = int(slug_match.group(1))
+    best_match: Optional[float] = None
+    best_match_end_ts: Optional[int] = None
+
+    def _walk(node) -> Optional[float]:
+        nonlocal best_match
+        nonlocal best_match_end_ts
+        if isinstance(node, dict):
+            event_metadata = node.get("eventMetadata")
+            if isinstance(event_metadata, dict):
+                final_price = _coerce_btc_threshold(event_metadata.get("finalPrice"))
+                end_ts = _coerce_timestamp(node.get("endTime") or node.get("endDate"))
+                if final_price is not None and end_ts is not None and end_ts <= current_start_ts:
+                    if end_ts == current_start_ts:
+                        return final_price
+                    if allow_latest_prior_fallback and (
+                        best_match_end_ts is None or end_ts > best_match_end_ts
+                    ):
+                        best_match = final_price
+                        best_match_end_ts = end_ts
+
+            for value in node.values():
+                match = _walk(value)
+                if match is not None:
+                    return match
+
+        if isinstance(node, list):
+            for value in node:
+                match = _walk(value)
+                if match is not None:
+                    return match
+
+        return None
+
+    exact_match = _walk(payload)
+    if exact_match is not None:
+        return exact_match
+    return best_match
+
+
+def _fetch_next_data_payload(
+    slug: str,
+    build_id: str,
+    *,
+    request_number: int = 1,
+) -> Optional[dict]:
     url = f"https://polymarket.com/_next/data/{build_id}/en/event/{slug}.json"
-    resp = http_get(url, params={"slug": slug}, timeout=10)
+    resp = http_get(
+        url,
+        params={
+            "slug": slug,
+            "_req": request_number,
+            "_ts": int(time.time() * 1000),
+        },
+        headers={
+            "accept": "*/*",
+            "cache-control": "no-cache",
+            "pragma": "no-cache",
+            "x-nextjs-data": "1",
+        },
+        timeout=10,
+    )
     if resp.status_code == 404:
         return None
     resp.raise_for_status()
     return resp.json()
 
 
-def build_price_to_beat_debug_report(slug: str) -> str:
-    lines = [f"slug={slug}"]
+def _fetch_next_data_payload_chain(
+    slug: str,
+    initial_build_id: str,
+    *,
+    max_pages: int = _NEXT_DATA_CHAIN_MAX_PAGES,
+) -> list[tuple[str, Optional[dict]]]:
+    pages: list[tuple[str, Optional[dict]]] = []
+    build_id = initial_build_id
+
+    while build_id and len(pages) < max_pages:
+        if pages:
+            time.sleep(_NEXT_DATA_CHAIN_INTER_REQUEST_DELAY_SECONDS)
+        payload = _fetch_next_data_payload(
+            slug,
+            build_id,
+            request_number=len(pages) + 1,
+        )
+        pages.append((build_id, payload))
+        if not isinstance(payload, dict):
+            break
+        next_build_id = _extract_build_id_from_payload(payload)
+        if next_build_id:
+            build_id = next_build_id
+
+    return pages
+
+
+def _build_current_period_dataset(
+    slug: str,
+    html: str,
+    embedded_payload: Optional[dict],
+    build_id: Optional[str],
+    payload_chain: list[tuple[str, Optional[dict]]],
+) -> dict:
     page_url = f"https://polymarket.com/event/{slug}"
-    lines.append(f"page_url={page_url}")
+    selected_next_data_pages = []
+    for request_number, (page_build_id, payload) in enumerate(payload_chain, start=1):
+        if request_number not in {1, 2, 3}:
+            continue
+        selected_next_data_pages.append(
+            {
+                "request_number": request_number,
+                "build_id": page_build_id,
+                "next_data_url": f"https://polymarket.com/_next/data/{page_build_id}/en/event/{slug}.json?slug={slug}",
+                "payload": payload,
+            }
+        )
+
+    return {
+        "slug": slug,
+        "page_url": page_url,
+        "build_id": build_id,
+        "selected_next_data_pages": selected_next_data_pages,
+    }
+
+
+def _write_current_period_dataset_file(dataset: dict) -> None:
+    data_dir = os.path.join(os.getcwd(), "data_files")
+    os.makedirs(data_dir, exist_ok=True)
+    output_path = os.path.join(data_dir, "current_period.json")
+    with open(output_path, "w", encoding="utf-8") as data_file:
+        json.dump(dataset, data_file, indent=2, sort_keys=True)
+
+
+def build_price_to_beat_debug_report(slug: str) -> str:
+    reports = build_price_to_beat_debug_reports(slug)
+    return reports[0] if reports else ""
+
+
+def build_price_to_beat_debug_reports(slug: str) -> list[str]:
+    page_lines = [f"slug={slug}"]
+    page_url = f"https://polymarket.com/event/{slug}"
+    page_lines.append(f"page_url={page_url}")
+    reports: list[str] = []
 
     try:
         html = _fetch_polymarket_page(slug)
-        lines.append("page_fetch=success")
+        page_lines.append("page_fetch=success")
     except Exception as exc:
-        lines.append(f"page_fetch=error: {exc}")
-        return "\n".join(lines) + "\n"
+        page_lines.append(f"page_fetch=error: {exc}")
+        return ["\n".join(page_lines) + "\n"]
+
+    embedded_payload = _extract_embedded_next_data_payload(html)
+    page_lines.append(
+        f"live_period_open={_extract_live_period_open_from_next_data(embedded_payload, slug) if isinstance(embedded_payload, dict) else None}"
+    )
+    page_lines.append(
+        f"current_period_open={_extract_current_period_open_from_next_data(embedded_payload, slug) if isinstance(embedded_payload, dict) else None}"
+    )
+    page_lines.append(
+        "previous_period_close_from_results="
+        + str(
+            _extract_previous_period_close_from_next_data(
+                embedded_payload,
+                slug,
+                allow_latest_prior_fallback=True,
+            )
+            if isinstance(embedded_payload, dict)
+            else None
+        )
+    )
+    page_lines.append(
+        "previous_period_final_price_from_event_metadata="
+        + str(
+            _extract_previous_period_final_price_from_next_data(
+                embedded_payload,
+                slug,
+                allow_latest_prior_fallback=True,
+            )
+            if isinstance(embedded_payload, dict)
+            else None
+        )
+    )
+    page_lines.append("embedded_page_payload=")
+    page_lines.append(json.dumps(embedded_payload, indent=2, sort_keys=True) if isinstance(embedded_payload, dict) else "None")
 
     build_id = _extract_next_build_id(html)
-    lines.append(f"build_id={build_id or 'None'}")
+    page_lines.append(f"build_id={build_id or 'None'}")
+    reports.append("\n".join(page_lines) + "\n")
     if not build_id:
-        lines.append("next_data_curl=None")
-        return "\n".join(lines) + "\n"
+        return reports
 
-    next_data_url = f"https://polymarket.com/_next/data/{build_id}/en/event/{slug}.json?slug={slug}"
-    lines.append(f"next_data_curl=curl '{next_data_url}'")
+    first_next_data_url = (
+        f"https://polymarket.com/_next/data/{build_id}/en/event/{slug}.json?slug={slug}"
+    )
+    page_lines.append(f"next_data_curl=curl '{first_next_data_url}'")
+    reports[0] = "\n".join(page_lines) + "\n"
 
     try:
-        payload = _fetch_next_data_payload(slug, build_id)
-        lines.append("next_data_fetch=success")
-        lines.append(
-            f"live_period_open={_extract_live_period_open_from_next_data(payload, slug)}"
+        payload_chain = _fetch_next_data_payload_chain(slug, build_id)
+    except Exception as exc:
+        reports.append(
+            "\n".join(
+                [
+                    f"slug={slug}",
+                    f"page_url={page_url}",
+                    f"build_id={build_id}",
+                    f"next_data_curl=curl 'https://polymarket.com/_next/data/{build_id}/en/event/{slug}.json?slug={slug}'",
+                    f"next_data_fetch=error: {exc}",
+                ]
+            )
+            + "\n"
         )
-        lines.append(
-            f"previous_period_close_from_results={_extract_previous_period_close_from_next_data(payload, slug)}"
+        return reports
+
+    for fetched_build_id, payload in payload_chain:
+        next_data_url = (
+            f"https://polymarket.com/_next/data/{fetched_build_id}/en/event/{slug}.json?slug={slug}"
         )
-        event = _extract_event_from_next_data(payload, slug)
-        if isinstance(event, dict):
-            market = (event.get("markets") or [{}])[0]
-            lines.append(
-                "event_threshold="
+        next_data_lines = [
+            f"slug={slug}",
+            f"page_url={page_url}",
+            f"build_id={fetched_build_id}",
+            f"next_data_curl=curl '{next_data_url}'",
+        ]
+        if isinstance(payload, dict):
+            next_data_lines.append("next_data_fetch=success")
+            next_data_lines.append(
+                f"live_period_open={_extract_live_period_open_from_next_data(payload, slug)}"
+            )
+            next_data_lines.append(
+                f"current_period_open={_extract_current_period_open_from_next_data(payload, slug)}"
+            )
+            next_data_lines.append(
+                "previous_period_close_from_results="
                 + str(
-                    _extract_settlement_threshold(
-                        event,
-                        market if isinstance(market, dict) else {},
-                        str(event.get("title") or ""),
-                        str((market or {}).get("question") or "")
-                        if isinstance(market, dict)
-                        else "",
+                    _extract_previous_period_close_from_next_data(
+                        payload,
+                        slug,
+                        allow_latest_prior_fallback=True,
                     )
                 )
             )
+            next_data_lines.append(
+                "previous_period_final_price_from_event_metadata="
+                + str(
+                    _extract_previous_period_final_price_from_next_data(
+                        payload,
+                        slug,
+                        allow_latest_prior_fallback=True,
+                    )
+                )
+            )
+            event = _extract_event_from_next_data(payload, slug)
+            if isinstance(event, dict):
+                market = (event.get("markets") or [{}])[0]
+                next_data_lines.append(
+                    "event_threshold="
+                    + str(
+                        _extract_settlement_threshold(
+                            event,
+                            market if isinstance(market, dict) else {},
+                            str(event.get("title") or ""),
+                            str((market or {}).get("question") or "")
+                            if isinstance(market, dict)
+                            else "",
+                        )
+                    )
+                )
+            else:
+                next_data_lines.append("event_threshold=None")
+            next_data_lines.append("next_data_payload=")
+            next_data_lines.append(json.dumps(payload, indent=2, sort_keys=True))
         else:
-            lines.append("event_threshold=None")
-        lines.append("next_data_payload=")
-        lines.append(json.dumps(payload, indent=2, sort_keys=True))
-    except Exception as exc:
-        lines.append(f"next_data_fetch=error: {exc}")
+            next_data_lines.append("next_data_fetch=error: payload was None")
+        reports.append("\n".join(next_data_lines) + "\n")
 
-    return "\n".join(lines) + "\n"
+    return reports
 
 
 def _extract_threshold_from_price_to_beat_response(payload) -> Optional[float]:
@@ -392,6 +745,55 @@ def _extract_threshold_from_price_to_beat_response(payload) -> Optional[float]:
             return threshold
 
     return None
+
+
+def _extract_vatic_price_from_response(payload) -> Optional[float]:
+    if isinstance(payload, (int, float, str)):
+        return _coerce_btc_threshold(payload)
+
+    if not isinstance(payload, dict):
+        return None
+
+    threshold = _coerce_btc_threshold(payload.get("price"))
+    if threshold is not None:
+        return threshold
+
+    for nested_key in ("data", "result", "target"):
+        nested_payload = payload.get(nested_key)
+        if nested_payload is None:
+            continue
+        threshold = _extract_vatic_price_from_response(nested_payload)
+        if threshold is not None:
+            return threshold
+
+    return None
+
+
+def _fetch_vatic_price_to_beat_by_slug(slug: str) -> Optional[float]:
+    slug_match = re.search(r"btc-updown-5m-(\d+)$", slug)
+    if not slug_match:
+        return None
+
+    timestamp = slug_match.group(1)
+    resp = http_get(
+        "https://api.vatic.trading/api/v1/targets/timestamp",
+        params={
+            "asset": "btc",
+            "type": "5min",
+            "timestamp": timestamp,
+        },
+        timeout=10,
+    )
+    if resp.status_code == 404:
+        return None
+    resp.raise_for_status()
+
+    try:
+        payload = resp.json()
+    except ValueError:
+        return _coerce_btc_threshold(resp.text.strip())
+
+    return _extract_vatic_price_from_response(payload)
 
 
 def _fetch_price_to_beat_by_slug(slug: str) -> Optional[float]:
@@ -547,6 +949,15 @@ def _hydrate_missing_threshold_from_page(market: Optional[BtcUpDownMarket], slug
     if market is None:
         return market
 
+    if slug.startswith("btc-updown-5m-"):
+        try:
+            vatic_threshold = _fetch_vatic_price_to_beat_by_slug(slug)
+        except Exception:
+            vatic_threshold = None
+        if vatic_threshold is not None:
+            market.settlement_threshold = vatic_threshold
+            return market
+
     try:
         api_threshold = _fetch_price_to_beat_by_slug(slug)
     except Exception:
@@ -560,39 +971,85 @@ def _hydrate_missing_threshold_from_page(market: Optional[BtcUpDownMarket], slug
     except Exception:
         return market
 
+    embedded_payload = _extract_embedded_next_data_payload(html)
+
     build_id = _extract_next_build_id(html)
+    payload_chain: list[tuple[str, Optional[dict]]] = []
     if build_id:
-        try:
-            next_data_payload = _fetch_next_data_payload(slug, build_id)
-        except Exception:
-            next_data_payload = None
-        if isinstance(next_data_payload, dict):
-            previous_period_close = _extract_previous_period_close_from_next_data(next_data_payload, slug)
-            if previous_period_close is not None:
-                market.settlement_threshold = previous_period_close
+        next_data_attempts = 1
+        if slug.startswith("btc-updown-5m-"):
+            next_data_attempts = _BTC_LIVE_PERIOD_OPEN_ATTEMPTS
+
+        for attempt in range(next_data_attempts):
+            try:
+                candidate_payload_chain = _fetch_next_data_payload_chain(slug, build_id)
+            except Exception:
+                candidate_payload_chain = []
+            if candidate_payload_chain:
+                payload_chain = candidate_payload_chain
+
+            if attempt < next_data_attempts - 1:
+                time.sleep(_BTC_LIVE_PERIOD_OPEN_RETRY_DELAY_SECONDS)
+
+        dataset = _build_current_period_dataset(
+            slug=slug,
+            html=html,
+            embedded_payload=embedded_payload if isinstance(embedded_payload, dict) else None,
+            build_id=build_id,
+            payload_chain=payload_chain,
+        )
+        _write_current_period_dataset_file(dataset)
+
+        if isinstance(embedded_payload, dict) and _apply_threshold_from_next_data_payload(
+            market,
+            slug,
+            embedded_payload,
+        ):
+            return market
+
+        for _, next_data_payload in payload_chain:
+            if isinstance(next_data_payload, dict) and _apply_threshold_from_next_data_payload(
+                market,
+                slug,
+                next_data_payload,
+            ):
                 return market
 
-            live_period_open = _extract_live_period_open_from_next_data(next_data_payload, slug)
-            if live_period_open is not None:
-                market.settlement_threshold = live_period_open
-                return market
-
-            next_data_event = _extract_event_from_next_data(next_data_payload, slug)
-        else:
-            next_data_event = None
-        if isinstance(next_data_event, dict):
-            next_data_threshold = _extract_settlement_threshold(
-                next_data_event,
-                (next_data_event.get("markets") or [{}])[0],
-                str(next_data_event.get("title") or market.title),
-                str(((next_data_event.get("markets") or [{}])[0]).get("question") or market.question),
+        for _, next_data_payload in payload_chain:
+            next_data_event = (
+                _extract_event_from_next_data(next_data_payload, slug)
+                if isinstance(next_data_payload, dict)
+                else None
             )
-            if next_data_threshold is not None:
-                market.settlement_threshold = next_data_threshold
-                return market
+            if isinstance(next_data_event, dict):
+                next_data_threshold = _extract_settlement_threshold(
+                    next_data_event,
+                    (next_data_event.get("markets") or [{}])[0],
+                    str(next_data_event.get("title") or market.title),
+                    str(((next_data_event.get("markets") or [{}])[0]).get("question") or market.question),
+                )
+                if next_data_threshold is not None:
+                    market.settlement_threshold = next_data_threshold
+                    return market
 
         if slug.startswith("btc-updown-5m-"):
             return market
+
+    dataset = _build_current_period_dataset(
+        slug=slug,
+        html=html,
+        embedded_payload=embedded_payload if isinstance(embedded_payload, dict) else None,
+        build_id=build_id,
+        payload_chain=payload_chain,
+    )
+    _write_current_period_dataset_file(dataset)
+
+    if isinstance(embedded_payload, dict) and _apply_threshold_from_next_data_payload(
+        market,
+        slug,
+        embedded_payload,
+    ):
+        return market
 
     page_threshold = _extract_threshold_from_page_html(html)
     if page_threshold is not None:
@@ -633,10 +1090,15 @@ def _cache_settlement_threshold(market: Optional[BtcUpDownMarket]) -> Optional[B
         return None
     if _coerce_btc_threshold(market.settlement_threshold) is not None:
         _SETTLEMENT_THRESHOLD_CACHE[market.slug] = float(market.settlement_threshold)
+        _MARKET_CACHE[market.slug] = replace(market)
     return market
 
 
 def get_btc_updown_market_by_slug(slug: str) -> Optional[BtcUpDownMarket]:
+    cached_market = _MARKET_CACHE.get(slug)
+    if cached_market is not None:
+        return replace(cached_market)
+
     event = _fetch_event_by_slug(slug)
     market = _extract_market_from_event(event, slug)
     if market is None:
