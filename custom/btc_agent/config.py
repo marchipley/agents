@@ -57,6 +57,7 @@ class TradingConfig:
     max_trade_usd: float = 5.0
     trade_shares_size: float = 5.0
     max_trades_per_period: int = 1
+    max_automated_trades: int = 0
     min_confidence: float = 0.7
     max_entry_price: float = 0.62
     max_spread: float = 0.06
@@ -143,6 +144,7 @@ def get_trading_config() -> TradingConfig:
         max_trade_usd=float(os.getenv("BTC_AGENT_MAX_TRADE_USD", "5")),
         trade_shares_size=max(float(os.getenv("BTC_AGENT_TRADE_SHARES_SIZE", "5")), 5.0),
         max_trades_per_period=max(int(os.getenv("BTC_AGENT_MAX_TRADES_PER_PERIOD", "1")), 1),
+        max_automated_trades=max(int(os.getenv("MAX_AUTOMATED_TRADES", "0")), 0),
         min_confidence=float(
             os.getenv("CONFIDENCE", os.getenv("BTC_AGENT_MIN_CONFIDENCE", "0.7"))
         ),

@@ -3,6 +3,7 @@
 from contextlib import nullcontext
 from datetime import datetime, timezone
 import os
+import re
 import select
 import time
 import sys
@@ -50,6 +51,8 @@ from scripts.python.check_public_ip_indonesia import (
 
 _FIRST_LOOP = True
 _DEBUG_WRITTEN_SLUGS = set()
+_SESSION_AUTOMATED_TRADES = 0
+_SESSION_FIRST_TRADE_WALLET_VALUE = None
 
 
 class QuitKeyMonitor:
@@ -121,6 +124,114 @@ def has_valid_price_to_beat(value) -> bool:
     except (TypeError, ValueError):
         return False
     return 1000 <= numeric_value <= 1_000_000
+
+
+def _extract_slug_timestamp(market_slug: str) -> str:
+    match = re.search(r"btc-updown-5m-(\d+)$", market_slug or "")
+    return match.group(1) if match else "unknown"
+
+
+def _completed_order_log_path(market_slug: str) -> str:
+    completed_orders_dir = os.path.join(os.getcwd(), "completed_orders")
+    os.makedirs(completed_orders_dir, exist_ok=True)
+    return os.path.join(
+        completed_orders_dir,
+        f"completed_order_{_extract_slug_timestamp(market_slug)}.txt",
+    )
+
+
+def append_completed_order_tick(
+    order: ActivePaperOrder,
+    current_btc_price: float,
+    phase: str,
+    observed_at: datetime = None,
+) -> None:
+    observed_at = observed_at or datetime.now(timezone.utc)
+    log_path = _completed_order_log_path(order.market_slug)
+    status = classify_position(order, current_btc_price)
+    with open(log_path, "a", encoding="utf-8") as log_file:
+        if log_file.tell() == 0:
+            log_file.write(
+                "\n".join(
+                    [
+                        f"market_slug={order.market_slug}",
+                        f"market_title={order.market_title}",
+                        f"slug_timestamp={_extract_slug_timestamp(order.market_slug)}",
+                        "",
+                    ]
+                )
+            )
+        log_file.write(
+            "\n".join(
+                [
+                    f"observed_at={observed_at.isoformat()}",
+                    f"phase={phase}",
+                    f"side={order.side}",
+                    f"shares={order.shares:.4f}",
+                    f"entry_price={order.entry_price:.3f}",
+                    f"entry_btc_price={order.entry_btc_price:.2f}",
+                    f"period_open_price_to_beat={order.target_btc_price:.2f}",
+                    f"current_btc_price={current_btc_price:.2f}",
+                    f"position_state={status}",
+                    f"target_description={describe_target(order)}",
+                    "",
+                ]
+            )
+        )
+
+
+def finalize_completed_orders(previous_orders, current_btc_price: float) -> None:
+    for order in previous_orders:
+        append_completed_order_tick(
+            order,
+            current_btc_price=current_btc_price,
+            phase="COMPLETED",
+        )
+
+
+def update_active_order_logs(current_btc_price: float, observed_at: datetime = None) -> None:
+    for order in get_active_orders():
+        append_completed_order_tick(
+            order,
+            current_btc_price=current_btc_price,
+            phase="ACTIVE",
+            observed_at=observed_at,
+        )
+
+
+def _get_wallet_value_for_limit_check(account: AccountBalanceSnapshot):
+    if account is None:
+        return None
+    total_account_value = getattr(account, "total_account_value", None)
+    cash_balance = getattr(account, "cash_balance", None)
+    if total_account_value is not None:
+        return float(total_account_value)
+    if cash_balance is not None:
+        return float(cash_balance)
+    return None
+
+
+def enforce_session_trade_limit(cfg) -> None:
+    if getattr(cfg, "max_automated_trades", 0) <= 0:
+        return
+    if _SESSION_AUTOMATED_TRADES < cfg.max_automated_trades:
+        return
+    if _SESSION_FIRST_TRADE_WALLET_VALUE is None:
+        return
+    current_account = get_account_balance_snapshot()
+    current_wallet_value = _get_wallet_value_for_limit_check(current_account)
+    if current_wallet_value is None:
+        return
+    if current_wallet_value >= _SESSION_FIRST_TRADE_WALLET_VALUE:
+        return
+    print(
+        "Max automated trades for this session has been reached with a net loss "
+        f"({_SESSION_AUTOMATED_TRADES}/{cfg.max_automated_trades}; "
+        f"first_trade_wallet_value={_SESSION_FIRST_TRADE_WALLET_VALUE:.3f}; "
+        f"current_wallet_value={current_wallet_value:.3f}). "
+        "Exiting BTC agent."
+    )
+    sys.exit(0)
 
 
 def write_price_to_beat_debug_file(slug: str, force: bool = False) -> None:
@@ -421,7 +532,10 @@ def print_trade_execution_result(result, debug: bool) -> None:
 
 def run_once() -> None:
     global _FIRST_LOOP
+    global _SESSION_AUTOMATED_TRADES
+    global _SESSION_FIRST_TRADE_WALLET_VALUE
     cfg = get_trading_config()
+    enforce_session_trade_limit(cfg)
     if cfg.debug:
         print(f"[{datetime.now(timezone.utc).isoformat()}] BTC up/down agent tick")
 
@@ -434,6 +548,8 @@ def run_once() -> None:
             print("No BTC Up/Down market found.")
         return
 
+    previous_state = get_state()
+    previous_orders = list(getattr(previous_state, "active_orders", []))
     period_changed = sync_period_state(market.slug, market.title)
     state = get_state()
     if _FIRST_LOOP or period_changed:
@@ -442,6 +558,11 @@ def run_once() -> None:
         enforce_minimum_wallet_balance(account)
         _FIRST_LOOP = False
     if period_changed:
+        if previous_orders:
+            try:
+                finalize_completed_orders(previous_orders, fetch_btc_spot_price())
+            except Exception:
+                pass
         print(f"New 5-minute market period detected: {market.slug}")
         clear_price_to_beat_debug_files()
         _DEBUG_WRITTEN_SLUGS.clear()
@@ -515,6 +636,11 @@ def run_once() -> None:
         if cfg.debug:
             print_quote_snapshot_from_snapshot("DOWN (with decision)", decision_snapshot, debug=True)
 
+    first_trade_wallet_baseline = _SESSION_FIRST_TRADE_WALLET_VALUE
+    if first_trade_wallet_baseline is None:
+        baseline_account = get_account_balance_snapshot()
+        first_trade_wallet_baseline = _get_wallet_value_for_limit_check(baseline_account)
+
     try:
         result = maybe_execute_trade(market, decision, snapshot=decision_snapshot)
     except RuntimeError as exc:
@@ -523,6 +649,11 @@ def run_once() -> None:
     if result.execution_snapshot is not None and cfg.debug:
         print_quote_snapshot_from_snapshot("Execution", result.execution_snapshot, debug=True)
     print_trade_execution_result(result, debug=cfg.debug)
+
+    if result.executed:
+        if _SESSION_FIRST_TRADE_WALLET_VALUE is None:
+            _SESSION_FIRST_TRADE_WALLET_VALUE = first_trade_wallet_baseline
+        _SESSION_AUTOMATED_TRADES += 1
 
     if result.executed and decision.side in ("UP", "DOWN") and result.token_id:
         target_btc_price = market.settlement_threshold
@@ -536,21 +667,29 @@ def run_once() -> None:
                 or features.window_open_price
             )
 
-        record_executed_trade(
-            ActivePaperOrder(
-                market_slug=market.slug,
-                market_title=market.title,
-                side=decision.side,
-                shares=result.size,
-                entry_price=result.price,
-                token_id=result.token_id,
-                target_btc_price=target_btc_price,
-                entry_btc_price=features.price_usd,
-                target_is_approximate=target_is_approximate,
-            )
+        new_order = ActivePaperOrder(
+            market_slug=market.slug,
+            market_title=market.title,
+            side=decision.side,
+            shares=result.size,
+            entry_price=result.price,
+            token_id=result.token_id,
+            target_btc_price=target_btc_price,
+            entry_btc_price=features.price_usd,
+            target_is_approximate=target_is_approximate,
+        )
+        record_executed_trade(new_order)
+        append_completed_order_tick(
+            new_order,
+            current_btc_price=features.price_usd,
+            phase="PLACED",
+            observed_at=features.as_of,
         )
 
+    enforce_session_trade_limit(cfg)
+
     active_btc_price = features.price_usd
+    update_active_order_logs(active_btc_price, observed_at=features.as_of)
     if cfg.debug and get_active_orders():
         print_active_orders(active_btc_price)
     if cfg.debug:

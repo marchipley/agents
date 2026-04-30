@@ -103,6 +103,7 @@ Optional / supported:
 - `BTC_AGENT_MAX_TRADE_USD` default: `5`
 - `BTC_AGENT_TRADE_SHARES_SIZE` default: `5` and enforced minimum: `5`
 - `BTC_AGENT_MAX_TRADES_PER_PERIOD` default: `1`
+- `MAX_AUTOMATED_TRADES` default: `0` meaning disabled; when set above zero, the agent saves a wallet-value baseline immediately before the first successful automated trade and, after that many successful automated trades, only stops if the current wallet value is below that first-trade baseline
 - `CONFIDENCE` optional alias for `BTC_AGENT_MIN_CONFIDENCE`
 - `BTC_AGENT_MIN_CONFIDENCE` default: `0.7`
 - `BTC_AGENT_MAX_ENTRY_PRICE` default: `0.62`
@@ -144,8 +145,10 @@ What the BTC agent does today:
 - Keeps paper trade size fixed at `BTC_AGENT_TRADE_SHARES_SIZE`, but auto-scales live order size upward when needed so the live order notional meets `BTC_AGENT_LIVE_MIN_ORDER_USD`.
 - Uses a fixed paper-trade share size from `BTC_AGENT_TRADE_SHARES_SIZE` instead of deriving the trade size from USD notional.
 - Tracks in-memory active orders for the current 5-minute market window and prints each order’s target BTC level plus whether the position is currently winning, losing, or tied.
+- Writes a per-slug order-tracking file under `completed_orders/` for each executed order, appending one status snapshot per tick and a final completion snapshot when the market rolls into the next slug.
 - Evaluates paper-order win/loss status against the market-period settlement reference, preferring Polymarket’s parsed threshold and otherwise falling back to the closest retained BTC sample at the start of the 5-minute period rather than the trade-entry BTC price.
 - Enforces `BTC_AGENT_MAX_TRADES_PER_PERIOD` per 5-minute market slug; once that limit is reached, subsequent loop ticks skip quote snapshots and LLM trade decisions until the next market window begins.
+- Enforces `MAX_AUTOMATED_TRADES` across the full process session as a loss-aware stop; once that many automated trades have actually executed, the agent compares the current wallet value to the wallet value recorded immediately before the first executed automated trade and exits only if the wallet is lower.
 - When `BTC_AGENT_DEBUG=false`, suppresses most verbose diagnostics and only prints a compact subset of geolocation, balances, quote snapshots, BTC features, LLM decision fields, and final paper execution fields.
 - In non-debug mode, account balances print only on the first loop iteration and again at the start of each new 5-minute market period.
 - Stops the process before live order submission when the account does not have enough `cash_balance_pusd` to cover the configured live trade size at the recommended limit price plus the estimated fee buffer.
