@@ -110,6 +110,41 @@ def describe_proxy_configuration() -> str:
     return "disabled"
 
 
+def _should_retry_direct_without_proxy(url: str) -> bool:
+    try:
+        hostname = (urlsplit(url).hostname or "").lower()
+    except Exception:
+        return False
+    return hostname.endswith("polymarket.com")
+
+
+def _request_with_direct_timeout_fallback(
+    method: str,
+    url: str,
+    *,
+    proxies: Optional[dict],
+    request_kwargs: dict,
+):
+    request_callable = requests.get if method == "GET" else requests.post
+    try:
+        return request_callable(url, proxies=proxies, **request_kwargs)
+    except (requests.ConnectTimeout, requests.ReadTimeout) as exc:
+        if not is_proxy_enabled():
+            raise
+        if proxies is None:
+            raise
+        if not _should_retry_direct_without_proxy(url):
+            raise
+        session = requests.Session()
+        session.trust_env = False
+        try:
+            if method == "GET":
+                return session.get(url, proxies=None, **request_kwargs)
+            return session.post(url, proxies=None, **request_kwargs)
+        finally:
+            session.close()
+
+
 def http_get(url: str, **kwargs: Any) -> requests.Response:
     request_kwargs = dict(kwargs)
     proxies = request_kwargs.pop("proxies", None)
@@ -125,7 +160,12 @@ def http_get(url: str, **kwargs: Any) -> requests.Response:
         if proxy_url:
             proxies = {"http": proxy_url, "https": proxy_url}
 
-    return requests.get(url, proxies=proxies, **request_kwargs)
+    return _request_with_direct_timeout_fallback(
+        "GET",
+        url,
+        proxies=proxies,
+        request_kwargs=request_kwargs,
+    )
 
 
 def http_post(url: str, **kwargs: Any) -> requests.Response:
@@ -143,7 +183,12 @@ def http_post(url: str, **kwargs: Any) -> requests.Response:
         if proxy_url:
             proxies = {"http": proxy_url, "https": proxy_url}
 
-    return requests.post(url, proxies=proxies, **request_kwargs)
+    return _request_with_direct_timeout_fallback(
+        "POST",
+        url,
+        proxies=proxies,
+        request_kwargs=request_kwargs,
+    )
 
 
 def check_internet_connectivity(timeout: float = 5.0) -> tuple[bool, str]:

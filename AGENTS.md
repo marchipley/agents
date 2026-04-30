@@ -131,6 +131,7 @@ What the BTC agent does today:
 - Bypasses the startup geolocation check when `LLM_CONNECTION_DEBUG=true` so LLM/provider connectivity can be tested from non-allowed locations.
 - Respects standard proxy environment variables such as `HTTP_PROXY` and `HTTPS_PROXY` for outbound requests when they are exported in the shell or defined in the repo `.env`.
 - Routes outbound BTC-agent requests through `ALL_PROXY` when configured, including geolocation, BTC spot pricing, Polymarket API lookups, and LLM calls.
+- For Polymarket HTTP endpoints, the shared network layer now retries once without the proxy on connect/read timeout when proxy routing is enabled, which helps recover from intermittent SOCKS timeouts against `*.polymarket.com`.
 - Allows proxy routing to be disabled globally with `USE_PROXY=false`, which causes the agent to use direct connections for shared HTTP/LLM requests even if proxy environment variables are present.
 - Supports a dedicated `LLM_CONNECTION_DEBUG=true` mode that runs only a one-shot LLM connectivity test, prints the active connection settings, runs a direct Google connectivity probe after LLM connection failures, and exits without touching balances, market lookup, or trading execution.
 - Uses the configured AI engine with JSON output to decide `UP`, `DOWN`, or `NO_TRADE`.

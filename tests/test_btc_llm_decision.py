@@ -1,10 +1,16 @@
 import unittest
 from datetime import datetime, timezone
 from unittest.mock import Mock, patch
+import types
 
 import requests
 
-from custom.btc_agent.llm_decision import _build_user_prompt, decide_trade
+from custom.btc_agent.llm_decision import (
+    _build_user_prompt,
+    _get_openai_realtime_client,
+    _stream_openai_chat_completion,
+    decide_trade,
+)
 
 
 class DummyFeatures:
@@ -29,6 +35,61 @@ class DummyMarket:
 
 
 class TestBtcLlmDecision(unittest.TestCase):
+    def test_get_openai_realtime_client_reuses_existing_client(self):
+        fake_client = Mock()
+        fake_client.api_key = "test-key"
+        fake_client.model = "gpt-realtime-mini"
+
+        with patch(
+            "custom.btc_agent.llm_decision._OPENAI_REALTIME_CLIENT",
+            fake_client,
+        ), patch(
+            "custom.btc_agent.llm_decision.OpenAIRealtimeClient",
+        ) as mock_client_cls:
+            client = _get_openai_realtime_client(
+                api_key="test-key",
+                model="gpt-4.1-mini",
+                timeout_seconds=15.0,
+            )
+
+        self.assertIs(client, fake_client)
+        mock_client_cls.assert_not_called()
+
+    def test_stream_openai_chat_completion_reassembles_sse_content(self):
+        fake_response = Mock()
+        fake_response.raise_for_status = Mock()
+        fake_response.iter_lines.return_value = [
+            'data: {"choices":[{"delta":{"content":"{\\"decision\\":\\"UP\\","}}]}',
+            'data: {"choices":[{"delta":{"content":"\\"confidence\\":0.8,\\"max_price_to_pay\\":0.5,\\"reason\\":\\"ok\\"}"}}]}',
+            "data: [DONE]",
+        ]
+        fake_response.__enter__ = Mock(return_value=fake_response)
+        fake_response.__exit__ = Mock(return_value=None)
+
+        fake_session = Mock()
+        fake_session.trust_env = True
+        fake_session.post.return_value = fake_response
+        fake_session.close = Mock()
+
+        with patch(
+            "custom.btc_agent.llm_decision.requests.Session",
+            return_value=fake_session,
+        ):
+            content = _stream_openai_chat_completion(
+                model="gpt-4.1-mini",
+                api_key="test-key",
+                system_prompt="system",
+                user_prompt="user",
+                timeout_seconds=15.0,
+            )
+
+        self.assertEqual(
+            content,
+            '{"decision":"UP","confidence":0.8,"max_price_to_pay":0.5,"reason":"ok"}',
+        )
+        self.assertFalse(fake_session.trust_env)
+        self.assertTrue(fake_session.post.call_args.kwargs["stream"])
+
     def test_user_prompt_includes_price_to_beat(self):
         up_snapshot = Mock(buy_quote=0.84)
         down_snapshot = Mock(buy_quote=0.17)
@@ -210,12 +271,6 @@ class TestBtcLlmDecision(unittest.TestCase):
         self.assertTrue(any("proxy             = None" in line for line in printed_lines))
 
     def test_openai_disables_trust_env_when_use_proxy_false(self):
-        success_response = requests.Response()
-        success_response.status_code = 200
-        success_response._content = (
-            b'{"choices":[{"message":{"content":"{\\"decision\\":\\"UP\\",\\"confidence\\":0.8,\\"max_price_to_pay\\":0.5,\\"reason\\":\\"ok\\"}"}}]}'
-        )
-
         with patch(
             "custom.btc_agent.llm_decision.get_llm_config",
             return_value=Mock(
@@ -227,8 +282,8 @@ class TestBtcLlmDecision(unittest.TestCase):
                 api_connection_retry_attempts=1,
             ),
         ), patch(
-            "custom.btc_agent.llm_decision._direct_http_post",
-            return_value=success_response,
+            "custom.btc_agent.llm_decision._stream_openai_chat_completion",
+            return_value='{"decision":"UP","confidence":0.8,"max_price_to_pay":0.5,"reason":"ok"}',
         ):
             decision = decide_trade(DummyFeatures(), DummyMarket())
 

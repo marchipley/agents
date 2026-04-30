@@ -7,6 +7,7 @@ import requests
 from custom.btc_agent.network import (
     check_internet_connectivity,
     describe_proxy_configuration,
+    http_get,
     http_post,
     get_proxy_url_for_httpx,
     get_proxy_url_for_requests,
@@ -116,6 +117,75 @@ class TestBtcNetwork(unittest.TestCase):
         self.assertIn("Connectivity check failed", detail)
         self.assertFalse(fake_session.trust_env)
         fake_session.close.assert_called_once()
+
+    def test_http_get_retries_direct_without_proxy_on_polymarket_timeout(self):
+        fake_session = MagicMock()
+        fake_response = MagicMock()
+        fake_session.get.return_value = fake_response
+
+        with patch.dict(
+            os.environ,
+            {
+                "USE_PROXY": "true",
+                "ALL_PROXY": "socks5h://10.64.0.1:1080",
+            },
+            clear=False,
+        ), patch(
+            "custom.btc_agent.network.requests.get",
+            side_effect=requests.ConnectTimeout("proxy timeout"),
+        ), patch(
+            "custom.btc_agent.network.requests.Session",
+            return_value=fake_session,
+        ):
+            response = http_get("https://clob.polymarket.com/last-trade-price", timeout=10)
+
+        self.assertIs(response, fake_response)
+        self.assertFalse(fake_session.trust_env)
+        fake_session.get.assert_called_once()
+        self.assertIsNone(fake_session.get.call_args.kwargs["proxies"])
+        fake_session.close.assert_called_once()
+
+    def test_http_post_retries_direct_without_proxy_on_polymarket_timeout(self):
+        fake_session = MagicMock()
+        fake_response = MagicMock()
+        fake_session.post.return_value = fake_response
+
+        with patch.dict(
+            os.environ,
+            {
+                "USE_PROXY": "true",
+                "ALL_PROXY": "socks5h://10.64.0.1:1080",
+            },
+            clear=False,
+        ), patch(
+            "custom.btc_agent.network.requests.post",
+            side_effect=requests.ReadTimeout("proxy timeout"),
+        ), patch(
+            "custom.btc_agent.network.requests.Session",
+            return_value=fake_session,
+        ):
+            response = http_post("https://clob.polymarket.com/prices", json=[{"token_id": "1"}], timeout=10)
+
+        self.assertIs(response, fake_response)
+        self.assertFalse(fake_session.trust_env)
+        fake_session.post.assert_called_once()
+        self.assertIsNone(fake_session.post.call_args.kwargs["proxies"])
+        fake_session.close.assert_called_once()
+
+    def test_http_get_does_not_retry_direct_for_non_polymarket_timeout(self):
+        with patch.dict(
+            os.environ,
+            {
+                "USE_PROXY": "true",
+                "ALL_PROXY": "socks5h://10.64.0.1:1080",
+            },
+            clear=False,
+        ), patch(
+            "custom.btc_agent.network.requests.get",
+            side_effect=requests.ConnectTimeout("proxy timeout"),
+        ):
+            with self.assertRaises(requests.ConnectTimeout):
+                http_get("https://example.com/data", timeout=10)
 
     def test_requests_falls_back_to_https_then_http_proxy(self):
         with patch.dict(

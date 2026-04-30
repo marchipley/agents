@@ -1,12 +1,16 @@
 # custom/btc_agent/llm_decision.py
 
 import json
+import os
 import re
 import time
+import threading
+import uuid
 from dataclasses import dataclass
 from typing import Literal, Optional
 
 import requests
+import websocket
 from .config import get_llm_config
 from .indicators import BtcFeatures
 from .market_lookup import BtcUpDownMarket
@@ -28,6 +32,10 @@ class LlmDecision:
     confidence: float
     max_price_to_pay: float
     reason: str
+
+
+_OPENAI_REALTIME_CLIENT = None
+_OPENAI_REALTIME_CLIENT_LOCK = threading.Lock()
 
 
 def _build_system_prompt() -> str:
@@ -238,6 +246,199 @@ def _direct_http_post(url: str, **kwargs) -> requests.Response:
         session.close()
 
 
+def _get_openai_realtime_model(configured_model: str) -> str:
+    if configured_model and "realtime" in configured_model:
+        return configured_model
+    override = os.getenv("OPENAI_REALTIME_MODEL", "").strip()
+    if override:
+        return override
+    return "gpt-realtime-mini"
+
+
+class OpenAIRealtimeClient:
+    def __init__(self, api_key: str, model: str, timeout_seconds: float) -> None:
+        self.api_key = api_key
+        self.model = model
+        self.timeout_seconds = timeout_seconds
+        self.ws = None
+        self._lock = threading.Lock()
+        self._request_count = 0
+
+    def close(self) -> None:
+        if self.ws is not None:
+            try:
+                self.ws.close()
+            except Exception:
+                pass
+            self.ws = None
+
+    def _connect(self) -> None:
+        self.close()
+        self.ws = websocket.create_connection(
+            f"wss://api.openai.com/v1/realtime?model={self.model}",
+            header=[
+                f"Authorization: Bearer {self.api_key}",
+                "OpenAI-Beta: realtime=v1",
+            ],
+            timeout=self.timeout_seconds,
+            enable_multithread=True,
+        )
+        self.ws.settimeout(self.timeout_seconds)
+
+    def _ensure_connected(self) -> None:
+        if self.ws is None:
+            self._connect()
+
+    def request(self, system_prompt: str, user_prompt: str) -> str:
+        with self._lock:
+            self._ensure_connected()
+            if self._request_count >= 20:
+                self._connect()
+                self._request_count = 0
+            request_id = str(uuid.uuid4())
+            try:
+                self.ws.send(
+                    json.dumps(
+                        {
+                            "type": "session.update",
+                            "session": {
+                                "instructions": system_prompt,
+                                "modalities": ["text"],
+                            },
+                        }
+                    )
+                )
+                self.ws.send(
+                    json.dumps(
+                        {
+                            "type": "conversation.item.create",
+                            "item": {
+                                "type": "message",
+                                "role": "user",
+                                "content": [
+                                    {
+                                        "type": "input_text",
+                                        "text": user_prompt,
+                                    }
+                                ],
+                            },
+                        }
+                    )
+                )
+                self.ws.send(
+                    json.dumps(
+                        {
+                            "type": "response.create",
+                            "response": {
+                                "modalities": ["text"],
+                                "max_output_tokens": 256,
+                                "metadata": {"request_id": request_id},
+                            },
+                        }
+                    )
+                )
+                chunks = []
+                while True:
+                    raw_message = self.ws.recv()
+                    event = json.loads(raw_message)
+                    event_type = event.get("type")
+                    if event_type in {"response.output_text.delta", "response.text.delta"}:
+                        delta = event.get("delta") or ""
+                        if delta:
+                            chunks.append(str(delta))
+                    elif event_type in {"response.output_text.done", "response.text.done"}:
+                        text = event.get("text") or ""
+                        if text and not chunks:
+                            chunks.append(str(text))
+                    elif event_type == "response.done":
+                        break
+                    elif event_type == "error":
+                        error = event.get("error") or {}
+                        raise RuntimeError(str(error.get("message") or event))
+                self._request_count += 1
+                if not chunks:
+                    raise RuntimeError("OpenAI Realtime response contained no content")
+                return "".join(chunks)
+            except Exception:
+                self.close()
+                raise
+
+
+def _get_openai_realtime_client(api_key: str, model: str, timeout_seconds: float) -> OpenAIRealtimeClient:
+    global _OPENAI_REALTIME_CLIENT
+    realtime_model = _get_openai_realtime_model(model)
+    with _OPENAI_REALTIME_CLIENT_LOCK:
+        if (
+            _OPENAI_REALTIME_CLIENT is None
+            or _OPENAI_REALTIME_CLIENT.api_key != api_key
+            or _OPENAI_REALTIME_CLIENT.model != realtime_model
+        ):
+            if _OPENAI_REALTIME_CLIENT is not None:
+                _OPENAI_REALTIME_CLIENT.close()
+            _OPENAI_REALTIME_CLIENT = OpenAIRealtimeClient(
+                api_key=api_key,
+                model=realtime_model,
+                timeout_seconds=timeout_seconds,
+            )
+        return _OPENAI_REALTIME_CLIENT
+
+
+def _stream_openai_chat_completion(
+    model: str,
+    api_key: str,
+    system_prompt: str,
+    user_prompt: str,
+    timeout_seconds: float,
+) -> str:
+    session = requests.Session()
+    session.trust_env = False
+    try:
+        with session.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                "temperature": 0.2,
+                "max_tokens": 256,
+                "response_format": {"type": "json_object"},
+                "stream": True,
+            },
+            timeout=timeout_seconds,
+            stream=True,
+        ) as response:
+            response.raise_for_status()
+            chunks = []
+            for raw_line in response.iter_lines(decode_unicode=True):
+                if not raw_line:
+                    continue
+                line = raw_line.strip()
+                if not line.startswith("data:"):
+                    continue
+                data_text = line[len("data:") :].strip()
+                if data_text == "[DONE]":
+                    break
+                payload = json.loads(data_text)
+                choices = payload.get("choices") or []
+                if not choices:
+                    continue
+                delta = choices[0].get("delta") or {}
+                content = delta.get("content")
+                if content:
+                    chunks.append(str(content))
+            if not chunks:
+                raise RuntimeError("OpenAI streaming response contained no content")
+            return "".join(chunks)
+    finally:
+        session.close()
+
+
 def _request_openai_once(
     model: str,
     api_key: str,
@@ -252,34 +453,21 @@ def _request_openai_once(
         timeout_seconds,
         proxy_url,
     )
-    response = _direct_http_post(
-        "https://api.openai.com/v1/chat/completions",
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-        json={
-            "model": model,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            "temperature": 0.2,
-            "max_tokens": 256,
-            "response_format": {"type": "json_object"},
-        },
-        timeout=timeout_seconds,
+    realtime_client = _get_openai_realtime_client(
+        api_key=api_key,
+        model=model,
+        timeout_seconds=timeout_seconds,
     )
-    response.raise_for_status()
-    payload = response.json()
-    choices = payload.get("choices") or []
-    if not choices:
-        raise RuntimeError("OpenAI returned no choices")
-    message = choices[0].get("message") or {}
-    content = message.get("content")
-    if not content:
-        raise RuntimeError("OpenAI returned no message content")
-    return str(content)
+    try:
+        return realtime_client.request(system_prompt=system_prompt, user_prompt=user_prompt)
+    except Exception:
+        return _stream_openai_chat_completion(
+            model=model,
+            api_key=api_key,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            timeout_seconds=timeout_seconds,
+        )
 
 
 def _request_openai_decision(
