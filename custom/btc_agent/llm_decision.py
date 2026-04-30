@@ -731,6 +731,15 @@ def _coerce_config_value(raw_value: object, caster, default):
         return default
 
 
+def _adjust_max_price_to_pay_for_confidence(
+    confidence: float,
+    max_price_to_pay: float,
+) -> float:
+    if confidence >= 0.70 and max_price_to_pay > 0:
+        return min(max_price_to_pay + 0.02, 1.0)
+    return max_price_to_pay
+
+
 def test_llm_connection() -> tuple[bool, str]:
     cfg = get_llm_config()
     system_prompt = (
@@ -854,6 +863,10 @@ def decide_trade(features: BtcFeatures, market: BtcUpDownMarket, up_snapshot=Non
         max_price_to_pay = float(data.get("max_price_to_pay", 0.0))
     except Exception:
         max_price_to_pay = 0.0
+    max_price_to_pay = _adjust_max_price_to_pay_for_confidence(
+        confidence,
+        max_price_to_pay,
+    )
 
     reason = str(data.get("reason", ""))[:300]
 

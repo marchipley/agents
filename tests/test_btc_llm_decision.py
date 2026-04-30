@@ -6,6 +6,7 @@ import types
 import requests
 
 from custom.btc_agent.llm_decision import (
+    _adjust_max_price_to_pay_for_confidence,
     _build_user_prompt,
     _get_openai_realtime_client,
     _stream_openai_chat_completion,
@@ -35,6 +36,16 @@ class DummyMarket:
 
 
 class TestBtcLlmDecision(unittest.TestCase):
+    def test_adjust_max_price_to_pay_for_confidence_adds_small_bump_at_threshold(self):
+        self.assertAlmostEqual(
+            _adjust_max_price_to_pay_for_confidence(0.70, 0.50),
+            0.52,
+        )
+        self.assertAlmostEqual(
+            _adjust_max_price_to_pay_for_confidence(0.69, 0.50),
+            0.50,
+        )
+
     def test_get_openai_realtime_client_reuses_existing_client(self):
         fake_client = Mock()
         fake_client.api_key = "test-key"
@@ -199,7 +210,7 @@ class TestBtcLlmDecision(unittest.TestCase):
 
         self.assertEqual(decision.side, "DOWN")
         self.assertAlmostEqual(decision.confidence, 0.71)
-        self.assertAlmostEqual(decision.max_price_to_pay, 0.42)
+        self.assertAlmostEqual(decision.max_price_to_pay, 0.44)
 
     def test_gemini_parse_retry_recovers_from_markdown_preamble(self):
         bad_response = requests.Response()

@@ -107,7 +107,6 @@ Optional / supported:
 - `MAX_AUTOMATED_TRADES` default: `0` meaning disabled; when set above zero, the agent saves a wallet-value baseline immediately before the first successful automated trade and, after that many successful automated trades, only stops if the current wallet value is below that first-trade baseline
 - `CONFIDENCE` optional alias for `BTC_AGENT_MIN_CONFIDENCE`
 - `BTC_AGENT_MIN_CONFIDENCE` default: `0.7`
-- `BTC_AGENT_MAX_ENTRY_PRICE` default: `0.62`
 - `BTC_AGENT_MAX_SPREAD` default: `0.06`
 - `BTC_AGENT_MARKET_SLUG` for override/debugging/backtesting
 
@@ -135,6 +134,7 @@ What the BTC agent does today:
 - Allows proxy routing to be disabled globally with `USE_PROXY=false`, which causes the agent to use direct connections for shared HTTP/LLM requests even if proxy environment variables are present.
 - Supports a dedicated `LLM_CONNECTION_DEBUG=true` mode that runs only a one-shot LLM connectivity test, prints the active connection settings, runs a direct Google connectivity probe after LLM connection failures, and exits without touching balances, market lookup, or trading execution.
 - Uses the configured AI engine with JSON output to decide `UP`, `DOWN`, or `NO_TRADE`.
+- Uses the LLM-provided `max_price_to_pay` from the decision JSON as the active price ceiling for target-limit construction; the previous static `BTC_AGENT_MAX_ENTRY_PRICE` cap is no longer enforced in execution gating.
 - Prints the current market `price_to_beat` in the BTC-agent output and includes that same period baseline in the LLM decision prompt, now preferring Vatic's BTC 5-minute timestamp target API and only falling back to Polymarket page / `_next/data` parsing when that external target lookup is unavailable.
 - Retries LLM API calls across configurable attempts using a single per-attempt timeout, logs each attempt result to stdout, and converts repeated failures into a `NO_TRADE` so the loop can move on to the next tick.
 - Computes a reference price from quote, midpoint, last trade, and order book data.

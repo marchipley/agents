@@ -384,13 +384,11 @@ def compute_target_limit_price(
     if reference_price is None:
         return None
 
-    cfg = get_trading_config()
     target = reference_price
 
     if decision is not None:
         target = min(target, decision.max_price_to_pay)
 
-    target = min(target, cfg.max_entry_price)
     return round(target, 3)
 
 
@@ -425,6 +423,7 @@ def get_submission_limit_label() -> str:
 
 def evaluate_ok_to_submit(
     buy_quote: Optional[float],
+    reference_price: Optional[float],
     submission_limit_price: Optional[float],
     tick_size: Optional[float],
 ) -> (bool, str):
@@ -438,10 +437,21 @@ def evaluate_ok_to_submit(
     - if buy_quote <= recommended_limit_price, OK
     - else allow up to 2 ticks of adverse movement
     """
+    cfg = get_trading_config()
     limit_label = get_submission_limit_label()
 
     if submission_limit_price is None:
         return False, f"No {limit_label} available"
+
+    if not cfg.use_recommended_limit:
+        if reference_price is None:
+            return False, "No reference price available"
+        if reference_price <= submission_limit_price:
+            return True, f"Reference price is at or below {limit_label}"
+        return False, (
+            f"Reference price {reference_price:.3f} exceeds {limit_label} "
+            f"{submission_limit_price:.3f}"
+        )
 
     if buy_quote is None:
         return False, "No current buy quote available"
@@ -515,6 +525,7 @@ def get_token_quote_snapshot(
 
     ok_to_submit, submit_reason = evaluate_ok_to_submit(
         buy_quote=buy_quote,
+        reference_price=reference_price,
         submission_limit_price=(
             recommended_limit_price
             if get_trading_config().use_recommended_limit
@@ -638,16 +649,6 @@ def _validate_trade_candidate(
             price=live_price,
             token_id=token_id,
             reason=f"Reference price {live_price:.3f} exceeds LLM max {decision.max_price_to_pay:.3f}",
-            snapshot=snapshot,
-        )
-
-    if live_price > cfg.max_entry_price:
-        return None, _build_rejected_trade_result(
-            side=decision.side,
-            size=0.0,
-            price=live_price,
-            token_id=token_id,
-            reason=f"Reference price {live_price:.3f} exceeds max entry {cfg.max_entry_price:.3f}",
             snapshot=snapshot,
         )
 

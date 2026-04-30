@@ -40,12 +40,14 @@ class TestBtcExecutor(unittest.TestCase):
         ):
             ok, reason = evaluate_ok_to_submit(
                 buy_quote=0.41,
+                reference_price=0.39,
                 submission_limit_price=0.40,
                 tick_size=0.01,
             )
 
         self.assertTrue(ok)
         self.assertIn("target limit", reason)
+        self.assertIn("Reference price", reason)
 
     def test_scale_live_size_for_min_notional_adds_buffer_above_exchange_minimum(self):
         limit_price = 0.19992

@@ -20,6 +20,7 @@ from custom.btc_agent.main import (
     has_valid_price_to_beat,
     run_once,
     main,
+    print_quote_snapshot_from_snapshot,
     resolve_price_to_beat_with_retries,
     wait_for_next_tick_or_quit,
     write_price_to_beat_debug_file,
@@ -114,6 +115,133 @@ class TestBtcMain(unittest.TestCase):
         self.assertIn("market_slug=btc-updown-5m-1777513800", content)
         self.assertIn("phase=PLACED", content)
         self.assertIn("position_state=WINNING", content)
+
+    def test_print_quote_snapshot_hides_recommended_fields_when_disabled(self):
+        snapshot = SimpleNamespace(
+            token_id="token-1",
+            buy_quote=0.25,
+            midpoint=0.24,
+            last_trade_price=0.23,
+            reference_price=0.26,
+            target_limit_price=0.27,
+            recommended_limit_price=0.28,
+            ok_to_submit=True,
+            submit_reason="Reference price is at or below target limit",
+            best_bid=0.24,
+            best_ask=0.25,
+            tick_size=0.01,
+            spread=0.01,
+        )
+
+        with patch(
+            "custom.btc_agent.main.get_submission_limit_label",
+            return_value="target limit",
+        ), patch(
+            "custom.btc_agent.main.get_submission_limit_price",
+            return_value=0.27,
+        ), patch(
+            "builtins.print",
+        ) as mock_print:
+            print_quote_snapshot_from_snapshot("UP", snapshot, debug=False)
+
+        printed_lines = [" ".join(str(arg) for arg in call.args) for call in mock_print.call_args_list]
+        self.assertFalse(any("buy_quote" in line for line in printed_lines))
+        self.assertFalse(any("recommended_limit_price" in line for line in printed_lines))
+        self.assertTrue(any("target_limit_price" in line for line in printed_lines))
+
+    def test_run_once_skips_quote_snapshot_output_when_recommended_limit_disabled(self):
+        market = SimpleNamespace(
+            slug="btc-updown-5m-1777056000",
+            title="Bitcoin Up or Down",
+            settlement_threshold=77560.75,
+            up_token_id="up-token",
+            down_token_id="down-token",
+            start_ts=1777056000,
+        )
+        state = SimpleNamespace(trades_executed=0)
+        features = SimpleNamespace(
+            price_usd=77560.75,
+            as_of=None,
+            window_open_price=77550.0,
+        )
+        decision = SimpleNamespace(
+            side="NO_TRADE",
+            confidence=0.3,
+            max_price_to_pay=0.5,
+            reason="test",
+        )
+        up_snapshot = SimpleNamespace(ok_to_submit=True)
+        down_snapshot = SimpleNamespace(ok_to_submit=True)
+
+        with ExitStack() as stack:
+            stack.enter_context(patch("custom.btc_agent.main._FIRST_LOOP", False))
+            stack.enter_context(
+                patch(
+                    "custom.btc_agent.main.get_trading_config",
+                    return_value=SimpleNamespace(
+                        debug=False,
+                        debug_price_to_beat=False,
+                        use_recommended_limit=False,
+                        max_trades_per_period=1,
+                        max_automated_trades=0,
+                        minimum_wallet_balance=0.0,
+                    ),
+                )
+            )
+            stack.enter_context(
+                patch("custom.btc_agent.main.find_current_btc_updown_market", return_value=market)
+            )
+            stack.enter_context(patch("custom.btc_agent.main.sync_period_state", return_value=False))
+            stack.enter_context(patch("custom.btc_agent.main.get_state", return_value=state))
+            stack.enter_context(
+                patch("custom.btc_agent.main.resolve_price_to_beat_with_retries", return_value=market)
+            )
+            stack.enter_context(
+                patch(
+                    "custom.btc_agent.main.get_token_quote_snapshot",
+                    side_effect=[up_snapshot, down_snapshot],
+                )
+            )
+            stack.enter_context(
+                patch("custom.btc_agent.main.build_btc_features", return_value=features)
+            )
+            stack.enter_context(
+                patch("custom.btc_agent.main.get_feature_readiness", return_value=(True, None))
+            )
+            stack.enter_context(patch("custom.btc_agent.main.decide_trade", return_value=decision))
+            stack.enter_context(
+                patch(
+                    "custom.btc_agent.main.maybe_execute_trade",
+                    return_value=SimpleNamespace(
+                        executed=False,
+                        side=None,
+                        size=0.0,
+                        price=0.0,
+                        token_id=None,
+                        reason="NO_TRADE",
+                        execution_snapshot=None,
+                    ),
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "custom.btc_agent.main.get_account_balance_snapshot",
+                    return_value=SimpleNamespace(cash_balance=100.0, total_account_value=100.0),
+                )
+            )
+            stack.enter_context(patch("custom.btc_agent.main.enforce_minimum_wallet_balance"))
+            stack.enter_context(patch("custom.btc_agent.main.print_market_context"))
+            mock_print_snapshot = stack.enter_context(
+                patch("custom.btc_agent.main.print_quote_snapshot_from_snapshot")
+            )
+            stack.enter_context(patch("custom.btc_agent.main.print_features"))
+            stack.enter_context(patch("custom.btc_agent.main.print_llm_decision"))
+            stack.enter_context(patch("custom.btc_agent.main.print_trade_execution_result"))
+            stack.enter_context(patch("custom.btc_agent.main.record_executed_trade"))
+            stack.enter_context(patch("custom.btc_agent.main.get_active_orders", return_value=[]))
+            run_once()
+
+        mock_print_snapshot.assert_not_called()
 
     def test_write_price_to_beat_debug_file_writes_report(self):
         with patch(

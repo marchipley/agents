@@ -30,6 +30,7 @@ from .executor import (
     compute_recommended_limit_price,
     compute_target_limit_price,
     evaluate_ok_to_submit,
+    get_submission_limit_label,
     get_submission_limit_price,
     get_account_balance_snapshot,
     get_token_quote_snapshot,
@@ -334,20 +335,29 @@ def print_quote_snapshot_from_snapshot(
     debug: bool = True,
 ) -> None:
     print(f"{label} quote snapshot:")
+    submission_limit_price = get_submission_limit_price(q)
+    submission_limit_label = get_submission_limit_label()
     if not debug:
-        print(f"  buy_quote              = {_fmt(q.buy_quote)}")
-        print(f"  recommended_limit_price= {_fmt(q.recommended_limit_price)}")
+        if submission_limit_label == "recommended limit":
+            print(f"  buy_quote              = {_fmt(q.buy_quote)}")
+            print(f"  recommended_limit_price= {_fmt(q.recommended_limit_price)}")
+        else:
+            print(f"  target_limit_price     = {_fmt(q.target_limit_price)}")
+            print(f"  reference_price        = {_fmt(q.reference_price)}")
         print(f"  ok_to_submit           = {q.ok_to_submit}")
         print(f"  submit_reason          = {q.submit_reason}")
         return
 
     print(f"  token_id               = {q.token_id}")
-    print(f"  buy_quote              = {_fmt(q.buy_quote)}")
+    if submission_limit_label == "recommended limit":
+        print(f"  buy_quote              = {_fmt(q.buy_quote)}")
     print(f"  midpoint               = {_fmt(q.midpoint)}")
     print(f"  last_trade_price       = {_fmt(q.last_trade_price)}")
     print(f"  reference_price        = {_fmt(q.reference_price)}")
     print(f"  target_limit_price     = {_fmt(q.target_limit_price)}")
-    print(f"  recommended_limit_price= {_fmt(q.recommended_limit_price)}")
+    if submission_limit_label == "recommended limit":
+        print(f"  recommended_limit_price= {_fmt(q.recommended_limit_price)}")
+    print(f"  submission_limit_price = {_fmt(submission_limit_price)}")
     print(f"  ok_to_submit           = {q.ok_to_submit}")
     print(f"  submit_reason          = {q.submit_reason}")
     print(f"  best_bid               = {_fmt(q.best_bid)}")
@@ -390,6 +400,7 @@ def get_decision_quote_snapshot(
 
     ok_to_submit, submit_reason = evaluate_ok_to_submit(
         buy_quote=base_snapshot.buy_quote,
+        reference_price=base_snapshot.reference_price,
         submission_limit_price=get_submission_limit_price(provisional_snapshot),
         tick_size=base_snapshot.tick_size,
     )
@@ -552,6 +563,7 @@ def run_once() -> None:
     global _SESSION_AUTOMATED_TRADES
     global _SESSION_FIRST_TRADE_WALLET_VALUE
     cfg = get_trading_config()
+    use_recommended_limit = getattr(cfg, "use_recommended_limit", True)
     enforce_session_trade_limit(cfg)
     if cfg.debug:
         print(f"[{datetime.now(timezone.utc).isoformat()}] BTC up/down agent tick")
@@ -612,8 +624,9 @@ def run_once() -> None:
 
     up_snapshot = get_token_quote_snapshot(market.up_token_id)
     down_snapshot = get_token_quote_snapshot(market.down_token_id)
-    print_quote_snapshot_from_snapshot("UP", up_snapshot, debug=cfg.debug)
-    print_quote_snapshot_from_snapshot("DOWN", down_snapshot, debug=cfg.debug)
+    if use_recommended_limit:
+        print_quote_snapshot_from_snapshot("UP", up_snapshot, debug=cfg.debug)
+        print_quote_snapshot_from_snapshot("DOWN", down_snapshot, debug=cfg.debug)
 
     if not up_snapshot.ok_to_submit and not down_snapshot.ok_to_submit:
         print_llm_skip_reason(both_sides_untradable_reason(up_snapshot, down_snapshot))
@@ -641,7 +654,7 @@ def run_once() -> None:
             up_snapshot,
             down_snapshot,
         )
-        if cfg.debug:
+        if cfg.debug and use_recommended_limit:
             print_quote_snapshot_from_snapshot("UP (with decision)", decision_snapshot, debug=True)
     elif decision.side == "DOWN":
         decision_snapshot = get_decision_quote_snapshot(
@@ -650,7 +663,7 @@ def run_once() -> None:
             up_snapshot,
             down_snapshot,
         )
-        if cfg.debug:
+        if cfg.debug and use_recommended_limit:
             print_quote_snapshot_from_snapshot("DOWN (with decision)", decision_snapshot, debug=True)
 
     first_trade_wallet_baseline = _SESSION_FIRST_TRADE_WALLET_VALUE
