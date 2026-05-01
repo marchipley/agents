@@ -1,6 +1,7 @@
 import sys
 import types
 import unittest
+import os
 from contextlib import ExitStack
 from unittest.mock import patch
 from types import SimpleNamespace
@@ -15,9 +16,12 @@ sys.modules.setdefault(
 from custom.btc_agent.main import (
     _SESSION_AUTOMATED_TRADES,
     append_completed_order_tick,
+    append_pending_period_tick_analysis,
     clear_price_to_beat_debug_files,
+    delete_pending_period_log,
     enforce_session_trade_limit,
     has_valid_price_to_beat,
+    promote_pending_period_log_to_completed,
     run_once,
     main,
     resolve_price_to_beat_with_retries,
@@ -114,6 +118,116 @@ class TestBtcMain(unittest.TestCase):
         self.assertIn("market_slug=btc-updown-5m-1777513800", content)
         self.assertIn("phase=PLACED", content)
         self.assertIn("position_state=WINNING", content)
+        self.assertIn("btc_move_from_entry=10.00", content)
+        self.assertIn("btc_gap_to_target=6.99", content)
+        self.assertIn("outcome_label=win", content)
+
+    def test_append_pending_period_tick_analysis_writes_pre_order_tick_data(self):
+        market = SimpleNamespace(
+            slug="btc-updown-5m-1999999999",
+            title="Bitcoin Up or Down",
+            settlement_threshold=77763.01,
+        )
+        up_snapshot = SimpleNamespace(
+            buy_quote=0.45,
+            reference_price=0.44,
+            target_limit_price=0.44,
+            recommended_limit_price=0.44,
+            ok_to_submit=True,
+            submit_reason="ok",
+            best_bid=0.43,
+            best_ask=0.45,
+            spread=0.02,
+        )
+        down_snapshot = SimpleNamespace(
+            buy_quote=0.52,
+            reference_price=0.51,
+            target_limit_price=0.51,
+            recommended_limit_price=0.51,
+            ok_to_submit=False,
+            submit_reason="blocked",
+            best_bid=0.50,
+            best_ask=0.52,
+            spread=0.02,
+        )
+        features = SimpleNamespace(
+            price_usd=77770.0,
+            delta_from_previous_tick=5.0,
+            momentum_1m=7.0,
+            momentum_5m=10.0,
+            volatility_5m=22.0,
+            window_open_price=77760.0,
+            delta_pct_from_window_open=0.0001286,
+            trailing_5m_open_price=77750.0,
+            delta_pct_from_trailing_5m_open=0.0002572,
+            rsi_14=55.0,
+            as_of=SimpleNamespace(isoformat=lambda: "2026-05-01T01:00:00+00:00"),
+        )
+        decision = SimpleNamespace(
+            side="UP",
+            confidence=0.88,
+            max_price_to_pay=1.0,
+            reason="strong setup",
+        )
+
+        with patch("custom.btc_agent.main.os.getcwd", return_value="/appl/agents"):
+            append_pending_period_tick_analysis(
+                market,
+                up_snapshot=up_snapshot,
+                down_snapshot=down_snapshot,
+                features=features,
+                decision=decision,
+                observed_at=SimpleNamespace(isoformat=lambda: "2026-05-01T01:00:00+00:00"),
+            )
+
+        with open(
+            "/appl/agents/completed_orders/pending_period_1999999999.txt",
+            encoding="utf-8",
+        ) as analysis_file:
+            content = analysis_file.read()
+
+        self.assertIn("phase=PRE_ORDER_TICK", content)
+        self.assertIn("up_buy_quote=0.450", content)
+        self.assertIn("down_submit_reason=blocked", content)
+        self.assertIn("decision_side=UP", content)
+
+    def test_promote_pending_period_log_to_completed_renames_file(self):
+        with open(
+            "/appl/agents/completed_orders/pending_period_1999999998.txt",
+            "w",
+            encoding="utf-8",
+        ) as pending_file:
+            pending_file.write("pre-order analysis\n")
+
+        completed_path = "/appl/agents/completed_orders/completed_order_1999999998.txt"
+        if os.path.exists(completed_path):
+            os.remove(completed_path)
+
+        with patch("custom.btc_agent.main.os.getcwd", return_value="/appl/agents"):
+            promote_pending_period_log_to_completed("btc-updown-5m-1999999998")
+
+        with open(
+            completed_path,
+            encoding="utf-8",
+        ) as completed_file:
+            content = completed_file.read()
+
+        self.assertEqual(content, "pre-order analysis\n")
+
+    def test_delete_pending_period_log_removes_unexecuted_period_analysis(self):
+        with open(
+            "/appl/agents/completed_orders/pending_period_1999999997.txt",
+            "w",
+            encoding="utf-8",
+        ) as pending_file:
+            pending_file.write("pre-order analysis\n")
+
+        with patch("custom.btc_agent.main.os.getcwd", return_value="/appl/agents"):
+            delete_pending_period_log("btc-updown-5m-1999999997")
+
+        self.assertFalse(
+            os.path.exists("/appl/agents/completed_orders/pending_period_1999999997.txt")
+        )
 
     def test_write_price_to_beat_debug_file_writes_report(self):
         with patch(
@@ -570,13 +684,15 @@ class TestBtcMain(unittest.TestCase):
             run_once()
 
         with open(
-            "/appl/agents/completed_orders/completed_order_1777513500.txt",
+            "/appl/agents/completed_orders/completed_order_win_1777513500.txt",
             encoding="utf-8",
         ) as order_file:
             content = order_file.read()
 
         self.assertIn("phase=COMPLETED", content)
         self.assertIn("current_btc_price=77710.00", content)
+        self.assertIn("outcome_label=win", content)
+        self.assertIn("outcome_reason=", content)
 
     def test_main_llm_connection_debug_bypasses_geolocation_and_exits_successfully(self):
         with patch(

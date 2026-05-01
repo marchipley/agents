@@ -33,6 +33,7 @@ class BtcUpDownMarket:
     start_ts: int
     end_ts: int
     settlement_threshold: Optional[float]
+    volume: Optional[float] = None
 
 def _current_btc_5m_slug() -> str:
     """
@@ -930,6 +931,7 @@ def _extract_market_from_event(event: dict, slug: str) -> Optional[BtcUpDownMark
     )
     question = str(m.get("question") or "")
     settlement_threshold = _extract_settlement_threshold(event, m, title, question, slug=slug)
+    volume = _coerce_threshold(m.get("volume"))
 
     return BtcUpDownMarket(
         event_id=str(event.get("id")),
@@ -942,6 +944,7 @@ def _extract_market_from_event(event: dict, slug: str) -> Optional[BtcUpDownMark
         start_ts=start_ts,
         end_ts=end_ts,
         settlement_threshold=settlement_threshold,
+        volume=volume,
     )
 
 

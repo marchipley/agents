@@ -99,6 +99,33 @@ class TestPolymarketV2(unittest.TestCase):
         self.assertEqual(options.tick_size, "0.001")
         self.assertEqual(kwargs["order_type"], "GTC")
 
+    def test_execute_order_uses_fok_when_requested(self):
+        order_args_cls = Mock(side_effect=lambda **kwargs: Mock(**kwargs))
+        options_cls = Mock(side_effect=lambda **kwargs: Mock(**kwargs))
+
+        poly = Polymarket.__new__(Polymarket)
+        poly.client = Mock()
+        poly._OrderArgs = order_args_cls
+        poly._PartialCreateOrderOptions = options_cls
+        poly._OrderType = Mock(GTC="GTC", FOK="FOK")
+
+        with patch(
+            "agents.polymarket.polymarket._load_v2_sdk",
+            return_value={"Side": Mock(BUY="BUY", SELL="SELL")},
+        ):
+            poly.execute_order(
+                price=0.421,
+                size=5.0,
+                side="BUY",
+                token_id="token-1",
+                fee_rate_bps=1000,
+                tick_size=0.001,
+                use_fok=True,
+            )
+
+        kwargs = poly.client.create_and_post_order.call_args.kwargs
+        self.assertEqual(kwargs["order_type"], "FOK")
+
 
 if __name__ == "__main__":
     unittest.main()

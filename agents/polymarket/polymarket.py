@@ -427,7 +427,9 @@ class Polymarket:
         token_id,
         fee_rate_bps: int = 0,
         tick_size: Optional[float] = None,
+        use_fok: bool = False,
     ) -> str:
+        order_type = self._OrderType.FOK if use_fok else self._OrderType.GTC
         return self.client.create_and_post_order(
             order_args=self._OrderArgs(
                 price=price,
@@ -438,7 +440,7 @@ class Polymarket:
             options=self._PartialCreateOrderOptions(
                 tick_size=self._normalize_tick_size(tick_size, price=price)
             ),
-            order_type=self._OrderType.GTC,
+            order_type=order_type,
         )
 
     def execute_market_order(self, market, amount) -> str:

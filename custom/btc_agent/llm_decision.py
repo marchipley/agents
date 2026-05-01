@@ -52,13 +52,28 @@ def _build_system_prompt() -> str:
         "}\n"
         "Keep the reason concise, ideally under 120 characters.\n"
         'Be conservative and prefer "NO_TRADE" when signals are weak.\n'
-        "Decision rules:\n"
-        "1. Use a dynamic expected-value check, not a static 0.80 price cap.\n"
-        "2. Treat Window Delta as the primary confidence signal in the final 10 seconds.\n"
-        "3. If Window Delta is below 0.005% near T-10, ignore TA and prefer NO_TRADE.\n"
-        "4. If Window Delta is above 0.15% near T-10, treat confidence as very high.\n"
-        "5. Favor execution only when the probability edge is clearly positive after fees.\n"
-        "6. If time remaining is under 5 seconds and there is no clear edge, prefer NO_TRADE over forcing a bad trade."
+        "Your job is regime detection and directional confidence, not price-capping.\n"
+        "Interpret confidence as the mathematical probability that your chosen side wins.\n"
+        "Treat Window Delta as the primary confidence signal in the final 10 seconds.\n"
+        "If Window Delta is below 0.005% near T-10, ignore TA noise and prefer NO_TRADE.\n"
+        "If Window Delta is above 0.15% near T-10, confidence should usually be 0.95 or higher.\n"
+        "If confidence is above 0.90, treat it as a directive to get in rather than demanding extra edge buffer.\n"
+        "If time remaining is under 5 seconds and confidence is above 0.70, avoid NO_TRADE unless the signal is clearly invalid.\n"
+        "`max_price_to_pay` is informational only and is not used by execution.\n"
+        "For directional trades, set `max_price_to_pay` to 1.0 unless you have a strong reason not to.\n"
+        "If Window Delta is above 0.15% near T-10, you may set `max_price_to_pay` as high as 0.97."
+    )
+
+
+def _build_openai_realtime_system_prompt() -> str:
+    return (
+        "Return one JSON object only with keys decision, confidence, max_price_to_pay, reason. "
+        "decision must be UP, DOWN, or NO_TRADE. "
+        "confidence is win probability 0..1. "
+        "Use Window Delta as the strongest late signal. "
+        "If abs(Window Delta) < 0.005 near T-10, prefer NO_TRADE. "
+        "If abs(Window Delta) > 0.15 near T-10, confidence should usually be very high. "
+        "max_price_to_pay is informational only; use 1.0 for directional trades."
     )
 
 
@@ -86,17 +101,16 @@ def _build_user_prompt(features: BtcFeatures, market: BtcUpDownMarket, up_snapsh
         f"- 1-minute momentum USD: {features.momentum_1m}\n"
         f"- Trailing 5-minute momentum USD: {features.momentum_5m}\n"
         f"- Trailing 5-minute volatility: {features.volatility_5m}\n\n"
-        "Execution policy:\n"
-        "- Rule 1: Probability-Edge Override. Estimate mathematical win probability from the full feature set.\n"
-        "- Compute implied probability from the relevant Polymarket ask price.\n"
-        "- Approximate effective taker fee with p * (1-p), where p is the ask price.\n"
-        "- Edge = estimated win probability - (implied probability + effective taker fee).\n"
-        "- Execute only if Edge > 0.05 and time remaining is under 12 seconds.\n"
-        "- A price above 0.80 is allowed if the edge is still clearly positive.\n"
-        "- Rule 2: Window Delta Primacy. If Window Delta > 0.15% near T-10, confidence should be 0.95 or higher.\n"
-        "- If Window Delta < 0.005% near T-10, ignore RSI and momentum noise and prefer NO_TRADE.\n"
-        "- Rule 3: Fractional Kelly sizing is external. Use `max_price_to_pay` to reflect the highest price justified by edge, not a fixed static cap.\n"
-        "- Rule 4: T-10 timing. Focus on opportunities from T=290 to T=295, and avoid weak late entries after T=297.\n\n"
+        "Decision policy:\n"
+        "- Focus on regime detection and direction, not limit pricing.\n"
+        "- Confidence should represent your estimated win probability for the chosen side.\n"
+        "- Window Delta is the master confidence signal near T-10.\n"
+        "- If Window Delta < 0.005% near T-10, prefer NO_TRADE.\n"
+        "- If Window Delta > 0.15% near T-10, confidence should usually be 0.95 or higher.\n"
+        "- If confidence > 0.90, assume no extra edge buffer is required.\n"
+        "- If time remaining < 5 seconds and confidence > 0.70, prefer a directional trade over NO_TRADE.\n"
+        "- The execution layer will apply regime-aware EV, deadline, liquidity, and FOK rules.\n"
+        "- `max_price_to_pay` is ignored by execution; set it to 1.0 for directional trades.\n\n"
         "Keep `reason` short and concrete.\n"
         "Return ONLY the JSON object described in the system message."
     )
@@ -121,8 +135,7 @@ def _build_compact_user_prompt(features: BtcFeatures, market: BtcUpDownMarket, u
         f"Trailing 5-minute momentum USD: {features.momentum_5m}\n"
         f"Trailing 5-minute volatility: {features.volatility_5m}\n"
         "Settlement: UP wins only above the price to beat; DOWN wins only below it.\n"
-        "Use EV logic: edge must exceed 0.05 after implied probability and fee adjustment. "
-        "Use Window Delta as the master confidence switch near T-10.\n"
+        "Provide direction plus confidence as win probability. Execution handles EV and timing.\n"
         'Return one JSON object with keys: decision, confidence, max_price_to_pay, reason.'
     )
 
@@ -130,20 +143,41 @@ def _build_compact_user_prompt(features: BtcFeatures, market: BtcUpDownMarket, u
 def _build_minimal_user_prompt(features: BtcFeatures, market: BtcUpDownMarket, up_snapshot=None, down_snapshot=None) -> str:
     time_remaining_seconds = max(market.end_ts - int(features.as_of.timestamp()), 0)
     return (
-        f"BTC price: {features.price_usd:.2f}\n"
-        f"Price to beat: {market.settlement_threshold}\n"
-        f"Time remaining seconds: {time_remaining_seconds}\n"
-        f"Window Delta pct: {features.delta_pct_from_window_open * 100:.4f}%\n"
-        f"UP ask: {getattr(up_snapshot, 'buy_quote', None)}\n"
-        f"DOWN ask: {getattr(down_snapshot, 'buy_quote', None)}\n"
-        f"Delta pct: {features.delta_pct_from_window_open * 100:.4f}%\n"
-        f"RSI14: {features.rsi_14}\n"
-        f"Momentum1m: {features.momentum_1m}\n"
-        f"Momentum5m: {features.momentum_5m}\n"
-        f"Volatility5m: {features.volatility_5m}\n"
-        "UP wins above the price to beat. DOWN wins below it.\n"
-        "Use EV logic with a required edge above 0.05, and treat Window Delta as primary near T-10.\n"
+        f"beat={market.settlement_threshold}\n"
+        f"t={time_remaining_seconds}\n"
+        f"btc={features.price_usd:.2f}\n"
+        f"delta_pct={features.delta_pct_from_window_open * 100:.4f}\n"
+        f"up_ask={getattr(up_snapshot, 'buy_quote', None)}\n"
+        f"down_ask={getattr(down_snapshot, 'buy_quote', None)}\n"
+        f"rsi14={features.rsi_14}\n"
+        f"mom1m={features.momentum_1m}\n"
+        f"mom5m={features.momentum_5m}\n"
+        f"vol5m={features.volatility_5m}\n"
+        "UP above beat. DOWN below beat.\n"
+        "Return direction + confidence as win probability.\n"
         'Return one JSON object with keys: decision, confidence, max_price_to_pay, reason.'
+    )
+
+
+def _build_openai_realtime_user_prompt(
+    features: BtcFeatures,
+    market: BtcUpDownMarket,
+    up_snapshot=None,
+    down_snapshot=None,
+) -> str:
+    time_remaining_seconds = max(market.end_ts - int(features.as_of.timestamp()), 0)
+    return (
+        f"beat={market.settlement_threshold};"
+        f"t={time_remaining_seconds};"
+        f"btc={features.price_usd:.2f};"
+        f"d={features.delta_pct_from_window_open * 100:.4f};"
+        f"u={getattr(up_snapshot, 'buy_quote', None)};"
+        f"dn={getattr(down_snapshot, 'buy_quote', None)};"
+        f"rsi={features.rsi_14};"
+        f"m1={features.momentum_1m};"
+        f"m5={features.momentum_5m};"
+        f"v5={features.volatility_5m};"
+        "json only"
     )
 
 
@@ -331,7 +365,7 @@ class OpenAIRealtimeClient:
                             "type": "response.create",
                             "response": {
                                 "modalities": ["text"],
-                                "max_output_tokens": 256,
+                                "max_output_tokens": 160,
                                 "metadata": {"request_id": request_id},
                             },
                         }
@@ -458,16 +492,7 @@ def _request_openai_once(
         model=model,
         timeout_seconds=timeout_seconds,
     )
-    try:
-        return realtime_client.request(system_prompt=system_prompt, user_prompt=user_prompt)
-    except Exception:
-        return _stream_openai_chat_completion(
-            model=model,
-            api_key=api_key,
-            system_prompt=system_prompt,
-            user_prompt=user_prompt,
-            timeout_seconds=timeout_seconds,
-        )
+    return realtime_client.request(system_prompt=system_prompt, user_prompt=user_prompt)
 
 
 def _request_openai_decision(
@@ -792,6 +817,13 @@ def decide_trade(features: BtcFeatures, market: BtcUpDownMarket, up_snapshot=Non
     user_prompt = _build_user_prompt(features, market, up_snapshot=up_snapshot, down_snapshot=down_snapshot)
     compact_user_prompt = _build_compact_user_prompt(features, market, up_snapshot=up_snapshot, down_snapshot=down_snapshot)
     minimal_user_prompt = _build_minimal_user_prompt(features, market, up_snapshot=up_snapshot, down_snapshot=down_snapshot)
+    openai_system_prompt = _build_openai_realtime_system_prompt()
+    openai_user_prompt = _build_openai_realtime_user_prompt(
+        features,
+        market,
+        up_snapshot=up_snapshot,
+        down_snapshot=down_snapshot,
+    )
     api_connection_timeout_seconds = _coerce_config_value(
         getattr(cfg, "api_connection_timeout_seconds", 10.0),
         float,
@@ -813,8 +845,8 @@ def decide_trade(features: BtcFeatures, market: BtcUpDownMarket, up_snapshot=Non
             raw_text = _request_openai_decision(
                 model=cfg.model,
                 api_key=cfg.api_key,
-                system_prompt=system_prompt,
-                user_prompt=minimal_user_prompt,
+                system_prompt=openai_system_prompt,
+                user_prompt=openai_user_prompt,
                 fallback_user_prompt=None,
                 timeout_seconds=api_connection_timeout_seconds,
                 retry_attempts=api_connection_retry_attempts,

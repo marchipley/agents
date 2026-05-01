@@ -107,7 +107,8 @@ class TestBtcLlmDecision(unittest.TestCase):
         self.assertIn("Time remaining seconds: 8", prompt)
         self.assertIn("UP Polymarket ask/buy quote: 0.84", prompt)
         self.assertIn("DOWN Polymarket ask/buy quote: 0.17", prompt)
-        self.assertIn("Probability-Edge Override", prompt)
+        self.assertIn("Focus on regime detection and direction, not limit pricing.", prompt)
+        self.assertIn("execution layer will apply regime-aware EV, deadline, liquidity, and FOK rules", prompt)
 
     def test_gemini_503_returns_no_trade(self):
         error_response = requests.Response()
@@ -282,8 +283,12 @@ class TestBtcLlmDecision(unittest.TestCase):
                 api_connection_retry_attempts=1,
             ),
         ), patch(
-            "custom.btc_agent.llm_decision._stream_openai_chat_completion",
-            return_value='{"decision":"UP","confidence":0.8,"max_price_to_pay":0.5,"reason":"ok"}',
+            "custom.btc_agent.llm_decision._get_openai_realtime_client",
+            return_value=Mock(
+                request=Mock(
+                    return_value='{"decision":"UP","confidence":0.8,"max_price_to_pay":0.5,"reason":"ok"}'
+                )
+            ),
         ):
             decision = decide_trade(DummyFeatures(), DummyMarket())
 

@@ -3,10 +3,12 @@
 import math
 import requests
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Optional, Any, Dict, List, Tuple
 
 from agents.polymarket.polymarket import Polymarket
 from .config import get_trading_config, get_polymarket_config
+from .indicators import BtcFeatures
 from .llm_decision import LlmDecision
 from .market_lookup import BtcUpDownMarket
 from .network import http_get, http_post
@@ -384,14 +386,7 @@ def compute_target_limit_price(
     if reference_price is None:
         return None
 
-    cfg = get_trading_config()
-    target = reference_price
-
-    if decision is not None:
-        target = min(target, decision.max_price_to_pay)
-
-    target = min(target, cfg.max_entry_price)
-    return round(target, 3)
+    return round(reference_price, 3)
 
 
 def compute_recommended_limit_price(
@@ -425,6 +420,7 @@ def get_submission_limit_label() -> str:
 
 def evaluate_ok_to_submit(
     buy_quote: Optional[float],
+    reference_price: Optional[float],
     submission_limit_price: Optional[float],
     tick_size: Optional[float],
 ) -> (bool, str):
@@ -442,6 +438,17 @@ def evaluate_ok_to_submit(
 
     if submission_limit_price is None:
         return False, f"No {limit_label} available"
+
+    cfg = get_trading_config()
+    if not cfg.use_recommended_limit:
+        if reference_price is None:
+            return False, "No reference price available"
+        if reference_price <= submission_limit_price:
+            return True, f"Reference price is at or below {limit_label}"
+        return False, (
+            f"Reference price {reference_price:.3f} exceeds {limit_label} "
+            f"{submission_limit_price:.3f}"
+        )
 
     if buy_quote is None:
         return False, "No current buy quote available"
@@ -515,6 +522,7 @@ def get_token_quote_snapshot(
 
     ok_to_submit, submit_reason = evaluate_ok_to_submit(
         buy_quote=buy_quote,
+        reference_price=reference_price,
         submission_limit_price=(
             recommended_limit_price
             if get_trading_config().use_recommended_limit
@@ -566,9 +574,53 @@ def _build_rejected_trade_result(
     )
 
 
+def _get_time_remaining_seconds(market: BtcUpDownMarket) -> int:
+    return max(market.end_ts - int(datetime.now(timezone.utc).timestamp()), 0)
+
+
+def _get_implied_probability(snapshot: TokenQuoteSnapshot) -> Optional[float]:
+    for value in (snapshot.buy_quote, snapshot.best_ask, snapshot.reference_price):
+        if value is None:
+            continue
+        if 0 <= value <= 1:
+            return value
+    return None
+
+
+def _get_effective_fee_probability(implied_probability: float) -> float:
+    # Polymarket fee impact on high-probability favorites is much smaller than a raw
+    # p * (1-p) penalty suggests. Use a scaled version so fees decay near the extremes
+    # instead of overwhelming high-confidence late-window signals.
+    return implied_probability * (1 - implied_probability) * 0.1
+
+
+def _compute_execution_edge(decision: LlmDecision, snapshot: TokenQuoteSnapshot) -> Optional[float]:
+    implied_probability = _get_implied_probability(snapshot)
+    if implied_probability is None:
+        return None
+    return decision.confidence - (implied_probability + _get_effective_fee_probability(implied_probability))
+
+
+def _is_high_price_trade(snapshot: TokenQuoteSnapshot) -> bool:
+    implied_probability = _get_implied_probability(snapshot)
+    if implied_probability is None:
+        return False
+    return implied_probability > 0.80
+
+
+def _is_window_delta_master_switch(
+    features: Optional[BtcFeatures],
+    time_remaining_seconds: int,
+) -> bool:
+    if features is None or time_remaining_seconds > 10:
+        return False
+    return abs(features.delta_pct_from_window_open) > 0.0015
+
+
 def _validate_trade_candidate(
     market: BtcUpDownMarket,
     decision: LlmDecision,
+    features: Optional[BtcFeatures] = None,
     snapshot: Optional[TokenQuoteSnapshot] = None,
 ) -> Tuple[Optional[TokenQuoteSnapshot], Optional[TradeExecutionResult]]:
     cfg = get_trading_config()
@@ -580,16 +632,6 @@ def _validate_trade_candidate(
             price=0.0,
             token_id=None,
             reason=f"NO_TRADE from LLM: {decision.reason}",
-            snapshot=None,
-        )
-
-    if decision.confidence < cfg.min_confidence:
-        return None, _build_rejected_trade_result(
-            side=decision.side,
-            size=0.0,
-            price=0.0,
-            token_id=None,
-            reason=f"Confidence {decision.confidence:.2f} < min {cfg.min_confidence:.2f}",
             snapshot=None,
         )
 
@@ -631,23 +673,73 @@ def _validate_trade_candidate(
             snapshot=snapshot,
         )
 
-    if live_price > decision.max_price_to_pay:
+    implied_probability = _get_implied_probability(snapshot)
+    if implied_probability is None:
         return None, _build_rejected_trade_result(
             side=decision.side,
             size=0.0,
             price=live_price,
             token_id=token_id,
-            reason=f"Reference price {live_price:.3f} exceeds LLM max {decision.max_price_to_pay:.3f}",
+            reason="Could not determine implied probability from market quote",
             snapshot=snapshot,
         )
 
-    if live_price > cfg.max_entry_price:
+    if decision.confidence <= 0:
         return None, _build_rejected_trade_result(
             side=decision.side,
             size=0.0,
             price=live_price,
             token_id=token_id,
-            reason=f"Reference price {live_price:.3f} exceeds max entry {cfg.max_entry_price:.3f}",
+            reason="Confidence must be positive for directional execution",
+            snapshot=snapshot,
+        )
+
+    edge = _compute_execution_edge(decision, snapshot)
+    if edge is None:
+        return None, _build_rejected_trade_result(
+            side=decision.side,
+            size=0.0,
+            price=live_price,
+            token_id=token_id,
+            reason="Could not compute execution edge",
+            snapshot=snapshot,
+        )
+
+    time_remaining_seconds = _get_time_remaining_seconds(market)
+    hard_deadline_execution = time_remaining_seconds < 5 and decision.confidence > 0.70
+    high_confidence_override = decision.confidence > 0.90
+    window_delta_master_switch = _is_window_delta_master_switch(features, time_remaining_seconds)
+    min_edge_required = 0.0 if high_confidence_override else 0.05
+
+    if (
+        not window_delta_master_switch
+        and
+        not cfg.disable_liquidity_filter
+        and _is_high_price_trade(snapshot)
+        and (market.volume is None or market.volume <= 1000)
+    ):
+        return None, _build_rejected_trade_result(
+            side=decision.side,
+            size=0.0,
+            price=live_price,
+            token_id=token_id,
+            reason=(
+                "High-price trade blocked by liquidity filter "
+                f"(implied_probability={implied_probability:.3f}; volume={market.volume})"
+            ),
+            snapshot=snapshot,
+        )
+
+    if not hard_deadline_execution and not window_delta_master_switch and edge <= min_edge_required:
+        return None, _build_rejected_trade_result(
+            side=decision.side,
+            size=0.0,
+            price=live_price,
+            token_id=token_id,
+            reason=(
+                f"Execution edge {edge:.3f} <= {min_edge_required:.3f} "
+                f"(confidence={decision.confidence:.3f}; implied_probability={implied_probability:.3f})"
+            ),
             snapshot=snapshot,
         )
 
@@ -713,6 +805,11 @@ def _get_required_live_cash(size: float, limit_price: float, fee_rate_bps: int) 
     return round(notional + estimated_fee, 6)
 
 
+def _is_fok_full_fill_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return "couldn't be fully filled" in message or "fully filled or killed" in message
+
+
 def ensure_live_trade_cash_available(required_cash: float) -> AccountBalanceSnapshot:
     account = get_account_balance_snapshot()
     if account.cash_balance is None:
@@ -729,6 +826,7 @@ def ensure_live_trade_cash_available(required_cash: float) -> AccountBalanceSnap
 
 def _execute_live_trade(
     decision: LlmDecision,
+    market: BtcUpDownMarket,
     snapshot: TokenQuoteSnapshot,
 ) -> TradeExecutionResult:
     cfg = get_trading_config()
@@ -736,6 +834,11 @@ def _execute_live_trade(
     live_price = snapshot.reference_price
     submission_limit_price = get_submission_limit_price(snapshot)
     submission_limit_label = get_submission_limit_label()
+    time_remaining_seconds = _get_time_remaining_seconds(market)
+    use_fok = time_remaining_seconds <= 10
+    order_type_label = "FOK" if use_fok else "GTC"
+    implied_probability = _get_implied_probability(snapshot)
+    edge = _compute_execution_edge(decision, snapshot)
 
     if submission_limit_price is None or live_price is None:
         raise RuntimeError("Live trade execution called without a valid priced snapshot.")
@@ -764,9 +867,43 @@ def _execute_live_trade(
             token_id=snapshot.token_id,
             fee_rate_bps=cfg.live_fee_rate_bps,
             tick_size=snapshot.tick_size,
+            use_fok=use_fok,
         )
     except Exception as exc:
-        raise RuntimeError(f"Live order submission failed: {exc}") from exc
+        if use_fok and _is_fok_full_fill_error(exc):
+            if time_remaining_seconds > 5:
+                try:
+                    response = client.execute_order(
+                        price=submission_limit_price,
+                        size=size,
+                        side="BUY",
+                        token_id=snapshot.token_id,
+                        fee_rate_bps=cfg.live_fee_rate_bps,
+                        tick_size=snapshot.tick_size,
+                        use_fok=False,
+                    )
+                    order_type_label = "GTC (after FOK retry)"
+                except Exception as retry_exc:
+                    raise RuntimeError(
+                        "Live order submission failed after FOK retry: "
+                        f"initial={exc}; retry={retry_exc}"
+                    ) from retry_exc
+            else:
+                return TradeExecutionResult(
+                    executed=False,
+                    side=decision.side,
+                    size=0.0,
+                    price=submission_limit_price,
+                    token_id=snapshot.token_id,
+                    reason=(
+                        "FOK order could not be fully filled in the final deadline window "
+                        f"(time_remaining={time_remaining_seconds}s; {snapshot.submit_reason})"
+                    ),
+                    live_order_response=None,
+                    execution_snapshot=snapshot,
+                )
+        else:
+            raise RuntimeError(f"Live order submission failed: {exc}") from exc
 
     return TradeExecutionResult(
         executed=True,
@@ -778,6 +915,10 @@ def _execute_live_trade(
             f"Live trade submitted at {submission_limit_label} {submission_limit_price:.3f} "
             f"for {size:.4f} shares "
             f"(reference={live_price:.3f}; order_notional={order_notional:.3f}; "
+            f"implied_probability={implied_probability:.3f}; "
+            f"edge={edge:.3f}; "
+            f"time_remaining={time_remaining_seconds}s; "
+            f"order_type={order_type_label}; "
             f"required_cash={required_cash:.3f}; "
             f"estimated_fee={estimated_fee:.3f}; fee_rate_bps={cfg.live_fee_rate_bps}; "
             f"{snapshot.submit_reason})"
@@ -790,11 +931,13 @@ def _execute_live_trade(
 def maybe_execute_trade(
     market: BtcUpDownMarket,
     decision: LlmDecision,
+    features: Optional[BtcFeatures] = None,
     snapshot: Optional[TokenQuoteSnapshot] = None,
 ) -> TradeExecutionResult:
     validated_snapshot, rejection = _validate_trade_candidate(
         market=market,
         decision=decision,
+        features=features,
         snapshot=snapshot,
     )
     if rejection is not None:
@@ -806,4 +949,4 @@ def maybe_execute_trade(
     if cfg.paper_trading:
         return _execute_paper_trade(decision=decision, snapshot=validated_snapshot)
 
-    return _execute_live_trade(decision=decision, snapshot=validated_snapshot)
+    return _execute_live_trade(decision=decision, market=market, snapshot=validated_snapshot)
