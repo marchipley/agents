@@ -29,3 +29,6 @@ archive.zip
 local_db*
 /.venv.broken-20260421
 /completed_orders
+data_files/current_period.json
+/logs
+/logs
