@@ -42,6 +42,10 @@ class TokenQuoteSnapshot:
     best_ask: Optional[float]
     tick_size: Optional[float]
     spread: Optional[float]
+    best_bid_size: Optional[float] = None
+    best_ask_size: Optional[float] = None
+    spread_bps: Optional[float] = None
+    top_level_book_imbalance: Optional[float] = None
 
 
 @dataclass
@@ -497,6 +501,12 @@ def get_token_quote_snapshot(
         best_bid = _coerce_price(bids[0].get("price"))
     if asks and isinstance(asks[0], dict):
         best_ask = _coerce_price(asks[0].get("price"))
+    best_bid_size = None
+    best_ask_size = None
+    if bids and isinstance(bids[0], dict):
+        best_bid_size = _coerce_price(bids[0].get("size"))
+    if asks and isinstance(asks[0], dict):
+        best_ask_size = _coerce_price(asks[0].get("size"))
 
     tick_size = _coerce_price(book.get("tick_size"))
     spread = None
@@ -509,6 +519,14 @@ def get_token_quote_snapshot(
         last_trade_price=last_trade_price,
         spread=spread,
     )
+    spread_bps = None
+    if spread is not None and reference_price not in (None, 0):
+        spread_bps = (spread / reference_price) * 10_000
+    top_level_book_imbalance = None
+    if best_bid_size is not None and best_ask_size is not None:
+        total_top_level_size = best_bid_size + best_ask_size
+        if total_top_level_size > 0:
+            top_level_book_imbalance = best_bid_size / total_top_level_size
 
     target_limit_price = compute_target_limit_price(
         reference_price=reference_price,
@@ -546,6 +564,10 @@ def get_token_quote_snapshot(
         best_ask=best_ask,
         tick_size=tick_size,
         spread=spread,
+        best_bid_size=best_bid_size,
+        best_ask_size=best_ask_size,
+        spread_bps=spread_bps,
+        top_level_book_imbalance=top_level_book_imbalance,
     )
 
 

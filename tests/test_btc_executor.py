@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 sys.modules.setdefault("dotenv", types.SimpleNamespace(load_dotenv=lambda *args, **kwargs: None))
 sys.modules.setdefault("openai", types.SimpleNamespace(OpenAI=object))
+sys.modules.setdefault("websocket", types.SimpleNamespace(WebSocketApp=object, create_connection=object))
 sys.modules.setdefault(
     "agents.polymarket.polymarket",
     types.SimpleNamespace(Polymarket=object),

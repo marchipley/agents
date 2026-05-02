@@ -10,6 +10,7 @@ import sys
 import termios
 import tty
 from typing import Optional
+import json
 
 from .config import get_trading_config
 from .market_lookup import (
@@ -57,9 +58,7 @@ from scripts.python.check_public_ip_indonesia import (
 
 _FIRST_LOOP = True
 _DEBUG_WRITTEN_SLUGS = set()
-_SESSION_AUTOMATED_TRADES = 0
-_SESSION_FIRST_TRADE_WALLET_VALUE = None
-_SESSION_PENDING_EXIT_AFTER_PERIOD = False
+_SESSION_LOSS_TRADES = 0
 
 
 class QuitKeyMonitor:
@@ -230,8 +229,133 @@ def _snapshot_summary(prefix: str, snapshot: TokenQuoteSnapshot) -> list[str]:
         f"{prefix}_submit_reason={getattr(snapshot, 'submit_reason', '')}",
         f"{prefix}_best_bid={_fmt(getattr(snapshot, 'best_bid', None))}",
         f"{prefix}_best_ask={_fmt(getattr(snapshot, 'best_ask', None))}",
+        f"{prefix}_best_bid_size={_fmt(getattr(snapshot, 'best_bid_size', None))}",
+        f"{prefix}_best_ask_size={_fmt(getattr(snapshot, 'best_ask_size', None))}",
         f"{prefix}_spread={_fmt(getattr(snapshot, 'spread', None))}",
+        f"{prefix}_spread_bps={_fmt(getattr(snapshot, 'spread_bps', None))}",
+        f"{prefix}_top_level_book_imbalance={_fmt(getattr(snapshot, 'top_level_book_imbalance', None))}",
     ]
+
+
+def _slug_start_ts(market_slug: str) -> Optional[int]:
+    try:
+        return int(_extract_slug_timestamp(market_slug))
+    except (TypeError, ValueError):
+        return None
+
+
+def _market_time_remaining_seconds(market_slug: str, observed_at: datetime) -> Optional[int]:
+    start_ts = _slug_start_ts(market_slug)
+    if start_ts is None:
+        return None
+    if not hasattr(observed_at, "timestamp"):
+        return None
+    end_ts = start_ts + 300
+    return max(end_ts - int(observed_at.timestamp()), 0)
+
+
+def _volatility_regime(volatility_5m) -> str:
+    if volatility_5m is None:
+        return "unknown"
+    if volatility_5m < 5:
+        return "low"
+    if volatility_5m < 12:
+        return "medium"
+    if volatility_5m < 25:
+        return "high"
+    return "extreme"
+
+
+def _trend_regime(features) -> str:
+    delta_pct = getattr(features, "delta_pct_from_window_open", None)
+    momentum_5m = getattr(features, "momentum_5m", None)
+    if delta_pct is None or momentum_5m is None:
+        return "unknown"
+    if abs(delta_pct) < 0.0005 and abs(momentum_5m) < 8:
+        return "ranging"
+    if delta_pct > 0.0015 and momentum_5m > 15:
+        return "strong_up"
+    if delta_pct < -0.0015 and momentum_5m < -15:
+        return "strong_down"
+    if delta_pct > 0:
+        return "weak_up"
+    if delta_pct < 0:
+        return "weak_down"
+    return "mixed"
+
+
+def _liquidity_regime(snapshot: TokenQuoteSnapshot) -> str:
+    spread_bps = getattr(snapshot, "spread_bps", None)
+    if spread_bps is None:
+        return "unknown"
+    if spread_bps <= 30:
+        return "high"
+    if spread_bps <= 80:
+        return "normal"
+    return "low"
+
+
+def _rsi_regime(features) -> str:
+    rsi = getattr(features, "rsi_14", None)
+    if rsi is None:
+        return "unknown"
+    if rsi >= 80:
+        return "extreme_overbought"
+    if rsi >= 70:
+        return "overbought"
+    if rsi <= 20:
+        return "extreme_oversold"
+    if rsi <= 30:
+        return "oversold"
+    return "neutral"
+
+
+def _build_regime_fingerprint(
+    *,
+    market_slug: str,
+    observed_at: datetime,
+    features=None,
+    up_snapshot: TokenQuoteSnapshot = None,
+    down_snapshot: TokenQuoteSnapshot = None,
+    current_btc_price: Optional[float] = None,
+    period_open_price_to_beat: Optional[float] = None,
+) -> dict:
+    current_price = current_btc_price
+    if current_price is None and features is not None:
+        current_price = getattr(features, "price_usd", None)
+
+    gap_to_target = None
+    gap_to_target_pct = None
+    if current_price is not None and period_open_price_to_beat not in (None, 0):
+        gap_to_target = current_price - period_open_price_to_beat
+        gap_to_target_pct = (gap_to_target / period_open_price_to_beat) * 100
+
+    selected_snapshot = None
+    if up_snapshot is not None and down_snapshot is not None:
+        up_spread_bps = getattr(up_snapshot, "spread_bps", None)
+        down_spread_bps = getattr(down_snapshot, "spread_bps", None)
+        if up_spread_bps is not None and down_spread_bps is not None:
+            selected_snapshot = up_snapshot if up_spread_bps <= down_spread_bps else down_snapshot
+        else:
+            selected_snapshot = up_snapshot
+    else:
+        selected_snapshot = up_snapshot or down_snapshot
+
+    return {
+        "time_remaining_seconds": _market_time_remaining_seconds(market_slug, observed_at),
+        "volatility_regime": _volatility_regime(getattr(features, "volatility_5m", None)) if features is not None else "unknown",
+        "trend_regime": _trend_regime(features) if features is not None else "unknown",
+        "rsi_regime": _rsi_regime(features) if features is not None else "unknown",
+        "liquidity_regime": _liquidity_regime(selected_snapshot) if selected_snapshot is not None else "unknown",
+        "threshold_gap_usd": None if gap_to_target is None else round(gap_to_target, 4),
+        "threshold_gap_pct": None if gap_to_target_pct is None else round(gap_to_target_pct, 4),
+        "window_delta_pct": None
+        if features is None or getattr(features, "delta_pct_from_window_open", None) is None
+        else round(getattr(features, "delta_pct_from_window_open") * 100, 4),
+        "top_level_book_imbalance": None
+        if selected_snapshot is None
+        else getattr(selected_snapshot, "top_level_book_imbalance", None),
+    }
 
 
 def append_pending_period_tick_analysis(
@@ -283,6 +407,20 @@ def append_pending_period_tick_analysis(
                     f"delta_from_5m_pct={((getattr(features, 'delta_pct_from_trailing_5m_open', 0.0) or 0.0) * 100):.4f}%",
                     f"rsi_14={getattr(features, 'rsi_14', None)}",
                 ]
+            )
+            lines.append(
+                "regime_fingerprint="
+                + json.dumps(
+                    _build_regime_fingerprint(
+                        market_slug=market.slug,
+                        observed_at=observed_at,
+                        features=features,
+                        up_snapshot=up_snapshot,
+                        down_snapshot=down_snapshot,
+                        period_open_price_to_beat=market.settlement_threshold,
+                    ),
+                    sort_keys=True,
+                )
             )
 
         if decision is not None:
@@ -352,6 +490,15 @@ def append_completed_order_tick(
     btc_gap_to_target = current_btc_price - order.target_btc_price
     outcome_label = _classify_outcome_label(status)
     outcome_reason = _position_outcome_reason(order, current_btc_price, status)
+    regime_fingerprint = _build_regime_fingerprint(
+        market_slug=order.market_slug,
+        observed_at=observed_at,
+        features=features,
+        up_snapshot=up_snapshot,
+        down_snapshot=down_snapshot,
+        current_btc_price=current_btc_price,
+        period_open_price_to_beat=order.target_btc_price,
+    )
     with open(log_path, "a", encoding="utf-8") as log_file:
         if log_file.tell() == 0:
             log_file.write(
@@ -378,6 +525,7 @@ def append_completed_order_tick(
                     f"btc_move_from_entry={btc_move_from_entry:.2f}",
                     f"btc_move_from_entry_pct={btc_move_from_entry_pct:.4f}%",
                     f"btc_gap_to_target={btc_gap_to_target:.2f}",
+                    f"market_time_remaining_seconds={_fmt(regime_fingerprint.get('time_remaining_seconds'))}",
                     f"position_state={status}",
                     f"target_description={describe_target(order)}",
                     f"outcome_label={outcome_label}",
@@ -400,6 +548,7 @@ def append_completed_order_tick(
                         f"feature_trailing_5m_open_price={_fmt(getattr(features, 'trailing_5m_open_price', None))}",
                         f"feature_delta_from_5m_pct={((getattr(features, 'delta_pct_from_trailing_5m_open', 0.0) or 0.0) * 100):.4f}%",
                         f"feature_rsi_14={getattr(features, 'rsi_14', None)}",
+                        "regime_fingerprint=" + json.dumps(regime_fingerprint, sort_keys=True),
                         "",
                     ]
                 )
@@ -418,15 +567,20 @@ def append_completed_order_tick(
             os.replace(log_path, final_path)
         except FileNotFoundError:
             pass
+    return outcome_label
 
 
-def finalize_completed_orders(previous_orders, current_btc_price: float) -> None:
+def finalize_completed_orders(previous_orders, current_btc_price: float) -> int:
+    loss_count = 0
     for order in previous_orders:
-        append_completed_order_tick(
+        outcome_label = append_completed_order_tick(
             order,
             current_btc_price=current_btc_price,
             phase="COMPLETED",
         )
+        if outcome_label == "loss":
+            loss_count += 1
+    return loss_count
 
 
 def update_active_order_logs(
@@ -448,40 +602,14 @@ def update_active_order_logs(
         )
 
 
-def _get_wallet_value_for_limit_check(account: AccountBalanceSnapshot):
-    if account is None:
-        return None
-    total_account_value = getattr(account, "total_account_value", None)
-    cash_balance = getattr(account, "cash_balance", None)
-    if total_account_value is not None:
-        return float(total_account_value)
-    if cash_balance is not None:
-        return float(cash_balance)
-    return None
-
-
-def enforce_session_trade_limit(cfg) -> None:
-    global _SESSION_PENDING_EXIT_AFTER_PERIOD
-    if getattr(cfg, "max_automated_trades", 0) <= 0:
+def enforce_session_loss_trade_limit(cfg) -> None:
+    if getattr(cfg, "max_automated_loss_trades", 0) <= 0:
         return
-    if _SESSION_AUTOMATED_TRADES < cfg.max_automated_trades:
-        return
-    if _SESSION_FIRST_TRADE_WALLET_VALUE is None:
-        return
-    current_account = get_account_balance_snapshot()
-    current_wallet_value = _get_wallet_value_for_limit_check(current_account)
-    if current_wallet_value is None:
-        return
-    if current_wallet_value >= _SESSION_FIRST_TRADE_WALLET_VALUE:
-        return
-    if get_active_orders():
-        _SESSION_PENDING_EXIT_AFTER_PERIOD = True
+    if _SESSION_LOSS_TRADES < cfg.max_automated_loss_trades:
         return
     print(
-        "Max automated trades for this session has been reached with a net loss "
-        f"({_SESSION_AUTOMATED_TRADES}/{cfg.max_automated_trades}; "
-        f"first_trade_wallet_value={_SESSION_FIRST_TRADE_WALLET_VALUE:.3f}; "
-        f"current_wallet_value={current_wallet_value:.3f}). "
+        "Max automated loss trades for this session has been reached "
+        f"({_SESSION_LOSS_TRADES}/{cfg.max_automated_loss_trades}). "
         "Exiting BTC agent."
     )
     sys.exit(0)
@@ -808,12 +936,10 @@ def print_trade_execution_result(result, debug: bool) -> None:
 
 def run_once() -> None:
     global _FIRST_LOOP
-    global _SESSION_AUTOMATED_TRADES
-    global _SESSION_FIRST_TRADE_WALLET_VALUE
-    global _SESSION_PENDING_EXIT_AFTER_PERIOD
+    global _SESSION_LOSS_TRADES
     cfg = get_trading_config()
     use_recommended_limit = getattr(cfg, "use_recommended_limit", True)
-    enforce_session_trade_limit(cfg)
+    enforce_session_loss_trade_limit(cfg)
     if cfg.debug:
         print(f"[{datetime.now(timezone.utc).isoformat()}] BTC up/down agent tick")
 
@@ -846,7 +972,7 @@ def run_once() -> None:
                     final_resolution_btc_price = float(market.settlement_threshold)
                 elif previous_market_slug:
                     final_resolution_btc_price = fetch_btc_resolution_price_for_slug(previous_market_slug)
-                finalize_completed_orders(
+                _SESSION_LOSS_TRADES += finalize_completed_orders(
                     previous_orders,
                     final_resolution_btc_price if final_resolution_btc_price is not None else fetch_btc_spot_price(),
                 )
@@ -857,9 +983,7 @@ def run_once() -> None:
         print(f"New 5-minute market period detected: {market.slug}")
         clear_price_to_beat_debug_files()
         _DEBUG_WRITTEN_SLUGS.clear()
-        if _SESSION_PENDING_EXIT_AFTER_PERIOD:
-            _SESSION_PENDING_EXIT_AFTER_PERIOD = False
-            enforce_session_trade_limit(cfg)
+        enforce_session_loss_trade_limit(cfg)
     if cfg.debug:
         write_price_to_beat_debug_file(market.slug)
     if not has_valid_price_to_beat(market.settlement_threshold):
@@ -1024,11 +1148,6 @@ def run_once() -> None:
         else:
             decision_snapshot = get_token_quote_snapshot(market.down_token_id, decision=decision)
 
-    first_trade_wallet_baseline = _SESSION_FIRST_TRADE_WALLET_VALUE
-    if first_trade_wallet_baseline is None:
-        baseline_account = get_account_balance_snapshot()
-        first_trade_wallet_baseline = _get_wallet_value_for_limit_check(baseline_account)
-
     try:
         result = maybe_execute_trade(market, decision, features=features, snapshot=decision_snapshot)
     except RuntimeError as exc:
@@ -1039,9 +1158,6 @@ def run_once() -> None:
     print_trade_execution_result(result, debug=cfg.debug)
 
     if result.executed:
-        if _SESSION_FIRST_TRADE_WALLET_VALUE is None:
-            _SESSION_FIRST_TRADE_WALLET_VALUE = first_trade_wallet_baseline
-        _SESSION_AUTOMATED_TRADES += 1
         if cfg.max_trades_per_period > 1:
             set_trade_cooldown(3)
 
@@ -1084,7 +1200,7 @@ def run_once() -> None:
             down_snapshot=down_snapshot,
         )
 
-    enforce_session_trade_limit(cfg)
+    enforce_session_loss_trade_limit(cfg)
 
     active_btc_price = features.price_usd
     update_active_order_logs(

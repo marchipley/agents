@@ -104,7 +104,7 @@ Optional / supported:
 - `BTC_AGENT_MAX_TRADE_USD` default: `5`
 - `BTC_AGENT_TRADE_SHARES_SIZE` default: `5` and enforced minimum: `5`
 - `BTC_AGENT_MAX_TRADES_PER_PERIOD` default: `1`
-- `MAX_AUTOMATED_TRADES` default: `0` meaning disabled; when set above zero, the agent saves a wallet-value baseline immediately before the first successful automated trade and, after that many successful automated trades, only stops if the current wallet value is below that first-trade baseline
+- `MAX_AUTOMATED_LOSS_TRADES` default: `0` meaning disabled; when set above zero, the agent counts completed losing trades since launch and stops once that loss count reaches the configured threshold
 - `CONFIDENCE` optional alias for `BTC_AGENT_MIN_CONFIDENCE`
 - `BTC_AGENT_MIN_CONFIDENCE` default: `0.7`
 - `BTC_AGENT_MAX_ENTRY_PRICE` default: `0.62`
@@ -152,7 +152,7 @@ What the BTC agent does today:
 - Writes a per-slug order-tracking file under `completed_orders/` for each executed order, appending one status snapshot per tick and a final completion snapshot when the market rolls into the next slug.
 - Evaluates paper-order win/loss status against the market-period settlement reference, preferring Polymarket’s parsed threshold and otherwise falling back to the closest retained BTC sample at the start of the 5-minute period rather than the trade-entry BTC price.
 - Enforces `BTC_AGENT_MAX_TRADES_PER_PERIOD` per 5-minute market slug; once that limit is reached, subsequent loop ticks skip quote snapshots and LLM trade decisions until the next market window begins.
-- Enforces `MAX_AUTOMATED_TRADES` across the full process session as a loss-aware stop; once that many automated trades have actually executed, the agent compares the current wallet value to the wallet value recorded immediately before the first executed automated trade and exits only if the wallet is lower.
+- Enforces `MAX_AUTOMATED_LOSS_TRADES` across the full process session as a completed-loss stop; once that many trades have actually settled as losses, the agent exits.
 - When `BTC_AGENT_DEBUG=false`, suppresses most verbose diagnostics and only prints a compact subset of geolocation, balances, quote snapshots, BTC features, LLM decision fields, and final paper execution fields.
 - In non-debug mode, account balances print only on the first loop iteration and again at the start of each new 5-minute market period.
 - Stops the process before live order submission when the account does not have enough `cash_balance_pusd` to cover the configured live trade size at the recommended limit price plus the estimated fee buffer.
@@ -204,6 +204,205 @@ When modifying this repo, future Codex runs should:
 - Avoid changing unrelated upstream modules just because they exist; keep BTC-specific logic isolated where practical.
 - Add or update tests when changing pricing, market selection, decision parsing, or execution gating.
 - Update this file whenever architecture, runtime flow, env vars, or user-facing behavior changes.
+
+## Improvement Roadmap
+
+The BTC agent is now in a measurement-and-refinement phase. Before making larger strategy changes, each phase should be completed in order so the team has the evidence needed to justify the next step.
+
+### Phase 1: Logging And Regime Capture
+
+Goal:
+
+- Capture enough per-tick context to explain why a trade won or lost.
+
+Current status:
+
+- In progress.
+- Completed-order logs now include richer per-tick feature data, active-order snapshots, book context, and a deterministic `regime_fingerprint`.
+
+Data required:
+
+- `btc_price`
+- `delta_prev_tick`
+- `momentum_1m`
+- `momentum_5m`
+- `volatility_5m`
+- `window_open_price`
+- `delta_from_window_pct`
+- `trailing_5m_open_price`
+- `delta_from_5m_pct`
+- `rsi_14`
+- `time_remaining_seconds`
+- `threshold_gap_usd`
+- `threshold_gap_pct`
+- `best_bid`
+- `best_ask`
+- `best_bid_size`
+- `best_ask_size`
+- `spread`
+- `spread_bps`
+- `top_level_book_imbalance`
+- final order outcome classification using the resolved closing price
+
+Completion criteria:
+
+- Completed-order files consistently explain wins and losses without requiring manual reconstruction from console logs.
+- Rollover finalization uses the next slug’s `price_to_beat` or an equivalent resolved closing price rather than a stale live spot sample.
+
+### Phase 2: Indicator Expansion
+
+Goal:
+
+- Add faster and more context-aware indicators so the agent can distinguish parabolic continuation, mean reversion, and ranging behavior.
+
+Planned additions:
+
+- `RSI(9)` alongside the current `RSI(14)`
+- `EMA(9)` and `EMA(21)` plus cross direction
+- `ATR(14)` or similar volatility-normalized move measure
+- `ADX(14)` for trend-strength detection
+- optional Bollinger Band Width or equivalent squeeze detector
+
+Data required:
+
+- rolling BTC history with enough depth for the new lookbacks
+- per-tick logging of all new indicator values
+- regime comparison between old and new indicator interpretations
+
+Completion criteria:
+
+- New indicators are computed reliably on every eligible tick.
+- Completed-order files show the new indicator values for later post-trade review.
+
+### Phase 3: Execution And Microstructure Features
+
+Goal:
+
+- Improve trade-quality filtering with execution-aware data rather than price-only context.
+
+Planned additions:
+
+- richer order book imbalance metrics
+- realized slippage logging for executed live orders
+- distance between quoted and executed price
+- optional book-depth proxy if a practical low-cost implementation is available
+
+Data required:
+
+- pre-trade quote snapshot
+- execution snapshot
+- final fill price
+- tick-by-tick spread and imbalance history while an order is active
+
+Completion criteria:
+
+- Loss analysis can separate bad prediction from bad execution.
+- The logs clearly show whether a loss came from signal quality, spread expansion, or thin liquidity.
+
+### Phase 4: Prompt And Decision Structure
+
+Goal:
+
+- Improve the LLM’s reasoning quality before any fine-tuning by making the prompt explicitly regime-aware and more structured.
+
+Planned changes:
+
+- enforce reasoning structure for:
+  - regime detection
+  - indicator reconcilement
+  - threshold proximity
+  - final decision/confidence
+- prefer concise structured reasoning over generic TA narration
+- add explicit handling for momentum traps, oversold bounces, and parabolic continuations
+
+Data required:
+
+- Phase 1 and Phase 2 logs
+- a representative sample of wins and losses with completed-order files
+
+Completion criteria:
+
+- LLM reasons are more specific and consistent across similar market regimes.
+- Fewer losses are attributable to obvious indicator misreads like fading a strong parabolic move.
+
+### Phase 5: Multi-Timeframe Context
+
+Goal:
+
+- Add higher-timeframe directional context so the 5-minute trigger is not acting in isolation.
+
+Planned additions:
+
+- 15-minute trend context
+- 1-hour trend context
+- alignment fields such as:
+  - higher-timeframe trend direction
+  - price vs higher-timeframe averages
+  - higher-timeframe volatility state
+
+Data required:
+
+- higher-timeframe BTC samples or derived aggregates
+- logging of multi-timeframe values into completed-order files
+
+Completion criteria:
+
+- The LLM can explicitly reference short-term vs higher-timeframe alignment in its decision logic.
+
+### Phase 6: Dataset Labeling And Model Evaluation
+
+Goal:
+
+- Convert completed-order logs into a usable training and evaluation dataset.
+
+Planned workflow:
+
+- separate wins and losses into labeled trajectories
+- attach final close outcome and relevant forward labels
+- produce structured examples for later prompt testing or fine-tuning
+
+Data required:
+
+- completed-order files with full pre-order and active-order history
+- deterministic final outcome price
+- original decision reasoning and execution context
+
+Completion criteria:
+
+- A consistent labeled dataset exists for prompt iteration and later fine-tuning experiments.
+
+### Phase 7: Fine-Tuning / Shadow Testing
+
+Goal:
+
+- Only after the data pipeline and prompt structure are stable, test a specialized model or shadow-decision path.
+
+Planned workflow:
+
+- create a shadow decision engine using the labeled dataset
+- compare production vs shadow decisions without executing shadow trades
+- measure improvements before promotion
+
+Data required:
+
+- Phase 6 labeled dataset
+- clear evaluation metrics such as win rate, drawdown behavior, and regime-specific accuracy
+
+Completion criteria:
+
+- Shadow results consistently outperform the existing decision path before any promotion to live usage.
+
+## Phase Tracking Rules
+
+Future Codex runs should:
+
+- treat the phases above as the default improvement sequence unless the user explicitly reprioritizes
+- avoid jumping to fine-tuning before the logging and indicator phases are mature
+- update this roadmap whenever a phase materially changes status
+- note for each completed phase:
+  - what data became available
+  - what new risk was reduced
+  - what the next phase now depends on
 
 Current live trading path notes:
 
