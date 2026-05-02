@@ -480,6 +480,73 @@ def _extract_previous_period_final_price_from_next_data(
     return best_match
 
 
+def _extract_current_period_close_from_next_data(payload: dict, slug: str) -> Optional[float]:
+    slug_match = re.search(r"btc-updown-5m-(\d+)$", slug)
+    if not slug_match:
+        return None
+    current_start_ts = int(slug_match.group(1))
+    current_end_ts = current_start_ts + 300
+
+    def _walk(node) -> Optional[float]:
+        if isinstance(node, dict):
+            results = node.get("results")
+            if isinstance(results, list):
+                for item in results:
+                    if not isinstance(item, dict):
+                        continue
+                    close_price = _coerce_btc_threshold(item.get("closePrice"))
+                    end_ts = _coerce_timestamp(item.get("endTime") or item.get("endDate"))
+                    if close_price is not None and end_ts == current_end_ts:
+                        return close_price
+
+            for value in node.values():
+                match = _walk(value)
+                if match is not None:
+                    return match
+
+        if isinstance(node, list):
+            for value in node:
+                match = _walk(value)
+                if match is not None:
+                    return match
+
+        return None
+
+    return _walk(payload)
+
+
+def _extract_current_period_final_price_from_next_data(payload: dict, slug: str) -> Optional[float]:
+    slug_match = re.search(r"btc-updown-5m-(\d+)$", slug)
+    if not slug_match:
+        return None
+    current_start_ts = int(slug_match.group(1))
+    current_end_ts = current_start_ts + 300
+
+    def _walk(node) -> Optional[float]:
+        if isinstance(node, dict):
+            event_metadata = node.get("eventMetadata")
+            if isinstance(event_metadata, dict):
+                final_price = _coerce_btc_threshold(event_metadata.get("finalPrice"))
+                end_ts = _coerce_timestamp(node.get("endTime") or node.get("endDate"))
+                if final_price is not None and end_ts == current_end_ts:
+                    return final_price
+
+            for value in node.values():
+                match = _walk(value)
+                if match is not None:
+                    return match
+
+        if isinstance(node, list):
+            for value in node:
+                match = _walk(value)
+                if match is not None:
+                    return match
+
+        return None
+
+    return _walk(payload)
+
+
 def _fetch_next_data_payload(
     slug: str,
     build_id: str,
@@ -795,6 +862,42 @@ def _fetch_vatic_price_to_beat_by_slug(slug: str) -> Optional[float]:
         return _coerce_btc_threshold(resp.text.strip())
 
     return _extract_vatic_price_from_response(payload)
+
+
+def fetch_btc_resolution_price_for_slug(slug: str) -> Optional[float]:
+    if not slug.startswith("btc-updown-5m-"):
+        return None
+
+    try:
+        html = _fetch_polymarket_page(slug)
+    except Exception:
+        return None
+
+    embedded_payload = _extract_embedded_next_data_payload(html)
+    payloads: list[dict] = []
+    if isinstance(embedded_payload, dict):
+        payloads.append(embedded_payload)
+
+    build_id = _extract_next_build_id(html)
+    if build_id:
+        try:
+            payload_chain = _fetch_next_data_payload_chain(slug, build_id)
+            for _, payload in payload_chain:
+                if isinstance(payload, dict):
+                    payloads.append(payload)
+        except Exception:
+            pass
+
+    for payload in payloads:
+        close_price = _extract_current_period_close_from_next_data(payload, slug)
+        if close_price is not None:
+            return close_price
+
+        final_price = _extract_current_period_final_price_from_next_data(payload, slug)
+        if final_price is not None:
+            return final_price
+
+    return None
 
 
 def _fetch_price_to_beat_by_slug(slug: str) -> Optional[float]:

@@ -2,6 +2,7 @@
 
 import math
 import requests
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional, Any, Dict, List, Tuple
@@ -575,7 +576,21 @@ def _build_rejected_trade_result(
 
 
 def _get_time_remaining_seconds(market: BtcUpDownMarket) -> int:
-    return max(market.end_ts - int(datetime.now(timezone.utc).timestamp()), 0)
+    now_ts = int(datetime.now(timezone.utc).timestamp())
+    canonical_end_ts = getattr(market, "start_ts", 0) + 300 if getattr(market, "start_ts", None) else None
+    effective_end_ts = getattr(market, "end_ts", None)
+
+    # BTC 5-minute markets are timestamp-aligned. Some upstream payloads can surface
+    # a stale or already-expired end_ts during slug rollover, so prefer the canonical
+    # 5-minute boundary derived from the slug-aligned start when it is later.
+    if canonical_end_ts is not None:
+        if effective_end_ts is None or canonical_end_ts > effective_end_ts:
+            effective_end_ts = canonical_end_ts
+
+    if effective_end_ts is None:
+        return 0
+
+    return max(int(effective_end_ts) - now_ts, 0)
 
 
 def _get_implied_probability(snapshot: TokenQuoteSnapshot) -> Optional[float]:
@@ -810,6 +825,16 @@ def _is_fok_full_fill_error(exc: Exception) -> bool:
     return "couldn't be fully filled" in message or "fully filled or killed" in message
 
 
+def _extract_minimum_size_from_error(exc: Exception) -> Optional[float]:
+    match = re.search(r"minimum:\s*([0-9]+(?:\.[0-9]+)?)", str(exc), re.IGNORECASE)
+    if not match:
+        return None
+    try:
+        return float(match.group(1))
+    except ValueError:
+        return None
+
+
 def ensure_live_trade_cash_available(required_cash: float) -> AccountBalanceSnapshot:
     account = get_account_balance_snapshot()
     if account.cash_balance is None:
@@ -848,40 +873,47 @@ def _execute_live_trade(
         submission_limit_price,
         cfg.live_min_order_usd,
     )
-    order_notional = _get_order_notional(size, submission_limit_price)
-
-    estimated_fee = _estimate_live_fee(size, submission_limit_price, cfg.live_fee_rate_bps)
-    required_cash = _get_required_live_cash(
-        size,
-        submission_limit_price,
-        cfg.live_fee_rate_bps,
-    )
-    ensure_live_trade_cash_available(required_cash)
-
     client = Polymarket()
-    try:
-        response = client.execute_order(
+
+    def _submit_order(order_size: float, fok_enabled: bool):
+        order_notional_local = _get_order_notional(order_size, submission_limit_price)
+        estimated_fee_local = _estimate_live_fee(order_size, submission_limit_price, cfg.live_fee_rate_bps)
+        required_cash_local = _get_required_live_cash(
+            order_size,
+            submission_limit_price,
+            cfg.live_fee_rate_bps,
+        )
+        ensure_live_trade_cash_available(required_cash_local)
+        response_local = client.execute_order(
             price=submission_limit_price,
-            size=size,
+            size=order_size,
             side="BUY",
             token_id=snapshot.token_id,
             fee_rate_bps=cfg.live_fee_rate_bps,
             tick_size=snapshot.tick_size,
-            use_fok=use_fok,
+            use_fok=fok_enabled,
         )
+        return response_local, order_notional_local, estimated_fee_local, required_cash_local
+
+    minimum_size_retry_applied = None
+    try:
+        response, order_notional, estimated_fee, required_cash = _submit_order(size, use_fok)
     except Exception as exc:
-        if use_fok and _is_fok_full_fill_error(exc):
+        minimum_size = _extract_minimum_size_from_error(exc)
+        if minimum_size is not None and minimum_size > size:
+            try:
+                size = minimum_size
+                response, order_notional, estimated_fee, required_cash = _submit_order(size, use_fok)
+                minimum_size_retry_applied = minimum_size
+            except Exception as minimum_retry_exc:
+                raise RuntimeError(
+                    "Live order submission failed after minimum-size retry: "
+                    f"initial={exc}; retry={minimum_retry_exc}"
+                ) from minimum_retry_exc
+        elif use_fok and _is_fok_full_fill_error(exc):
             if time_remaining_seconds > 5:
                 try:
-                    response = client.execute_order(
-                        price=submission_limit_price,
-                        size=size,
-                        side="BUY",
-                        token_id=snapshot.token_id,
-                        fee_rate_bps=cfg.live_fee_rate_bps,
-                        tick_size=snapshot.tick_size,
-                        use_fok=False,
-                    )
+                    response, order_notional, estimated_fee, required_cash = _submit_order(size, False)
                     order_type_label = "GTC (after FOK retry)"
                 except Exception as retry_exc:
                     raise RuntimeError(
@@ -905,6 +937,10 @@ def _execute_live_trade(
         else:
             raise RuntimeError(f"Live order submission failed: {exc}") from exc
 
+    minimum_size_note = ""
+    if minimum_size_retry_applied is not None:
+        minimum_size_note = f"minimum_size_retry={minimum_size_retry_applied:.4f}; "
+
     return TradeExecutionResult(
         executed=True,
         side=decision.side,
@@ -919,6 +955,7 @@ def _execute_live_trade(
             f"edge={edge:.3f}; "
             f"time_remaining={time_remaining_seconds}s; "
             f"order_type={order_type_label}; "
+            f"{minimum_size_note}"
             f"required_cash={required_cash:.3f}; "
             f"estimated_fee={estimated_fee:.3f}; fee_rate_bps={cfg.live_fee_rate_bps}; "
             f"{snapshot.submit_reason})"

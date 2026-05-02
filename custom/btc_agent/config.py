@@ -146,7 +146,7 @@ def get_trading_config() -> TradingConfig:
         use_recommended_limit=_parse_bool_env("USE_RECOMMENDED_LIMIT", True),
         disable_liquidity_filter=_parse_bool_env("DISABLE_LIQUIDITY_FILTER", False),
         max_trade_usd=float(os.getenv("BTC_AGENT_MAX_TRADE_USD", "5")),
-        trade_shares_size=max(float(os.getenv("BTC_AGENT_TRADE_SHARES_SIZE", "5")), 5.0),
+        trade_shares_size=max(float(os.getenv("BTC_AGENT_TRADE_SHARES_SIZE", "5")), 0.0),
         max_trades_per_period=max(int(os.getenv("BTC_AGENT_MAX_TRADES_PER_PERIOD", "1")), 1),
         max_automated_trades=max(int(os.getenv("MAX_AUTOMATED_TRADES", "0")), 0),
         min_confidence=float(

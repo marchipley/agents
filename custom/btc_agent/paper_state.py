@@ -16,6 +16,7 @@ class ActivePaperOrder:
     token_id: str
     target_btc_price: float
     entry_btc_price: float
+    trade_number_in_period: int = 1
     target_is_approximate: bool = False
     placed_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -25,6 +26,7 @@ class PaperTradingState:
     market_slug: Optional[str] = None
     market_title: Optional[str] = None
     trades_executed: int = 0
+    trade_cooldown_loops_remaining: int = 0
     active_orders: List[ActivePaperOrder] = field(default_factory=list)
 
 
@@ -53,6 +55,22 @@ def get_state() -> PaperTradingState:
 def record_executed_trade(order: ActivePaperOrder) -> None:
     _STATE.trades_executed += 1
     _STATE.active_orders.append(order)
+
+
+def set_trade_cooldown(loop_count: int) -> None:
+    _STATE.trade_cooldown_loops_remaining = max(int(loop_count), 0)
+
+
+def get_trade_cooldown_remaining() -> int:
+    return max(int(_STATE.trade_cooldown_loops_remaining), 0)
+
+
+def consume_trade_cooldown_loop() -> int:
+    remaining = get_trade_cooldown_remaining()
+    if remaining <= 0:
+        return 0
+    _STATE.trade_cooldown_loops_remaining = remaining - 1
+    return remaining
 
 
 def get_active_orders() -> List[ActivePaperOrder]:

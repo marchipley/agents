@@ -9,10 +9,12 @@ import time
 import sys
 import termios
 import tty
+from typing import Optional
 
 from .config import get_trading_config
 from .market_lookup import (
     build_price_to_beat_debug_reports,
+    fetch_btc_resolution_price_for_slug,
     find_current_btc_updown_market,
     get_btc_updown_market_by_slug,
 )
@@ -38,10 +40,13 @@ from .executor import (
 from .paper_state import (
     ActivePaperOrder,
     classify_position,
+    consume_trade_cooldown_loop,
     describe_target,
     get_active_orders,
+    get_trade_cooldown_remaining,
     get_state,
     record_executed_trade,
+    set_trade_cooldown,
     sync_period_state,
 )
 from scripts.python.check_public_ip_indonesia import (
@@ -54,6 +59,7 @@ _FIRST_LOOP = True
 _DEBUG_WRITTEN_SLUGS = set()
 _SESSION_AUTOMATED_TRADES = 0
 _SESSION_FIRST_TRADE_WALLET_VALUE = None
+_SESSION_PENDING_EXIT_AFTER_PERIOD = False
 
 
 class QuitKeyMonitor:
@@ -133,11 +139,27 @@ def _extract_slug_timestamp(market_slug: str) -> str:
 
 
 def _completed_order_log_path(market_slug: str) -> str:
+    return _completed_order_log_path_for_trade(market_slug)
+
+
+def _trade_number_suffix(trade_number_in_period: Optional[int]) -> str:
+    cfg = get_trading_config()
+    if getattr(cfg, "max_trades_per_period", 1) <= 1:
+        return ""
+    if not trade_number_in_period or trade_number_in_period < 1:
+        return ""
+    return f"-{trade_number_in_period}"
+
+
+def _completed_order_log_path_for_trade(
+    market_slug: str,
+    trade_number_in_period: Optional[int] = None,
+) -> str:
     completed_orders_dir = os.path.join(os.getcwd(), "completed_orders")
     os.makedirs(completed_orders_dir, exist_ok=True)
     return os.path.join(
         completed_orders_dir,
-        f"completed_order_{_extract_slug_timestamp(market_slug)}.txt",
+        f"completed_order_{_extract_slug_timestamp(market_slug)}{_trade_number_suffix(trade_number_in_period)}.txt",
     )
 
 
@@ -150,12 +172,16 @@ def _pending_period_log_path(market_slug: str) -> str:
     )
 
 
-def _completed_order_final_log_path(market_slug: str, outcome_label: str) -> str:
+def _completed_order_final_log_path(
+    market_slug: str,
+    outcome_label: str,
+    trade_number_in_period: Optional[int] = None,
+) -> str:
     completed_orders_dir = os.path.join(os.getcwd(), "completed_orders")
     os.makedirs(completed_orders_dir, exist_ok=True)
     return os.path.join(
         completed_orders_dir,
-        f"completed_order_{outcome_label}_{_extract_slug_timestamp(market_slug)}.txt",
+        f"completed_order_{outcome_label}_{_extract_slug_timestamp(market_slug)}{_trade_number_suffix(trade_number_in_period)}.txt",
     )
 
 
@@ -211,8 +237,8 @@ def _snapshot_summary(prefix: str, snapshot: TokenQuoteSnapshot) -> list[str]:
 def append_pending_period_tick_analysis(
     market,
     *,
-    up_snapshot: TokenQuoteSnapshot,
-    down_snapshot: TokenQuoteSnapshot,
+    up_snapshot: TokenQuoteSnapshot = None,
+    down_snapshot: TokenQuoteSnapshot = None,
     features=None,
     decision=None,
     skip_reason: str = "",
@@ -238,8 +264,10 @@ def append_pending_period_tick_analysis(
             "phase=PRE_ORDER_TICK",
             f"period_open_price_to_beat={_fmt(market.settlement_threshold)}",
         ]
-        lines.extend(_snapshot_summary("up", up_snapshot))
-        lines.extend(_snapshot_summary("down", down_snapshot))
+        if up_snapshot is not None:
+            lines.extend(_snapshot_summary("up", up_snapshot))
+        if down_snapshot is not None:
+            lines.extend(_snapshot_summary("down", down_snapshot))
 
         if features is not None:
             lines.extend(
@@ -274,9 +302,12 @@ def append_pending_period_tick_analysis(
         log_file.write("\n".join(lines))
 
 
-def promote_pending_period_log_to_completed(market_slug: str) -> None:
+def promote_pending_period_log_to_completed(
+    market_slug: str,
+    trade_number_in_period: Optional[int] = None,
+) -> None:
     pending_path = _pending_period_log_path(market_slug)
-    completed_path = _completed_order_log_path(market_slug)
+    completed_path = _completed_order_log_path_for_trade(market_slug, trade_number_in_period)
     if not os.path.exists(pending_path):
         return
     if os.path.exists(completed_path):
@@ -302,9 +333,15 @@ def append_completed_order_tick(
     current_btc_price: float,
     phase: str,
     observed_at: datetime = None,
+    features=None,
+    up_snapshot: TokenQuoteSnapshot = None,
+    down_snapshot: TokenQuoteSnapshot = None,
 ) -> None:
     observed_at = observed_at or datetime.now(timezone.utc)
-    log_path = _completed_order_log_path(order.market_slug)
+    log_path = _completed_order_log_path_for_trade(
+        order.market_slug,
+        getattr(order, "trade_number_in_period", None),
+    )
     status = classify_position(order, current_btc_price)
     btc_move_from_entry = current_btc_price - order.entry_btc_price
     btc_move_from_entry_pct = (
@@ -349,8 +386,34 @@ def append_completed_order_tick(
                 ]
             )
         )
+        if features is not None:
+            log_file.write(
+                "\n".join(
+                    [
+                        f"feature_btc_price={_fmt(getattr(features, 'price_usd', None))}",
+                        f"feature_delta_prev_tick={getattr(features, 'delta_from_previous_tick', None)}",
+                        f"feature_momentum_1m={getattr(features, 'momentum_1m', None)}",
+                        f"feature_momentum_5m={getattr(features, 'momentum_5m', None)}",
+                        f"feature_volatility_5m={getattr(features, 'volatility_5m', None)}",
+                        f"feature_window_open_price={_fmt(getattr(features, 'window_open_price', None))}",
+                        f"feature_delta_from_window_pct={((getattr(features, 'delta_pct_from_window_open', 0.0) or 0.0) * 100):.4f}%",
+                        f"feature_trailing_5m_open_price={_fmt(getattr(features, 'trailing_5m_open_price', None))}",
+                        f"feature_delta_from_5m_pct={((getattr(features, 'delta_pct_from_trailing_5m_open', 0.0) or 0.0) * 100):.4f}%",
+                        f"feature_rsi_14={getattr(features, 'rsi_14', None)}",
+                        "",
+                    ]
+                )
+            )
+        if up_snapshot is not None:
+            log_file.write("\n".join(_snapshot_summary("active_up", up_snapshot) + [""]))
+        if down_snapshot is not None:
+            log_file.write("\n".join(_snapshot_summary("active_down", down_snapshot) + [""]))
     if phase == "COMPLETED":
-        final_path = _completed_order_final_log_path(order.market_slug, outcome_label)
+        final_path = _completed_order_final_log_path(
+            order.market_slug,
+            outcome_label,
+            getattr(order, "trade_number_in_period", None),
+        )
         try:
             os.replace(log_path, final_path)
         except FileNotFoundError:
@@ -366,13 +429,22 @@ def finalize_completed_orders(previous_orders, current_btc_price: float) -> None
         )
 
 
-def update_active_order_logs(current_btc_price: float, observed_at: datetime = None) -> None:
+def update_active_order_logs(
+    current_btc_price: float,
+    observed_at: datetime = None,
+    features=None,
+    up_snapshot: TokenQuoteSnapshot = None,
+    down_snapshot: TokenQuoteSnapshot = None,
+) -> None:
     for order in get_active_orders():
         append_completed_order_tick(
             order,
             current_btc_price=current_btc_price,
             phase="ACTIVE",
             observed_at=observed_at,
+            features=features,
+            up_snapshot=up_snapshot,
+            down_snapshot=down_snapshot,
         )
 
 
@@ -389,6 +461,7 @@ def _get_wallet_value_for_limit_check(account: AccountBalanceSnapshot):
 
 
 def enforce_session_trade_limit(cfg) -> None:
+    global _SESSION_PENDING_EXIT_AFTER_PERIOD
     if getattr(cfg, "max_automated_trades", 0) <= 0:
         return
     if _SESSION_AUTOMATED_TRADES < cfg.max_automated_trades:
@@ -400,6 +473,9 @@ def enforce_session_trade_limit(cfg) -> None:
     if current_wallet_value is None:
         return
     if current_wallet_value >= _SESSION_FIRST_TRADE_WALLET_VALUE:
+        return
+    if get_active_orders():
+        _SESSION_PENDING_EXIT_AFTER_PERIOD = True
         return
     print(
         "Max automated trades for this session has been reached with a net loss "
@@ -509,10 +585,16 @@ def print_quote_snapshot_from_snapshot(
     q: TokenQuoteSnapshot,
     debug: bool = True,
 ) -> None:
+    cfg = get_trading_config()
+    use_recommended_limit = getattr(cfg, "use_recommended_limit", True)
     print(f"{label} quote snapshot:")
     if not debug:
-        print(f"  buy_quote              = {_fmt(q.buy_quote)}")
-        print(f"  recommended_limit_price= {_fmt(q.recommended_limit_price)}")
+        if use_recommended_limit:
+            print(f"  buy_quote              = {_fmt(q.buy_quote)}")
+            print(f"  recommended_limit_price= {_fmt(q.recommended_limit_price)}")
+        else:
+            print(f"  target_limit_price     = {_fmt(q.target_limit_price)}")
+            print(f"  reference_price        = {_fmt(q.reference_price)}")
         print(f"  ok_to_submit           = {q.ok_to_submit}")
         print(f"  submit_reason          = {q.submit_reason}")
         return
@@ -728,7 +810,9 @@ def run_once() -> None:
     global _FIRST_LOOP
     global _SESSION_AUTOMATED_TRADES
     global _SESSION_FIRST_TRADE_WALLET_VALUE
+    global _SESSION_PENDING_EXIT_AFTER_PERIOD
     cfg = get_trading_config()
+    use_recommended_limit = getattr(cfg, "use_recommended_limit", True)
     enforce_session_trade_limit(cfg)
     if cfg.debug:
         print(f"[{datetime.now(timezone.utc).isoformat()}] BTC up/down agent tick")
@@ -752,10 +836,20 @@ def run_once() -> None:
         print_account_snapshot_from_snapshot(account, debug=cfg.debug)
         enforce_minimum_wallet_balance(account)
         _FIRST_LOOP = False
+
+    market = resolve_price_to_beat_with_retries(market)
     if period_changed:
+        final_resolution_btc_price = None
         if previous_orders:
             try:
-                finalize_completed_orders(previous_orders, fetch_btc_spot_price())
+                if has_valid_price_to_beat(market.settlement_threshold):
+                    final_resolution_btc_price = float(market.settlement_threshold)
+                elif previous_market_slug:
+                    final_resolution_btc_price = fetch_btc_resolution_price_for_slug(previous_market_slug)
+                finalize_completed_orders(
+                    previous_orders,
+                    final_resolution_btc_price if final_resolution_btc_price is not None else fetch_btc_spot_price(),
+                )
             except Exception:
                 pass
         elif previous_market_slug:
@@ -763,8 +857,9 @@ def run_once() -> None:
         print(f"New 5-minute market period detected: {market.slug}")
         clear_price_to_beat_debug_files()
         _DEBUG_WRITTEN_SLUGS.clear()
-
-    market = resolve_price_to_beat_with_retries(market)
+        if _SESSION_PENDING_EXIT_AFTER_PERIOD:
+            _SESSION_PENDING_EXIT_AFTER_PERIOD = False
+            enforce_session_trade_limit(cfg)
     if cfg.debug:
         write_price_to_beat_debug_file(market.slug)
     if not has_valid_price_to_beat(market.settlement_threshold):
@@ -783,30 +878,97 @@ def run_once() -> None:
                 f"Trade limit reached for current period: "
                 f"{state.trades_executed}/{cfg.max_trades_per_period}"
             )
-        print_active_orders(fetch_btc_spot_price())
+        active_orders = get_active_orders()
+        if active_orders:
+            up_snapshot = None
+            down_snapshot = None
+            if use_recommended_limit:
+                up_snapshot = get_token_quote_snapshot(market.up_token_id)
+                down_snapshot = get_token_quote_snapshot(market.down_token_id)
+            try:
+                features = build_btc_features(window_start_ts=market.start_ts)
+                current_btc_price = features.price_usd
+                observed_at = features.as_of
+            except Exception:
+                features = None
+                current_btc_price = fetch_btc_spot_price()
+                observed_at = None
+            update_active_order_logs(
+                current_btc_price,
+                observed_at=observed_at,
+                features=features,
+                up_snapshot=up_snapshot,
+                down_snapshot=down_snapshot,
+            )
+        else:
+            current_btc_price = fetch_btc_spot_price()
+        print_active_orders(current_btc_price)
         if cfg.debug:
             print("-" * 80)
         return
+
+    if cfg.max_trades_per_period > 1 and state.trades_executed > 0:
+        cooldown_loops_remaining = get_trade_cooldown_remaining()
+        if cooldown_loops_remaining > 0:
+            print_market_context(market, debug=cfg.debug)
+            try:
+                features = build_btc_features(window_start_ts=market.start_ts)
+                print_features(features, debug=cfg.debug)
+                current_btc_price = features.price_usd
+                observed_at = features.as_of
+            except Exception:
+                features = None
+                current_btc_price = fetch_btc_spot_price()
+                observed_at = None
+
+            up_snapshot = None
+            down_snapshot = None
+            active_orders = get_active_orders()
+            if active_orders and use_recommended_limit:
+                up_snapshot = get_token_quote_snapshot(market.up_token_id)
+                down_snapshot = get_token_quote_snapshot(market.down_token_id)
+
+            if active_orders:
+                update_active_order_logs(
+                    current_btc_price,
+                    observed_at=observed_at,
+                    features=features,
+                    up_snapshot=up_snapshot,
+                    down_snapshot=down_snapshot,
+                )
+                print_active_orders(current_btc_price)
+
+            consume_trade_cooldown_loop()
+            print_llm_skip_reason(
+                "trade cooldown active after prior execution "
+                f"({cooldown_loops_remaining}/3 loops remaining before another trade is allowed)"
+            )
+            if cfg.debug:
+                print("-" * 80)
+            return
 
     print_market_context(market, debug=cfg.debug)
 
-    up_snapshot = get_token_quote_snapshot(market.up_token_id)
-    down_snapshot = get_token_quote_snapshot(market.down_token_id)
-    print_quote_snapshot_from_snapshot("UP", up_snapshot, debug=cfg.debug)
-    print_quote_snapshot_from_snapshot("DOWN", down_snapshot, debug=cfg.debug)
+    up_snapshot = None
+    down_snapshot = None
+    if use_recommended_limit:
+        up_snapshot = get_token_quote_snapshot(market.up_token_id)
+        down_snapshot = get_token_quote_snapshot(market.down_token_id)
+        print_quote_snapshot_from_snapshot("UP", up_snapshot, debug=cfg.debug)
+        print_quote_snapshot_from_snapshot("DOWN", down_snapshot, debug=cfg.debug)
 
-    if not up_snapshot.ok_to_submit and not down_snapshot.ok_to_submit:
-        skip_reason = both_sides_untradable_reason(up_snapshot, down_snapshot)
-        append_pending_period_tick_analysis(
-            market,
-            up_snapshot=up_snapshot,
-            down_snapshot=down_snapshot,
-            skip_reason=skip_reason,
-        )
-        print_llm_skip_reason(skip_reason)
-        if cfg.debug:
-            print("-" * 80)
-        return
+        if not up_snapshot.ok_to_submit and not down_snapshot.ok_to_submit:
+            skip_reason = both_sides_untradable_reason(up_snapshot, down_snapshot)
+            append_pending_period_tick_analysis(
+                market,
+                up_snapshot=up_snapshot,
+                down_snapshot=down_snapshot,
+                skip_reason=skip_reason,
+            )
+            print_llm_skip_reason(skip_reason)
+            if cfg.debug:
+                print("-" * 80)
+            return
 
     features = build_btc_features(window_start_ts=market.start_ts)
     print_features(features, debug=cfg.debug)
@@ -838,23 +1000,29 @@ def run_once() -> None:
 
     decision_snapshot = None
     if decision.side == "UP":
-        decision_snapshot = get_decision_quote_snapshot(
-            market,
-            decision,
-            up_snapshot,
-            down_snapshot,
-        )
-        if cfg.debug:
-            print_quote_snapshot_from_snapshot("UP (with decision)", decision_snapshot, debug=True)
+        if use_recommended_limit:
+            decision_snapshot = get_decision_quote_snapshot(
+                market,
+                decision,
+                up_snapshot,
+                down_snapshot,
+            )
+            if cfg.debug:
+                print_quote_snapshot_from_snapshot("UP (with decision)", decision_snapshot, debug=True)
+        else:
+            decision_snapshot = get_token_quote_snapshot(market.up_token_id, decision=decision)
     elif decision.side == "DOWN":
-        decision_snapshot = get_decision_quote_snapshot(
-            market,
-            decision,
-            up_snapshot,
-            down_snapshot,
-        )
-        if cfg.debug:
-            print_quote_snapshot_from_snapshot("DOWN (with decision)", decision_snapshot, debug=True)
+        if use_recommended_limit:
+            decision_snapshot = get_decision_quote_snapshot(
+                market,
+                decision,
+                up_snapshot,
+                down_snapshot,
+            )
+            if cfg.debug:
+                print_quote_snapshot_from_snapshot("DOWN (with decision)", decision_snapshot, debug=True)
+        else:
+            decision_snapshot = get_token_quote_snapshot(market.down_token_id, decision=decision)
 
     first_trade_wallet_baseline = _SESSION_FIRST_TRADE_WALLET_VALUE
     if first_trade_wallet_baseline is None:
@@ -874,6 +1042,8 @@ def run_once() -> None:
         if _SESSION_FIRST_TRADE_WALLET_VALUE is None:
             _SESSION_FIRST_TRADE_WALLET_VALUE = first_trade_wallet_baseline
         _SESSION_AUTOMATED_TRADES += 1
+        if cfg.max_trades_per_period > 1:
+            set_trade_cooldown(3)
 
     if result.executed and decision.side in ("UP", "DOWN") and result.token_id:
         target_btc_price = market.settlement_threshold
@@ -890,6 +1060,7 @@ def run_once() -> None:
         new_order = ActivePaperOrder(
             market_slug=market.slug,
             market_title=market.title,
+            trade_number_in_period=state.trades_executed + 1,
             side=decision.side,
             shares=result.size,
             entry_price=result.price,
@@ -898,19 +1069,31 @@ def run_once() -> None:
             entry_btc_price=features.price_usd,
             target_is_approximate=target_is_approximate,
         )
-        promote_pending_period_log_to_completed(market.slug)
+        promote_pending_period_log_to_completed(
+            market.slug,
+            trade_number_in_period=new_order.trade_number_in_period,
+        )
         record_executed_trade(new_order)
         append_completed_order_tick(
             new_order,
             current_btc_price=features.price_usd,
             phase="PLACED",
             observed_at=features.as_of,
+            features=features,
+            up_snapshot=up_snapshot,
+            down_snapshot=down_snapshot,
         )
 
     enforce_session_trade_limit(cfg)
 
     active_btc_price = features.price_usd
-    update_active_order_logs(active_btc_price, observed_at=features.as_of)
+    update_active_order_logs(
+        active_btc_price,
+        observed_at=features.as_of,
+        features=features,
+        up_snapshot=up_snapshot,
+        down_snapshot=down_snapshot,
+    )
     if cfg.debug and get_active_orders():
         print_active_orders(active_btc_price)
     if cfg.debug:

@@ -3,9 +3,12 @@ import unittest
 from custom.btc_agent.paper_state import (
     ActivePaperOrder,
     classify_position,
+    consume_trade_cooldown_loop,
     describe_target,
+    get_trade_cooldown_remaining,
     get_state,
     record_executed_trade,
+    set_trade_cooldown,
     sync_period_state,
 )
 
@@ -53,6 +56,18 @@ class TestBtcPaperState(unittest.TestCase):
         self.assertTrue(changed)
         self.assertEqual(state.trades_executed, 0)
         self.assertEqual(state.active_orders, [])
+
+    def test_trade_cooldown_counts_down_and_resets_on_new_period(self):
+        set_trade_cooldown(3)
+        self.assertEqual(get_trade_cooldown_remaining(), 3)
+        self.assertEqual(consume_trade_cooldown_loop(), 3)
+        self.assertEqual(get_trade_cooldown_remaining(), 2)
+
+        changed = sync_period_state("btc-updown-5m-2", "Period 2")
+        state = get_state()
+
+        self.assertTrue(changed)
+        self.assertEqual(state.trade_cooldown_loops_remaining, 0)
 
     def test_classify_position_uses_target_direction(self):
         up_order = ActivePaperOrder(

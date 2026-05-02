@@ -24,6 +24,8 @@ _BACKFILL_WINDOW_SECONDS = 300
 _BACKFILL_BUCKET_SECONDS = 20
 _WINDOW_BASELINE_CARRY_FORWARD_SECONDS = 60
 _WINDOW_BASELINE_LOOKAHEAD_SECONDS = 60
+_BINANCE_WS_URL = "wss://stream.binance.com:9443/ws/btcusdt@ticker"
+_BINANCE_WS_TIMEOUT_SECONDS = 3.0
 _POLYMARKET_RTDS_URL = "wss://ws-live-data.polymarket.com"
 _POLYMARKET_RTDS_SYMBOL = "btcusdt"
 _POLYMARKET_RTDS_FILTERS = json.dumps({"symbol": _POLYMARKET_RTDS_SYMBOL})
@@ -97,6 +99,80 @@ def _create_polymarket_rtds_connection():
         for name, value in saved_proxy_env.items():
             if value is not None:
                 os.environ[name] = value
+
+
+def _create_binance_connection():
+    if websocket is None:
+        raise requests.RequestException("websocket-client is not installed")
+
+    proxy_env_names = (
+        "ALL_PROXY",
+        "all_proxy",
+        "HTTP_PROXY",
+        "http_proxy",
+        "HTTPS_PROXY",
+        "https_proxy",
+    )
+    saved_proxy_env = {name: os.environ.get(name) for name in proxy_env_names}
+    try:
+        for name in proxy_env_names:
+            os.environ.pop(name, None)
+        return websocket.create_connection(
+            _BINANCE_WS_URL,
+            timeout=_BINANCE_WS_TIMEOUT_SECONDS,
+        )
+    except Exception as exc:
+        raise requests.RequestException(f"Unable to connect to Binance websocket: {exc}") from exc
+    finally:
+        for name, value in saved_proxy_env.items():
+            if value is not None:
+                os.environ[name] = value
+
+
+def _parse_binance_ticker_price(message: dict) -> Optional[Tuple[float, datetime]]:
+    symbol = str(message.get("s", "")).upper()
+    if symbol != "BTCUSDT":
+        return None
+    last_price = message.get("c")
+    event_time_ms = message.get("E")
+    if last_price is None or event_time_ms is None:
+        return None
+    return (
+        float(last_price),
+        datetime.fromtimestamp(float(event_time_ms) / 1000, tz=timezone.utc),
+    )
+
+
+def _fetch_spot_price_from_binance_websocket() -> float:
+    ws = None
+    try:
+        ws = _create_binance_connection()
+        raw_message = ws.recv()
+        if not raw_message:
+            raise requests.RequestException("Binance websocket returned no data")
+        message = json.loads(raw_message)
+        parsed = _parse_binance_ticker_price(message)
+        if parsed is None:
+            raise requests.RequestException("Binance websocket returned an unexpected ticker payload")
+        price, as_of = parsed
+        _record_price_sample(price, as_of=as_of)
+        return price
+    except (
+        OSError,
+        ValueError,
+        requests.RequestException,
+    ) as exc:
+        raise requests.RequestException(f"Binance websocket BTC price fetch failed: {exc}") from exc
+    except Exception as exc:
+        if websocket is not None and isinstance(exc, websocket.WebSocketException):
+            raise requests.RequestException(f"Binance websocket BTC price fetch failed: {exc}") from exc
+        raise
+    finally:
+        if ws is not None:
+            try:
+                ws.close()
+            except Exception:
+                pass
 
 
 def _parse_rtds_snapshot_price(message: dict) -> Optional[Tuple[float, datetime]]:
@@ -216,6 +292,7 @@ def _fetch_spot_price_from_polymarket_rtds() -> float:
 def _get_price_providers():
     return [
         ("Polymarket RTDS", _fetch_spot_price_from_polymarket_rtds),
+        ("Binance WebSocket", _fetch_spot_price_from_binance_websocket),
         ("Coinbase", _fetch_spot_price_from_coinbase),
         ("CoinGecko", _fetch_spot_price_from_coingecko),
     ]

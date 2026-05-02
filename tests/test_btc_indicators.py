@@ -27,8 +27,11 @@ class TestBtcIndicators(unittest.TestCase):
             "custom.btc_agent.indicators._fetch_spot_price_from_polymarket_rtds",
             side_effect=requests.HTTPError("429 Too Many Requests"),
         ), patch(
-            "custom.btc_agent.indicators._fetch_spot_price_from_coinbase",
+            "custom.btc_agent.indicators._fetch_spot_price_from_binance_websocket",
             return_value=75123.0,
+        ), patch(
+            "custom.btc_agent.indicators._fetch_spot_price_from_coinbase",
+            return_value=75200.0,
         ):
             price = indicators.fetch_btc_spot_price()
 
@@ -42,6 +45,9 @@ class TestBtcIndicators(unittest.TestCase):
         with patch(
             "custom.btc_agent.indicators._fetch_spot_price_from_polymarket_rtds",
             side_effect=requests.HTTPError("429 Too Many Requests"),
+        ), patch(
+            "custom.btc_agent.indicators._fetch_spot_price_from_binance_websocket",
+            side_effect=requests.HTTPError("503 Service Unavailable"),
         ), patch(
             "custom.btc_agent.indicators._fetch_spot_price_from_coinbase",
             side_effect=requests.HTTPError("503 Service Unavailable"),
@@ -58,6 +64,9 @@ class TestBtcIndicators(unittest.TestCase):
             "custom.btc_agent.indicators._fetch_spot_price_from_polymarket_rtds",
             side_effect=requests.HTTPError("429 Too Many Requests"),
         ), patch(
+            "custom.btc_agent.indicators._fetch_spot_price_from_binance_websocket",
+            side_effect=requests.HTTPError("429 Too Many Requests"),
+        ), patch(
             "custom.btc_agent.indicators._fetch_spot_price_from_coinbase",
             side_effect=requests.HTTPError("429 Too Many Requests"),
         ), patch(
@@ -66,6 +75,25 @@ class TestBtcIndicators(unittest.TestCase):
         ):
             with self.assertRaises(requests.HTTPError):
                 indicators.fetch_btc_spot_price()
+
+    def test_fetch_spot_price_from_binance_websocket_parses_ticker_message(self):
+        fake_socket = MagicMock()
+        fake_socket.recv.return_value = json.dumps(
+            {
+                "e": "24hrTicker",
+                "E": 1_777_000_001_000,
+                "s": "BTCUSDT",
+                "c": "75927.01",
+            }
+        )
+
+        with patch(
+            "custom.btc_agent.indicators._create_binance_connection",
+            return_value=fake_socket,
+        ):
+            price = indicators._fetch_spot_price_from_binance_websocket()
+
+        self.assertEqual(price, 75927.01)
 
     def test_fetch_spot_price_from_polymarket_rtds_prefers_live_update_over_snapshot(self):
         fake_socket = MagicMock()
