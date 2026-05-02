@@ -102,7 +102,7 @@ Optional / supported:
 - `BTC_AGENT_DEBUG` default: `false`
 - `BTC_AGENT_LOOP_INTERVAL` default: `30`
 - `BTC_AGENT_MAX_TRADE_USD` default: `5`
-- `BTC_AGENT_TRADE_SHARES_SIZE` default: `5` and enforced minimum: `5`
+- `BTC_AGENT_TRADE_SHARES_SIZE` default: `5`
 - `BTC_AGENT_MAX_TRADES_PER_PERIOD` default: `1`
 - `MAX_AUTOMATED_LOSS_TRADES` default: `0` meaning disabled; when set above zero, the agent counts completed losing trades since launch and stops once that loss count reaches the configured threshold
 - `CONFIDENCE` optional alias for `BTC_AGENT_MIN_CONFIDENCE`
@@ -121,7 +121,7 @@ Notes:
 
 What the BTC agent does today:
 
-- Pulls the current BTC/USD spot price from a small fallback chain of public APIs, currently trying CoinGecko and Coinbase spot pricing.
+- Pulls the current BTC/USD spot price from a fallback chain of live providers, currently preferring Polymarket RTDS and then falling back through Binance, Coinbase, and CoinGecko.
 - Maintains an in-memory rolling price history during process lifetime only.
 - Approximates market-window open price using the earliest retained BTC sample inside the current 5-minute market window, not a true historical open fetched from a historical BTC data source.
 - Computes 5-minute momentum and volatility from a trailing 5-minute BTC sample window, so analysis continues to reference recent cross-period history even immediately after a new market window begins.
@@ -149,7 +149,7 @@ What the BTC agent does today:
 - Keeps paper trade size fixed at `BTC_AGENT_TRADE_SHARES_SIZE`, but auto-scales live order size upward when needed so the live order notional meets `BTC_AGENT_LIVE_MIN_ORDER_USD`.
 - Uses a fixed paper-trade share size from `BTC_AGENT_TRADE_SHARES_SIZE` instead of deriving the trade size from USD notional.
 - Tracks in-memory active orders for the current 5-minute market window and prints each order’s target BTC level plus whether the position is currently winning, losing, or tied.
-- Writes a per-slug order-tracking file under `completed_orders/` for each executed order, appending one status snapshot per tick and a final completion snapshot when the market rolls into the next slug.
+- Writes a per-slug order-tracking file under `completed_orders/` for each executed order, appending one status snapshot per tick plus the pre-order tick history that led into the trade.
 - Evaluates paper-order win/loss status against the market-period settlement reference, preferring Polymarket’s parsed threshold and otherwise falling back to the closest retained BTC sample at the start of the 5-minute period rather than the trade-entry BTC price.
 - Enforces `BTC_AGENT_MAX_TRADES_PER_PERIOD` per 5-minute market slug; once that limit is reached, subsequent loop ticks skip quote snapshots and LLM trade decisions until the next market window begins.
 - Enforces `MAX_AUTOMATED_LOSS_TRADES` across the full process session as a completed-loss stop; once that many trades have actually settled as losses, the agent exits.
@@ -242,6 +242,10 @@ Data required:
 - `spread`
 - `spread_bps`
 - `top_level_book_imbalance`
+- `imbalance_pressure`
+- `velocity_15s`
+- `velocity_30s`
+- `consecutive_flat_ticks`
 - final order outcome classification using the resolved closing price
 
 Completion criteria:

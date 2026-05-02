@@ -164,7 +164,10 @@ class TestBtcMain(unittest.TestCase):
             delta_from_previous_tick=0.0,
             momentum_1m=-12.5,
             momentum_5m=-6.079999999987194,
+            velocity_15s=-3.2,
+            velocity_30s=-7.4,
             volatility_5m=7.832826962356144,
+            consecutive_flat_ticks=2,
             window_open_price=77970.0,
             delta_pct_from_window_open=-0.000133,
             trailing_5m_open_price=77965.0,
@@ -214,9 +217,15 @@ class TestBtcMain(unittest.TestCase):
         self.assertIn("feature_btc_price=77959.600", content)
         self.assertIn("feature_momentum_1m=-12.5", content)
         self.assertIn("feature_momentum_5m=-6.079999999987194", content)
+        self.assertIn("feature_velocity_15s=-3.2", content)
+        self.assertIn("feature_velocity_30s=-7.4", content)
         self.assertIn("feature_volatility_5m=7.832826962356144", content)
+        self.assertIn("feature_consecutive_flat_ticks=2", content)
         self.assertIn("active_up_buy_quote=0.250", content)
         self.assertIn("active_down_buy_quote=0.700", content)
+        self.assertIn("\"liquidity_regime\"", content)
+        self.assertIn("\"next_slug_proximity\"", content)
+        self.assertIn("\"imbalance_pressure\"", content)
 
     def test_append_completed_order_tick_uses_trade_number_suffix_when_multiple_trades_allowed(self):
         order = ActivePaperOrder(
@@ -281,7 +290,10 @@ class TestBtcMain(unittest.TestCase):
             delta_from_previous_tick=5.0,
             momentum_1m=7.0,
             momentum_5m=10.0,
+            velocity_15s=3.0,
+            velocity_30s=4.0,
             volatility_5m=22.0,
+            consecutive_flat_ticks=0,
             window_open_price=77760.0,
             delta_pct_from_window_open=0.0001286,
             trailing_5m_open_price=77750.0,
@@ -316,6 +328,9 @@ class TestBtcMain(unittest.TestCase):
         self.assertIn("up_buy_quote=0.450", content)
         self.assertIn("down_submit_reason=blocked", content)
         self.assertIn("decision_side=UP", content)
+        self.assertIn("velocity_15s=3.0", content)
+        self.assertIn("consecutive_flat_ticks=0", content)
+        self.assertIn("\"next_slug_proximity\"", content)
 
     def test_promote_pending_period_log_to_completed_renames_file(self):
         with open(
@@ -562,6 +577,13 @@ class TestBtcMain(unittest.TestCase):
         features = SimpleNamespace(
             price_usd=77560.75,
             as_of=None,
+            delta_from_previous_tick=1.0,
+            momentum_1m=1.0,
+            momentum_5m=2.0,
+            velocity_15s=0.5,
+            velocity_30s=1.0,
+            volatility_5m=3.0,
+            consecutive_flat_ticks=0,
         )
         decision = SimpleNamespace(
             side="UP",
@@ -656,7 +678,10 @@ class TestBtcMain(unittest.TestCase):
             delta_from_previous_tick=1.0,
             momentum_1m=1.0,
             momentum_5m=2.0,
+            velocity_15s=0.5,
+            velocity_30s=1.0,
             volatility_5m=3.0,
+            consecutive_flat_ticks=0,
         )
         decision = SimpleNamespace(
             side="UP",
@@ -764,7 +789,10 @@ class TestBtcMain(unittest.TestCase):
             delta_from_previous_tick=1.0,
             momentum_1m=1.0,
             momentum_5m=2.0,
+            velocity_15s=0.5,
+            velocity_30s=1.0,
             volatility_5m=3.0,
+            consecutive_flat_ticks=0,
         )
 
         with ExitStack() as stack:
@@ -822,6 +850,104 @@ class TestBtcMain(unittest.TestCase):
             run_once()
 
         mock_consume_cooldown.assert_called_once()
+        mock_print_skip.assert_called_once()
+        mock_decide_trade.assert_not_called()
+        mock_execute_trade.assert_not_called()
+
+    def test_run_once_skips_new_trade_when_existing_active_order_is_losing(self):
+        market = SimpleNamespace(
+            slug="btc-updown-5m-1777056000",
+            title="Bitcoin Up or Down",
+            settlement_threshold=77560.75,
+            up_token_id="up-token",
+            down_token_id="down-token",
+            start_ts=1777056000,
+        )
+        state = SimpleNamespace(trades_executed=1)
+        features = SimpleNamespace(
+            price_usd=77550.0,
+            as_of=None,
+            delta_from_previous_tick=-2.0,
+            momentum_1m=-1.0,
+            momentum_5m=-3.0,
+            velocity_15s=-1.0,
+            velocity_30s=-2.0,
+            volatility_5m=4.0,
+            consecutive_flat_ticks=0,
+            delta_pct_from_window_open=-0.0002,
+            rsi_14=45.0,
+        )
+        active_order = ActivePaperOrder(
+            market_slug="btc-updown-5m-1777056000",
+            market_title="Bitcoin Up or Down",
+            side="UP",
+            shares=2.0,
+            entry_price=0.45,
+            token_id="up-token",
+            target_btc_price=77560.75,
+            entry_btc_price=77570.0,
+        )
+
+        with ExitStack() as stack:
+            stack.enter_context(patch("custom.btc_agent.main._FIRST_LOOP", False))
+            stack.enter_context(
+                patch(
+                    "custom.btc_agent.main.get_trading_config",
+                    return_value=SimpleNamespace(
+                        debug=False,
+                        debug_price_to_beat=False,
+                        use_recommended_limit=False,
+                        max_trades_per_period=2,
+                        max_automated_loss_trades=0,
+                        minimum_wallet_balance=0.0,
+                    ),
+                )
+            )
+            stack.enter_context(
+                patch("custom.btc_agent.main.find_current_btc_updown_market", return_value=market)
+            )
+            stack.enter_context(patch("custom.btc_agent.main.sync_period_state", return_value=False))
+            stack.enter_context(patch("custom.btc_agent.main.get_state", return_value=state))
+            stack.enter_context(
+                patch("custom.btc_agent.main.resolve_price_to_beat_with_retries", return_value=market)
+            )
+            stack.enter_context(
+                patch(
+                    "custom.btc_agent.main.get_account_balance_snapshot",
+                    return_value=SimpleNamespace(cash_balance=100.0, total_account_value=100.0),
+                )
+            )
+            stack.enter_context(
+                patch("custom.btc_agent.main.build_btc_features", return_value=features)
+            )
+            stack.enter_context(
+                patch("custom.btc_agent.main.get_feature_readiness", return_value=(True, None))
+            )
+            stack.enter_context(
+                patch("custom.btc_agent.main.get_active_orders", return_value=[active_order])
+            )
+            stack.enter_context(patch("custom.btc_agent.main.print_market_context"))
+            stack.enter_context(patch("custom.btc_agent.main.print_features"))
+            mock_update_logs = stack.enter_context(
+                patch("custom.btc_agent.main.update_active_order_logs")
+            )
+            mock_print_active = stack.enter_context(
+                patch("custom.btc_agent.main.print_active_orders")
+            )
+            mock_print_skip = stack.enter_context(
+                patch("custom.btc_agent.main.print_llm_skip_reason")
+            )
+            mock_decide_trade = stack.enter_context(
+                patch("custom.btc_agent.main.decide_trade")
+            )
+            mock_execute_trade = stack.enter_context(
+                patch("custom.btc_agent.main.maybe_execute_trade")
+            )
+
+            run_once()
+
+        mock_update_logs.assert_called_once()
+        mock_print_active.assert_called_once_with(77550.0)
         mock_print_skip.assert_called_once()
         mock_decide_trade.assert_not_called()
         mock_execute_trade.assert_not_called()

@@ -221,6 +221,32 @@ class TestBtcIndicators(unittest.TestCase):
         self.assertEqual(features.window_sample_count, 2)
         self.assertEqual(features.trailing_5m_sample_count, 2)
 
+    def test_build_btc_features_includes_micro_velocity_and_flat_tick_count(self):
+        seeded_samples = [
+            (datetime.fromtimestamp(1_776_968_675, tz=timezone.utc), 77940.0),
+            (datetime.fromtimestamp(1_776_968_690, tz=timezone.utc), 77945.0),
+            (datetime.fromtimestamp(1_776_968_700, tz=timezone.utc), 77948.0),
+            (datetime.fromtimestamp(1_776_968_705, tz=timezone.utc), 77948.0),
+            (datetime.fromtimestamp(1_776_968_708, tz=timezone.utc), 77948.0),
+        ]
+        for sample_time, sample_price in seeded_samples:
+            indicators._record_price_sample(sample_price, as_of=sample_time)
+
+        with patch(
+            "custom.btc_agent.indicators.fetch_btc_spot_price",
+            side_effect=self._recorded_price_return(77950.0),
+        ), patch(
+            "custom.btc_agent.indicators.datetime",
+        ) as mock_datetime:
+            mock_datetime.now.return_value = datetime.fromtimestamp(1_776_968_720, tz=timezone.utc)
+            mock_datetime.fromtimestamp.side_effect = datetime.fromtimestamp
+            mock_datetime.timezone = timezone
+            features = indicators.build_btc_features(window_start_ts=1_776_968_700)
+
+        self.assertEqual(features.velocity_15s, 2.0)
+        self.assertEqual(features.velocity_30s, 5.0)
+        self.assertEqual(features.consecutive_flat_ticks, 0)
+
     def test_estimate_market_window_reference_price_prefers_boundary_sample_before_start(self):
         indicators._record_price_sample(
             77940.12,
@@ -263,7 +289,10 @@ class TestBtcIndicators(unittest.TestCase):
             rsi_14=None,
             momentum_1m=None,
             momentum_5m=None,
+            velocity_15s=None,
+            velocity_30s=None,
             volatility_5m=None,
+            consecutive_flat_ticks=0,
             retained_sample_count=3,
             window_sample_count=1,
             trailing_5m_sample_count=1,
@@ -287,7 +316,10 @@ class TestBtcIndicators(unittest.TestCase):
             rsi_14=55.0,
             momentum_1m=8.0,
             momentum_5m=10.0,
+            velocity_15s=4.0,
+            velocity_30s=6.0,
             volatility_5m=6.0,
+            consecutive_flat_ticks=1,
             retained_sample_count=20,
             window_sample_count=3,
             trailing_5m_sample_count=3,

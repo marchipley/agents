@@ -46,7 +46,10 @@ class BtcFeatures:
     rsi_14: Optional[float]
     momentum_1m: Optional[float]
     momentum_5m: Optional[float]
+    velocity_15s: Optional[float]
+    velocity_30s: Optional[float]
     volatility_5m: Optional[float]
+    consecutive_flat_ticks: int
     retained_sample_count: int
     window_sample_count: int
     trailing_5m_sample_count: int
@@ -485,6 +488,32 @@ def _compute_rsi(prices: List[float], period: int = 14) -> Optional[float]:
     return 100 - (100 / (1 + rs))
 
 
+def _get_latest_price_at_or_before(cutoff: datetime) -> Optional[float]:
+    for ts, price in reversed(_PRICE_HISTORY):
+        if ts <= cutoff:
+            return price
+    return None
+
+
+def _compute_velocity(now: datetime, price_now: float, seconds: int) -> Optional[float]:
+    reference_price = _get_latest_price_at_or_before(now - timedelta(seconds=seconds))
+    if reference_price is None:
+        return None
+    return price_now - reference_price
+
+
+def _count_consecutive_flat_ticks(prices: List[float], epsilon: float = 1e-9) -> int:
+    if len(prices) < 2:
+        return 0
+    flat_count = 0
+    for idx in range(len(prices) - 1, 0, -1):
+        if abs(prices[idx] - prices[idx - 1]) <= epsilon:
+            flat_count += 1
+            continue
+        break
+    return flat_count
+
+
 def _get_market_window_reference_sample(
     window_start: datetime,
     max_lookback_seconds: int = _WINDOW_BASELINE_CARRY_FORWARD_SECONDS,
@@ -572,7 +601,10 @@ def build_btc_features(window_start_ts: int) -> BtcFeatures:
     rsi = _compute_rsi(prices[-15:])
     momentum_1m = price_now - one_minute_prices[0] if len(one_minute_prices) >= 2 else None
     momentum_5m = price_now - trailing_5m_open_price if len(trailing_5m_prices) >= 2 else None
+    velocity_15s = _compute_velocity(now, price_now, 15)
+    velocity_30s = _compute_velocity(now, price_now, 30)
     volatility_5m = statistics.pstdev(trailing_5m_prices) if len(trailing_5m_prices) >= 2 else None
+    consecutive_flat_ticks = _count_consecutive_flat_ticks(prices)
 
     return BtcFeatures(
         as_of=now,
@@ -585,7 +617,10 @@ def build_btc_features(window_start_ts: int) -> BtcFeatures:
         rsi_14=rsi,
         momentum_1m=momentum_1m,
         momentum_5m=momentum_5m,
+        velocity_15s=velocity_15s,
+        velocity_30s=velocity_30s,
         volatility_5m=volatility_5m,
+        consecutive_flat_ticks=consecutive_flat_ticks,
         retained_sample_count=len(prices),
         window_sample_count=len(window_prices),
         trailing_5m_sample_count=len(trailing_5m_prices),

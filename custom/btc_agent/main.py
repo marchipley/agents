@@ -234,6 +234,7 @@ def _snapshot_summary(prefix: str, snapshot: TokenQuoteSnapshot) -> list[str]:
         f"{prefix}_spread={_fmt(getattr(snapshot, 'spread', None))}",
         f"{prefix}_spread_bps={_fmt(getattr(snapshot, 'spread_bps', None))}",
         f"{prefix}_top_level_book_imbalance={_fmt(getattr(snapshot, 'top_level_book_imbalance', None))}",
+        f"{prefix}_imbalance_pressure={_fmt(getattr(snapshot, 'imbalance_pressure', None))}",
     ]
 
 
@@ -286,7 +287,26 @@ def _trend_regime(features) -> str:
 
 def _liquidity_regime(snapshot: TokenQuoteSnapshot) -> str:
     spread_bps = getattr(snapshot, "spread_bps", None)
+    best_bid_size = getattr(snapshot, "best_bid_size", None)
+    best_ask_size = getattr(snapshot, "best_ask_size", None)
+    imbalance_pressure = getattr(snapshot, "imbalance_pressure", None)
+    total_top_size = 0.0
+    for size in (best_bid_size, best_ask_size):
+        if size is not None:
+            total_top_size += size
+    if spread_bps is None and total_top_size <= 0:
+        return "unknown"
+    if spread_bps is not None and spread_bps > 80:
+        return "low"
+    if total_top_size > 0 and total_top_size < 25:
+        return "low"
+    if imbalance_pressure is not None and abs(imbalance_pressure) > 0.60:
+        return "thin_imbalanced"
     if spread_bps is None:
+        if total_top_size >= 100:
+            return "high"
+        if total_top_size > 0:
+            return "normal"
         return "unknown"
     if spread_bps <= 30:
         return "high"
@@ -299,13 +319,23 @@ def _rsi_regime(features) -> str:
     rsi = getattr(features, "rsi_14", None)
     if rsi is None:
         return "unknown"
+    momentum_5m = getattr(features, "momentum_5m", None)
+    delta_pct = getattr(features, "delta_pct_from_window_open", None)
     if rsi >= 80:
+        if (momentum_5m is not None and momentum_5m > 15) or (delta_pct is not None and delta_pct > 0.0015):
+            return "strong_trend_high"
         return "extreme_overbought"
     if rsi >= 70:
+        if (momentum_5m is not None and momentum_5m > 8) or (delta_pct is not None and delta_pct > 0.0008):
+            return "trend_high"
         return "overbought"
     if rsi <= 20:
+        if (momentum_5m is not None and momentum_5m < -15) or (delta_pct is not None and delta_pct < -0.0015):
+            return "strong_trend_low"
         return "extreme_oversold"
     if rsi <= 30:
+        if (momentum_5m is not None and momentum_5m < -8) or (delta_pct is not None and delta_pct < -0.0008):
+            return "trend_low"
         return "oversold"
     return "neutral"
 
@@ -343,6 +373,7 @@ def _build_regime_fingerprint(
 
     return {
         "time_remaining_seconds": _market_time_remaining_seconds(market_slug, observed_at),
+        "next_slug_proximity": _market_time_remaining_seconds(market_slug, observed_at),
         "volatility_regime": _volatility_regime(getattr(features, "volatility_5m", None)) if features is not None else "unknown",
         "trend_regime": _trend_regime(features) if features is not None else "unknown",
         "rsi_regime": _rsi_regime(features) if features is not None else "unknown",
@@ -355,6 +386,18 @@ def _build_regime_fingerprint(
         "top_level_book_imbalance": None
         if selected_snapshot is None
         else getattr(selected_snapshot, "top_level_book_imbalance", None),
+        "imbalance_pressure": None
+        if selected_snapshot is None
+        else getattr(selected_snapshot, "imbalance_pressure", None),
+        "velocity_15s": None
+        if features is None
+        else getattr(features, "velocity_15s", None),
+        "velocity_30s": None
+        if features is None
+        else getattr(features, "velocity_30s", None),
+        "consecutive_flat_ticks": None
+        if features is None
+        else getattr(features, "consecutive_flat_ticks", None),
     }
 
 
@@ -400,7 +443,10 @@ def append_pending_period_tick_analysis(
                     f"delta_prev_tick={getattr(features, 'delta_from_previous_tick', None)}",
                     f"momentum_1m={getattr(features, 'momentum_1m', None)}",
                     f"momentum_5m={getattr(features, 'momentum_5m', None)}",
+                    f"velocity_15s={getattr(features, 'velocity_15s', None)}",
+                    f"velocity_30s={getattr(features, 'velocity_30s', None)}",
                     f"volatility_5m={getattr(features, 'volatility_5m', None)}",
+                    f"consecutive_flat_ticks={getattr(features, 'consecutive_flat_ticks', None)}",
                     f"window_open_price={_fmt(getattr(features, 'window_open_price', None))}",
                     f"delta_from_window_pct={((getattr(features, 'delta_pct_from_window_open', 0.0) or 0.0) * 100):.4f}%",
                     f"trailing_5m_open_price={_fmt(getattr(features, 'trailing_5m_open_price', None))}",
@@ -542,7 +588,10 @@ def append_completed_order_tick(
                         f"feature_delta_prev_tick={getattr(features, 'delta_from_previous_tick', None)}",
                         f"feature_momentum_1m={getattr(features, 'momentum_1m', None)}",
                         f"feature_momentum_5m={getattr(features, 'momentum_5m', None)}",
+                        f"feature_velocity_15s={getattr(features, 'velocity_15s', None)}",
+                        f"feature_velocity_30s={getattr(features, 'velocity_30s', None)}",
                         f"feature_volatility_5m={getattr(features, 'volatility_5m', None)}",
+                        f"feature_consecutive_flat_ticks={getattr(features, 'consecutive_flat_ticks', None)}",
                         f"feature_window_open_price={_fmt(getattr(features, 'window_open_price', None))}",
                         f"feature_delta_from_window_pct={((getattr(features, 'delta_pct_from_window_open', 0.0) or 0.0) * 100):.4f}%",
                         f"feature_trailing_5m_open_price={_fmt(getattr(features, 'trailing_5m_open_price', None))}",
@@ -613,6 +662,14 @@ def enforce_session_loss_trade_limit(cfg) -> None:
         "Exiting BTC agent."
     )
     sys.exit(0)
+
+
+def _get_losing_active_orders(current_btc_price: float) -> list[ActivePaperOrder]:
+    return [
+        order
+        for order in get_active_orders()
+        if classify_position(order, current_btc_price) == "LOSING"
+    ]
 
 
 def write_price_to_beat_debug_file(slug: str, force: bool = False) -> None:
@@ -874,7 +931,10 @@ def print_features(features, debug: bool) -> None:
     print(f"  delta_prev_tick       = {features.delta_from_previous_tick}")
     print(f"  momentum_1m           = {features.momentum_1m}")
     print(f"  momentum_5m           = {features.momentum_5m}")
+    print(f"  velocity_15s          = {features.velocity_15s}")
+    print(f"  velocity_30s          = {features.velocity_30s}")
     print(f"  volatility_5m         = {features.volatility_5m}")
+    print(f"  consecutive_flat_ticks= {features.consecutive_flat_ticks}")
     if not debug:
         return
 
@@ -1110,6 +1170,34 @@ def run_once() -> None:
         if cfg.debug:
             print("-" * 80)
         return
+
+    if cfg.max_trades_per_period > 1 and state.trades_executed > 0:
+        losing_active_orders = _get_losing_active_orders(features.price_usd)
+        if losing_active_orders:
+            skip_reason = (
+                "existing active order is currently losing; "
+                "skipping additional same-period trade evaluation"
+            )
+            append_pending_period_tick_analysis(
+                market,
+                up_snapshot=up_snapshot,
+                down_snapshot=down_snapshot,
+                features=features,
+                skip_reason=skip_reason,
+                observed_at=features.as_of,
+            )
+            update_active_order_logs(
+                features.price_usd,
+                observed_at=features.as_of,
+                features=features,
+                up_snapshot=up_snapshot,
+                down_snapshot=down_snapshot,
+            )
+            print_active_orders(features.price_usd)
+            print_llm_skip_reason(skip_reason)
+            if cfg.debug:
+                print("-" * 80)
+            return
 
     decision = decide_trade(features, market, up_snapshot=up_snapshot, down_snapshot=down_snapshot)
     append_pending_period_tick_analysis(

@@ -20,6 +20,7 @@ from custom.btc_agent.executor import (
     _validate_trade_candidate,
     evaluate_ok_to_submit,
     get_account_balance_snapshot,
+    get_token_quote_snapshot,
     get_submission_limit_price,
     get_submission_limit_label,
     TokenQuoteSnapshot,
@@ -27,6 +28,42 @@ from custom.btc_agent.executor import (
 
 
 class TestBtcExecutor(unittest.TestCase):
+    def test_get_token_quote_snapshot_populates_book_imbalance_fields(self):
+        with patch(
+            "custom.btc_agent.executor._get_price_from_clob_single",
+            return_value=0.50,
+        ), patch(
+            "custom.btc_agent.executor._get_midpoint_price",
+            return_value=0.50,
+        ), patch(
+            "custom.btc_agent.executor._get_last_trade_price",
+            return_value=0.50,
+        ), patch(
+            "custom.btc_agent.executor._get_orderbook",
+            return_value={
+                "bids": [
+                    {"price": "0.49", "asset_size": "100"},
+                    {"price": "0.48", "asset_size": "80"},
+                    {"price": "0.47", "asset_size": "60"},
+                ],
+                "asks": [
+                    {"price": "0.51", "asset_size": "50"},
+                    {"price": "0.52", "asset_size": "40"},
+                    {"price": "0.53", "asset_size": "30"},
+                ],
+                "tick_size": "0.01",
+            },
+        ), patch(
+            "custom.btc_agent.executor.get_trading_config",
+            return_value=types.SimpleNamespace(use_recommended_limit=False),
+        ):
+            snapshot = get_token_quote_snapshot("token-1")
+
+        self.assertEqual(snapshot.best_bid_size, 100.0)
+        self.assertEqual(snapshot.best_ask_size, 50.0)
+        self.assertAlmostEqual(snapshot.top_level_book_imbalance, 240.0 / 360.0, places=6)
+        self.assertAlmostEqual(snapshot.imbalance_pressure, (240.0 - 120.0) / 360.0, places=6)
+
     def test_extract_minimum_size_from_error_parses_exchange_response(self):
         exc = Exception("order abc is invalid. Size (2.88) lower than the minimum: 5")
         self.assertEqual(_extract_minimum_size_from_error(exc), 5.0)

@@ -46,6 +46,7 @@ class TokenQuoteSnapshot:
     best_ask_size: Optional[float] = None
     spread_bps: Optional[float] = None
     top_level_book_imbalance: Optional[float] = None
+    imbalance_pressure: Optional[float] = None
 
 
 @dataclass
@@ -89,6 +90,16 @@ def _extract_single_price(obj: Dict[str, Any]) -> Optional[float]:
         if price is not None:
             return price
 
+    return None
+
+
+def _extract_level_size(level: Dict[str, Any]) -> Optional[float]:
+    for field in ("size", "quantity", "amount", "asset_size", "shares"):
+        size = _coerce_price(level.get(field))
+        if size is not None:
+            return size
+    if "level" in level and isinstance(level["level"], dict):
+        return _extract_level_size(level["level"])
     return None
 
 
@@ -504,9 +515,9 @@ def get_token_quote_snapshot(
     best_bid_size = None
     best_ask_size = None
     if bids and isinstance(bids[0], dict):
-        best_bid_size = _coerce_price(bids[0].get("size"))
+        best_bid_size = _extract_level_size(bids[0])
     if asks and isinstance(asks[0], dict):
-        best_ask_size = _coerce_price(asks[0].get("size"))
+        best_ask_size = _extract_level_size(asks[0])
 
     tick_size = _coerce_price(book.get("tick_size"))
     spread = None
@@ -523,10 +534,21 @@ def get_token_quote_snapshot(
     if spread is not None and reference_price not in (None, 0):
         spread_bps = (spread / reference_price) * 10_000
     top_level_book_imbalance = None
-    if best_bid_size is not None and best_ask_size is not None:
-        total_top_level_size = best_bid_size + best_ask_size
-        if total_top_level_size > 0:
-            top_level_book_imbalance = best_bid_size / total_top_level_size
+    top_three_bid_size = sum(
+        size
+        for size in (_extract_level_size(level) for level in bids[:3] if isinstance(level, dict))
+        if size is not None
+    )
+    top_three_ask_size = sum(
+        size
+        for size in (_extract_level_size(level) for level in asks[:3] if isinstance(level, dict))
+        if size is not None
+    )
+    imbalance_pressure = None
+    total_top_three_size = top_three_bid_size + top_three_ask_size
+    if total_top_three_size > 0:
+        top_level_book_imbalance = top_three_bid_size / total_top_three_size
+        imbalance_pressure = (top_three_bid_size - top_three_ask_size) / total_top_three_size
 
     target_limit_price = compute_target_limit_price(
         reference_price=reference_price,
@@ -568,6 +590,7 @@ def get_token_quote_snapshot(
         best_ask_size=best_ask_size,
         spread_bps=spread_bps,
         top_level_book_imbalance=top_level_book_imbalance,
+        imbalance_pressure=imbalance_pressure,
     )
 
 
