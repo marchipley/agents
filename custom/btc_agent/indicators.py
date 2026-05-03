@@ -20,7 +20,7 @@ from .network import http_get
 _PRICE_HISTORY: List[Tuple[datetime, float]] = []
 _LAST_SUCCESSFUL_PROVIDER_INDEX = 0
 _PRICE_HISTORY_BACKFILLED = False
-_BACKFILL_WINDOW_SECONDS = 300
+_BACKFILL_WINDOW_SECONDS = 420
 _BACKFILL_BUCKET_SECONDS = 20
 _WINDOW_BASELINE_CARRY_FORWARD_SECONDS = 60
 _WINDOW_BASELINE_LOOKAHEAD_SECONDS = 60
@@ -43,11 +43,19 @@ class BtcFeatures:
     delta_pct_from_window_open: float
     delta_pct_from_trailing_5m_open: float
     delta_from_previous_tick: Optional[float]
+    rsi_9: Optional[float]
     rsi_14: Optional[float]
+    rsi_speed_divergence: Optional[float]
     momentum_1m: Optional[float]
     momentum_5m: Optional[float]
     velocity_15s: Optional[float]
     velocity_30s: Optional[float]
+    ema_9: Optional[float]
+    ema_21: Optional[float]
+    ema_alignment: Optional[bool]
+    ema_cross_direction: Optional[str]
+    adx_14: Optional[float]
+    atr_14: Optional[float]
     volatility_5m: Optional[float]
     consecutive_flat_ticks: int
     consecutive_directional_ticks: int
@@ -495,6 +503,47 @@ def _compute_rsi(prices: List[float], period: int = 14) -> Optional[float]:
     return 100 - (100 / (1 + rs))
 
 
+def _compute_ema(prices: List[float], period: int) -> Optional[float]:
+    if len(prices) < period:
+        return None
+    multiplier = 2 / (period + 1)
+    ema = sum(prices[:period]) / period
+    for price in prices[period:]:
+        ema = ((price - ema) * multiplier) + ema
+    return ema
+
+
+def _compute_atr_from_closes(prices: List[float], period: int = 14) -> Optional[float]:
+    if len(prices) < period + 1:
+        return None
+    true_ranges = [abs(prices[idx] - prices[idx - 1]) for idx in range(1, len(prices))]
+    recent_true_ranges = true_ranges[-period:]
+    if not recent_true_ranges:
+        return None
+    return sum(recent_true_ranges) / len(recent_true_ranges)
+
+
+def _compute_adx_from_closes(prices: List[float], period: int = 14) -> Optional[float]:
+    if len(prices) < period + 1:
+        return None
+
+    deltas = [prices[idx] - prices[idx - 1] for idx in range(1, len(prices))]
+    recent_deltas = deltas[-period:]
+    true_ranges = [abs(delta) for delta in recent_deltas]
+    atr = sum(true_ranges) / len(true_ranges) if true_ranges else 0.0
+    if atr <= 0:
+        return 0.0
+
+    plus_dm = sum(delta for delta in recent_deltas if delta > 0)
+    minus_dm = sum(-delta for delta in recent_deltas if delta < 0)
+    plus_di = (plus_dm / (atr * period)) * 100
+    minus_di = (minus_dm / (atr * period)) * 100
+    di_sum = plus_di + minus_di
+    if di_sum <= 0:
+        return 0.0
+    return (abs(plus_di - minus_di) / di_sum) * 100
+
+
 def _get_latest_price_at_or_before(cutoff: datetime) -> Optional[float]:
     for ts, price in reversed(_PRICE_HISTORY):
         if ts <= cutoff:
@@ -626,11 +675,27 @@ def build_btc_features(window_start_ts: int) -> BtcFeatures:
         else 0.0
     )
     delta_from_previous_tick = price_now - prices[-2] if len(prices) >= 2 else None
+    rsi_9 = _compute_rsi(prices[-10:], period=9)
     rsi = _compute_rsi(prices[-15:])
+    rsi_speed_divergence = None if rsi_9 is None or rsi is None else rsi_9 - rsi
     momentum_1m = price_now - one_minute_prices[0] if len(one_minute_prices) >= 2 else None
     momentum_5m = price_now - trailing_5m_open_price if len(trailing_5m_prices) >= 2 else None
     velocity_15s = _compute_velocity(now, price_now, 15)
     velocity_30s = _compute_velocity(now, price_now, 30)
+    ema_9 = _compute_ema(prices, period=9)
+    ema_21 = _compute_ema(prices, period=21)
+    ema_alignment = None
+    ema_cross_direction = None
+    if ema_9 is not None and ema_21 is not None:
+        ema_alignment = price_now > ema_9 > ema_21
+        if ema_9 > ema_21:
+            ema_cross_direction = "bullish"
+        elif ema_9 < ema_21:
+            ema_cross_direction = "bearish"
+        else:
+            ema_cross_direction = "flat"
+    adx_14 = _compute_adx_from_closes(prices, period=14)
+    atr_14 = _compute_atr_from_closes(prices, period=14)
     volatility_5m = statistics.pstdev(trailing_5m_prices) if len(trailing_5m_prices) >= 2 else None
     consecutive_flat_ticks = _count_consecutive_flat_ticks(prices)
     consecutive_directional_ticks = _count_consecutive_directional_ticks(prices)
@@ -643,11 +708,19 @@ def build_btc_features(window_start_ts: int) -> BtcFeatures:
         delta_pct_from_window_open=delta_pct,
         delta_pct_from_trailing_5m_open=trailing_5m_delta_pct,
         delta_from_previous_tick=delta_from_previous_tick,
+        rsi_9=rsi_9,
         rsi_14=rsi,
+        rsi_speed_divergence=rsi_speed_divergence,
         momentum_1m=momentum_1m,
         momentum_5m=momentum_5m,
         velocity_15s=velocity_15s,
         velocity_30s=velocity_30s,
+        ema_9=ema_9,
+        ema_21=ema_21,
+        ema_alignment=ema_alignment,
+        ema_cross_direction=ema_cross_direction,
+        adx_14=adx_14,
+        atr_14=atr_14,
         volatility_5m=volatility_5m,
         consecutive_flat_ticks=consecutive_flat_ticks,
         consecutive_directional_ticks=consecutive_directional_ticks,
@@ -665,6 +738,20 @@ def get_feature_readiness(features: BtcFeatures) -> Tuple[bool, str]:
         reasons.append(
             f"RSI warmup incomplete ({features.retained_sample_count}/15 samples"
             + (f", need {samples_needed} more" if samples_needed else "")
+            + ")"
+        )
+
+    if (
+        features.rsi_9 is None
+        or features.ema_9 is None
+        or features.ema_21 is None
+        or features.adx_14 is None
+        or features.atr_14 is None
+    ):
+        extended_needed = max(21 - features.retained_sample_count, 0)
+        reasons.append(
+            f"phase 2 indicator warmup incomplete ({features.retained_sample_count}/21 samples"
+            + (f", need {extended_needed} more" if extended_needed else "")
             + ")"
         )
 

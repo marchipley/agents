@@ -20,10 +20,22 @@ class DummyFeatures:
     delta_pct_from_window_open = 0.000667
     delta_pct_from_trailing_5m_open = 0.000801
     delta_from_previous_tick = 5.0
+    rsi_9 = 61.0
     rsi_14 = 55.0
+    rsi_speed_divergence = 6.0
     momentum_1m = 7.0
     momentum_5m = 10.0
+    velocity_15s = 4.0
+    velocity_30s = 6.0
+    ema_9 = 74980.0
+    ema_21 = 74960.0
+    ema_alignment = True
+    ema_cross_direction = "bullish"
+    adx_14 = 31.0
+    atr_14 = 12.0
     volatility_5m = 22.0
+    consecutive_flat_ticks = 0
+    consecutive_directional_ticks = 3
     as_of = datetime.fromtimestamp(1777513792, tz=timezone.utc)
 
 
@@ -107,6 +119,9 @@ class TestBtcLlmDecision(unittest.TestCase):
         self.assertIn("Time remaining seconds: 8", prompt)
         self.assertIn("UP Polymarket ask/buy quote: 0.84", prompt)
         self.assertIn("DOWN Polymarket ask/buy quote: 0.17", prompt)
+        self.assertIn("RSI(9): 61.0", prompt)
+        self.assertIn("ADX(14): 31.0", prompt)
+        self.assertIn("EMA alignment (Price > EMA9 > EMA21): True", prompt)
         self.assertIn("Focus on regime detection and direction, not limit pricing.", prompt)
         self.assertIn("execution layer will apply regime-aware EV, deadline, liquidity, and FOK rules", prompt)
 

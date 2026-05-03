@@ -384,6 +384,10 @@ def _build_regime_fingerprint(
     required_velocity_to_win = None
     if gap_to_target is not None and time_remaining_seconds not in (None, 0):
         required_velocity_to_win = abs(gap_to_target) / time_remaining_seconds
+    atr_14 = None if features is None else getattr(features, "atr_14", None)
+    volatility_normalized_gap = None
+    if gap_to_target is not None and atr_14 not in (None, 0):
+        volatility_normalized_gap = abs(gap_to_target) / atr_14
 
     selected_snapshot = None
     if up_snapshot is not None and down_snapshot is not None:
@@ -408,6 +412,18 @@ def _build_regime_fingerprint(
         "required_velocity_to_win": None
         if required_velocity_to_win is None
         else round(required_velocity_to_win, 4),
+        "rsi_speed_divergence": None
+        if features is None
+        else getattr(features, "rsi_speed_divergence", None),
+        "trend_intensity": None
+        if features is None
+        else getattr(features, "adx_14", None),
+        "ema_alignment": None
+        if features is None
+        else getattr(features, "ema_alignment", None),
+        "volatility_normalized_gap": None
+        if volatility_normalized_gap is None
+        else round(volatility_normalized_gap, 4),
         "window_delta_pct": None
         if features is None or getattr(features, "delta_pct_from_window_open", None) is None
         else round(getattr(features, "delta_pct_from_window_open") * 100, 4),
@@ -479,6 +495,14 @@ def append_pending_period_tick_analysis(
                     f"volatility_5m={getattr(features, 'volatility_5m', None)}",
                     f"consecutive_flat_ticks={getattr(features, 'consecutive_flat_ticks', None)}",
                     f"consecutive_directional_ticks={getattr(features, 'consecutive_directional_ticks', None)}",
+                    f"rsi_9={getattr(features, 'rsi_9', None)}",
+                    f"rsi_speed_divergence={getattr(features, 'rsi_speed_divergence', None)}",
+                    f"ema_9={getattr(features, 'ema_9', None)}",
+                    f"ema_21={getattr(features, 'ema_21', None)}",
+                    f"ema_alignment={getattr(features, 'ema_alignment', None)}",
+                    f"ema_cross_direction={getattr(features, 'ema_cross_direction', None)}",
+                    f"adx_14={getattr(features, 'adx_14', None)}",
+                    f"atr_14={getattr(features, 'atr_14', None)}",
                     f"window_open_price={_fmt(getattr(features, 'window_open_price', None))}",
                     f"delta_from_window_pct={((getattr(features, 'delta_pct_from_window_open', 0.0) or 0.0) * 100):.4f}%",
                     f"trailing_5m_open_price={_fmt(getattr(features, 'trailing_5m_open_price', None))}",
@@ -625,6 +649,14 @@ def append_completed_order_tick(
                         f"feature_volatility_5m={getattr(features, 'volatility_5m', None)}",
                         f"feature_consecutive_flat_ticks={getattr(features, 'consecutive_flat_ticks', None)}",
                         f"feature_consecutive_directional_ticks={getattr(features, 'consecutive_directional_ticks', None)}",
+                        f"feature_rsi_9={getattr(features, 'rsi_9', None)}",
+                        f"feature_rsi_speed_divergence={getattr(features, 'rsi_speed_divergence', None)}",
+                        f"feature_ema_9={getattr(features, 'ema_9', None)}",
+                        f"feature_ema_21={getattr(features, 'ema_21', None)}",
+                        f"feature_ema_alignment={getattr(features, 'ema_alignment', None)}",
+                        f"feature_ema_cross_direction={getattr(features, 'ema_cross_direction', None)}",
+                        f"feature_adx_14={getattr(features, 'adx_14', None)}",
+                        f"feature_atr_14={getattr(features, 'atr_14', None)}",
                         f"feature_window_open_price={_fmt(getattr(features, 'window_open_price', None))}",
                         f"feature_delta_from_window_pct={((getattr(features, 'delta_pct_from_window_open', 0.0) or 0.0) * 100):.4f}%",
                         f"feature_trailing_5m_open_price={_fmt(getattr(features, 'trailing_5m_open_price', None))}",
@@ -969,6 +1001,15 @@ def print_features(features, debug: bool) -> None:
     print(f"  volatility_5m         = {features.volatility_5m}")
     print(f"  consecutive_flat_ticks= {features.consecutive_flat_ticks}")
     print(f"  directional_ticks     = {features.consecutive_directional_ticks}")
+    print(f"  rsi_9                 = {features.rsi_9}")
+    print(f"  rsi_14                = {features.rsi_14}")
+    print(f"  rsi_speed_divergence  = {features.rsi_speed_divergence}")
+    print(f"  ema_9                 = {features.ema_9}")
+    print(f"  ema_21                = {features.ema_21}")
+    print(f"  ema_alignment         = {features.ema_alignment}")
+    print(f"  ema_cross_direction   = {features.ema_cross_direction}")
+    print(f"  adx_14                = {features.adx_14}")
+    print(f"  atr_14                = {features.atr_14}")
     if not debug:
         return
 
@@ -976,7 +1017,6 @@ def print_features(features, debug: bool) -> None:
     print(f"  delta_from_window_pct = {features.delta_pct_from_window_open * 100:.4f}%")
     print(f"  trailing_5m_open_price= {features.trailing_5m_open_price:.2f}")
     print(f"  delta_from_5m_pct     = {features.delta_pct_from_trailing_5m_open * 100:.4f}%")
-    print(f"  rsi_14                = {features.rsi_14}")
     print(f"  retained_samples      = {features.retained_sample_count}")
     print(f"  window_samples        = {features.window_sample_count}")
     print(f"  trailing_5m_samples   = {features.trailing_5m_sample_count}")

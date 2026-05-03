@@ -281,6 +281,35 @@ class TestBtcIndicators(unittest.TestCase):
         self.assertEqual(features.consecutive_flat_ticks, 0)
         self.assertEqual(features.consecutive_directional_ticks, 3)
 
+    def test_build_btc_features_populates_phase2_indicator_fields(self):
+        base_ts = 1_776_968_300
+        for idx in range(24):
+            indicators._record_price_sample(
+                77900.0 + (idx * 2.0),
+                as_of=datetime.fromtimestamp(base_ts + (idx * 20), tz=timezone.utc),
+            )
+
+        with patch(
+            "custom.btc_agent.indicators.fetch_btc_spot_price",
+            side_effect=self._recorded_price_return(77950.0),
+        ), patch(
+            "custom.btc_agent.indicators.datetime",
+        ) as mock_datetime:
+            mock_datetime.now.return_value = datetime.fromtimestamp(base_ts + (24 * 20), tz=timezone.utc)
+            mock_datetime.fromtimestamp.side_effect = datetime.fromtimestamp
+            mock_datetime.timezone = timezone
+            features = indicators.build_btc_features(window_start_ts=1_776_968_700)
+
+        self.assertIsNotNone(features.rsi_9)
+        self.assertIsNotNone(features.rsi_14)
+        self.assertIsNotNone(features.rsi_speed_divergence)
+        self.assertIsNotNone(features.ema_9)
+        self.assertIsNotNone(features.ema_21)
+        self.assertEqual(features.ema_alignment, True)
+        self.assertEqual(features.ema_cross_direction, "bullish")
+        self.assertIsNotNone(features.adx_14)
+        self.assertIsNotNone(features.atr_14)
+
     def test_estimate_market_window_reference_price_prefers_boundary_sample_before_start(self):
         indicators._record_price_sample(
             77940.12,
@@ -320,11 +349,19 @@ class TestBtcIndicators(unittest.TestCase):
             delta_pct_from_window_open=0.0,
             delta_pct_from_trailing_5m_open=0.0,
             delta_from_previous_tick=None,
+            rsi_9=None,
             rsi_14=None,
+            rsi_speed_divergence=None,
             momentum_1m=None,
             momentum_5m=None,
             velocity_15s=None,
             velocity_30s=None,
+            ema_9=None,
+            ema_21=None,
+            ema_alignment=None,
+            ema_cross_direction=None,
+            adx_14=None,
+            atr_14=None,
             volatility_5m=None,
             consecutive_flat_ticks=0,
             consecutive_directional_ticks=0,
@@ -338,6 +375,7 @@ class TestBtcIndicators(unittest.TestCase):
         self.assertFalse(ready)
         self.assertIn("RSI warmup incomplete", reason)
         self.assertIn("trailing 5-minute warmup incomplete", reason)
+        self.assertIn("phase 2 indicator warmup incomplete", reason)
 
     def test_feature_readiness_true_when_all_features_available(self):
         features = indicators.BtcFeatures(
@@ -348,15 +386,23 @@ class TestBtcIndicators(unittest.TestCase):
             delta_pct_from_window_open=0.0,
             delta_pct_from_trailing_5m_open=0.0,
             delta_from_previous_tick=3.0,
+            rsi_9=58.0,
             rsi_14=55.0,
+            rsi_speed_divergence=3.0,
             momentum_1m=8.0,
             momentum_5m=10.0,
             velocity_15s=4.0,
             velocity_30s=6.0,
+            ema_9=74995.0,
+            ema_21=74980.0,
+            ema_alignment=True,
+            ema_cross_direction="bullish",
+            adx_14=29.0,
+            atr_14=11.0,
             volatility_5m=6.0,
             consecutive_flat_ticks=1,
             consecutive_directional_ticks=3,
-            retained_sample_count=20,
+            retained_sample_count=21,
             window_sample_count=3,
             trailing_5m_sample_count=3,
         )

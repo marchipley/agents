@@ -1,7 +1,5 @@
 Add Features:
-
-1. Investigate: Execution edge -0.122 <= 0.050 (confidence=0.820; implied_probability=0.760)
-Sleeping 5 seconds before next tick..
+2. There blocks of times when we see many more wins IE: when we ran testing from 5/6/2026 @ 15:30 PST to 16:20 PST there were only a couple losses. Investigate other factors like news events if not already doing so. 
 
 3. Move non critical vars from .env to a config file. We only need sensitive info in .env.
 
