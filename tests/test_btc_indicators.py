@@ -153,6 +153,14 @@ class TestBtcIndicators(unittest.TestCase):
             with self.assertRaises(requests.RequestException):
                 indicators._fetch_spot_price_from_polymarket_rtds()
 
+    def test_record_price_sample_skips_near_duplicate_same_price_samples(self):
+        sample_time = datetime.fromtimestamp(1_777_000_000, tz=timezone.utc)
+        indicators._record_price_sample(75920.0, as_of=sample_time)
+        indicators._record_price_sample(75920.0, as_of=sample_time)
+        indicators._record_price_sample(75920.0, as_of=sample_time.replace(microsecond=500000))
+
+        self.assertEqual(len(indicators._PRICE_HISTORY), 1)
+
     def test_build_btc_features_uses_current_window_samples_for_window_open(self):
         indicators._record_price_sample(
             75781.0,
@@ -246,7 +254,32 @@ class TestBtcIndicators(unittest.TestCase):
         self.assertEqual(features.velocity_15s, 2.0)
         self.assertEqual(features.velocity_30s, 5.0)
         self.assertEqual(features.consecutive_flat_ticks, 0)
-        self.assertEqual(features.consecutive_directional_ticks, 1)
+        self.assertEqual(features.consecutive_directional_ticks, 3)
+
+    def test_build_btc_features_directional_streak_ignores_flat_ticks(self):
+        seeded_samples = [
+            (datetime.fromtimestamp(1_776_968_675, tz=timezone.utc), 77940.0),
+            (datetime.fromtimestamp(1_776_968_690, tz=timezone.utc), 77942.0),
+            (datetime.fromtimestamp(1_776_968_700, tz=timezone.utc), 77944.0),
+            (datetime.fromtimestamp(1_776_968_705, tz=timezone.utc), 77944.0),
+            (datetime.fromtimestamp(1_776_968_708, tz=timezone.utc), 77944.0),
+        ]
+        for sample_time, sample_price in seeded_samples:
+            indicators._record_price_sample(sample_price, as_of=sample_time)
+
+        with patch(
+            "custom.btc_agent.indicators.fetch_btc_spot_price",
+            side_effect=self._recorded_price_return(77946.0),
+        ), patch(
+            "custom.btc_agent.indicators.datetime",
+        ) as mock_datetime:
+            mock_datetime.now.return_value = datetime.fromtimestamp(1_776_968_720, tz=timezone.utc)
+            mock_datetime.fromtimestamp.side_effect = datetime.fromtimestamp
+            mock_datetime.timezone = timezone
+            features = indicators.build_btc_features(window_start_ts=1_776_968_700)
+
+        self.assertEqual(features.consecutive_flat_ticks, 0)
+        self.assertEqual(features.consecutive_directional_ticks, 3)
 
     def test_estimate_market_window_reference_price_prefers_boundary_sample_before_start(self):
         indicators._record_price_sample(

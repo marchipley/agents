@@ -312,6 +312,12 @@ def _record_price_sample(price: float, as_of: Optional[datetime] = None) -> None
     global _PRICE_HISTORY
 
     timestamp = as_of or datetime.now(timezone.utc)
+    if _PRICE_HISTORY:
+        last_ts, last_price = _PRICE_HISTORY[-1]
+        same_price = abs(last_price - price) <= 1e-9
+        near_duplicate = abs((timestamp - last_ts).total_seconds()) <= 1.0
+        if same_price and near_duplicate:
+            return
     _PRICE_HISTORY.append((timestamp, price))
     if len(_PRICE_HISTORY) > 60:
         _PRICE_HISTORY = _PRICE_HISTORY[-60:]
@@ -525,7 +531,7 @@ def _count_consecutive_directional_ticks(prices: List[float], epsilon: float = 1
 
     for delta in reversed(deltas):
         if abs(delta) <= epsilon:
-            break
+            continue
         sign = 1 if delta > 0 else -1
         if trailing_sign == 0:
             trailing_sign = sign
