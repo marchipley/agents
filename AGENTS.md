@@ -140,6 +140,7 @@ What the BTC agent does today:
 - Computes a reference price from quote, midpoint, last trade, and order book data.
 - Reuses a single decision-time token quote snapshot for both the printed `UP/DOWN (with decision)` block and the paper execution gate so those logs cannot diverge within one loop tick.
 - Uses `USE_RECOMMENDED_LIMIT` to choose whether submit checks and execution use the recommended snapped limit or the raw target limit; when disabled, recommended limit is still computed for visibility but is not used as a gating/execution factor.
+- When `USE_RECOMMENDED_LIMIT=false`, the agent still collects internal CLOB quote/book context for LLM reasoning and completed-order logging, but it no longer prints the pre-trade `UP` / `DOWN` quote snapshots or uses recommended-limit gating.
 - Skips LLM decision calls entirely when both the current `UP` and `DOWN` quote snapshots are already not safe to submit, preserving AI API calls when neither side is actionable.
 - Provides the LLM with time remaining, window delta, and current `UP` / `DOWN` ask prices so the model can apply EV- and timing-based rules for late-window decisions.
 - Skips LLM decisioning and execution during the last 60 seconds of the current 5-minute market window and only continues collecting trend data for the upcoming period.
@@ -246,6 +247,8 @@ Data required:
 - `velocity_15s`
 - `velocity_30s`
 - `consecutive_flat_ticks`
+- `consecutive_directional_ticks`
+- `required_velocity_to_win`
 - final order outcome classification using the resolved closing price
 
 Completion criteria:

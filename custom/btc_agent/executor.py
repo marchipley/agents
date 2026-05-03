@@ -534,14 +534,15 @@ def get_token_quote_snapshot(
     if spread is not None and reference_price not in (None, 0):
         spread_bps = (spread / reference_price) * 10_000
     top_level_book_imbalance = None
+    top_depth_levels = 5
     top_three_bid_size = sum(
         size
-        for size in (_extract_level_size(level) for level in bids[:3] if isinstance(level, dict))
+        for size in (_extract_level_size(level) for level in bids[:top_depth_levels] if isinstance(level, dict))
         if size is not None
     )
     top_three_ask_size = sum(
         size
-        for size in (_extract_level_size(level) for level in asks[:3] if isinstance(level, dict))
+        for size in (_extract_level_size(level) for level in asks[:top_depth_levels] if isinstance(level, dict))
         if size is not None
     )
     imbalance_pressure = None

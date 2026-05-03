@@ -79,6 +79,16 @@ def _build_openai_realtime_system_prompt() -> str:
 
 def _build_user_prompt(features: BtcFeatures, market: BtcUpDownMarket, up_snapshot=None, down_snapshot=None) -> str:
     time_remaining_seconds = max(market.end_ts - int(features.as_of.timestamp()), 0)
+    gap_to_target = (
+        None
+        if market.settlement_threshold in (None, 0)
+        else features.price_usd - market.settlement_threshold
+    )
+    required_velocity_to_win = (
+        None
+        if gap_to_target is None or time_remaining_seconds <= 0
+        else abs(gap_to_target) / time_remaining_seconds
+    )
     return (
         f"Market title: {market.title}\n"
         f"Market slug: {market.slug}\n\n"
@@ -89,7 +99,12 @@ def _build_user_prompt(features: BtcFeatures, market: BtcUpDownMarket, up_snapsh
         f"- Time remaining seconds: {time_remaining_seconds}\n"
         f"- Window Delta pct: {features.delta_pct_from_window_open * 100:.4f}%\n"
         f"- UP Polymarket ask/buy quote: {getattr(up_snapshot, 'buy_quote', None)}\n"
-        f"- DOWN Polymarket ask/buy quote: {getattr(down_snapshot, 'buy_quote', None)}\n\n"
+        f"- DOWN Polymarket ask/buy quote: {getattr(down_snapshot, 'buy_quote', None)}\n"
+        f"- UP top-book imbalance: {getattr(up_snapshot, 'top_level_book_imbalance', None)}\n"
+        f"- DOWN top-book imbalance: {getattr(down_snapshot, 'top_level_book_imbalance', None)}\n"
+        f"- UP imbalance pressure: {getattr(up_snapshot, 'imbalance_pressure', None)}\n"
+        f"- DOWN imbalance pressure: {getattr(down_snapshot, 'imbalance_pressure', None)}\n"
+        f"- Required velocity to win USD/sec: {required_velocity_to_win}\n\n"
         "BTC features:\n"
         f"- Current BTC price USD: {features.price_usd:.2f}\n"
         f"- Market window open price USD: {features.window_open_price:.2f}\n"
@@ -100,11 +115,20 @@ def _build_user_prompt(features: BtcFeatures, market: BtcUpDownMarket, up_snapsh
         f"- RSI(14): {features.rsi_14}\n"
         f"- 1-minute momentum USD: {features.momentum_1m}\n"
         f"- Trailing 5-minute momentum USD: {features.momentum_5m}\n"
-        f"- Trailing 5-minute volatility: {features.volatility_5m}\n\n"
+        f"- Velocity over last 15 seconds USD: {features.velocity_15s}\n"
+        f"- Velocity over last 30 seconds USD: {features.velocity_30s}\n"
+        f"- Trailing 5-minute volatility: {features.volatility_5m}\n"
+        f"- Consecutive flat ticks: {features.consecutive_flat_ticks}\n"
+        f"- Consecutive directional ticks: {features.consecutive_directional_ticks}\n\n"
         "Decision policy:\n"
         "- Focus on regime detection and direction, not limit pricing.\n"
         "- Confidence should represent your estimated win probability for the chosen side.\n"
         "- Window Delta is the master confidence signal near T-10.\n"
+        "- Treat order-book imbalance and imbalance pressure as leading indicators.\n"
+        "- Do not fade PARABOLIC_UP or PARABOLIC_DOWN regimes just because RSI is extreme.\n"
+        "- If required velocity to win exceeds trailing volatility, prefer NO_TRADE.\n"
+        "- If consecutive directional ticks are 8 or more, do not chase further in that same direction.\n"
+        "- Use velocity_15s and velocity_30s to detect late reversals and falling-knife setups.\n"
         "- If Window Delta < 0.005% near T-10, prefer NO_TRADE.\n"
         "- If Window Delta > 0.15% near T-10, confidence should usually be 0.95 or higher.\n"
         "- If confidence > 0.90, assume no extra edge buffer is required.\n"
@@ -118,6 +142,16 @@ def _build_user_prompt(features: BtcFeatures, market: BtcUpDownMarket, up_snapsh
 
 def _build_compact_user_prompt(features: BtcFeatures, market: BtcUpDownMarket, up_snapshot=None, down_snapshot=None) -> str:
     time_remaining_seconds = max(market.end_ts - int(features.as_of.timestamp()), 0)
+    gap_to_target = (
+        None
+        if market.settlement_threshold in (None, 0)
+        else features.price_usd - market.settlement_threshold
+    )
+    required_velocity_to_win = (
+        None
+        if gap_to_target is None or time_remaining_seconds <= 0
+        else abs(gap_to_target) / time_remaining_seconds
+    )
     return (
         f"BTC 5m market slug: {market.slug}\n"
         f"Price to beat USD: {market.settlement_threshold}\n"
@@ -126,6 +160,9 @@ def _build_compact_user_prompt(features: BtcFeatures, market: BtcUpDownMarket, u
         f"Window Delta pct: {features.delta_pct_from_window_open * 100:.4f}%\n"
         f"UP ask price: {getattr(up_snapshot, 'buy_quote', None)}\n"
         f"DOWN ask price: {getattr(down_snapshot, 'buy_quote', None)}\n"
+        f"UP imbalance: {getattr(up_snapshot, 'top_level_book_imbalance', None)}\n"
+        f"DOWN imbalance: {getattr(down_snapshot, 'top_level_book_imbalance', None)}\n"
+        f"Req velocity to win: {required_velocity_to_win}\n"
         f"Window open price USD: {features.window_open_price:.2f}\n"
         f"Trailing 5-minute open USD: {features.trailing_5m_open_price:.2f}\n"
         f"Delta from trailing 5-minute open pct: {features.delta_pct_from_trailing_5m_open * 100:.4f}%\n"
@@ -133,8 +170,13 @@ def _build_compact_user_prompt(features: BtcFeatures, market: BtcUpDownMarket, u
         f"RSI(14): {features.rsi_14}\n"
         f"1-minute momentum USD: {features.momentum_1m}\n"
         f"Trailing 5-minute momentum USD: {features.momentum_5m}\n"
+        f"Velocity 15s USD: {features.velocity_15s}\n"
+        f"Velocity 30s USD: {features.velocity_30s}\n"
         f"Trailing 5-minute volatility: {features.volatility_5m}\n"
+        f"Directional ticks: {features.consecutive_directional_ticks}\n"
         "Settlement: UP wins only above the price to beat; DOWN wins only below it.\n"
+        "Do not fade parabolic trend and do not chase if directional ticks are >= 8.\n"
+        "If required velocity to win exceeds volatility, prefer NO_TRADE.\n"
         "Provide direction plus confidence as win probability. Execution handles EV and timing.\n"
         'Return one JSON object with keys: decision, confidence, max_price_to_pay, reason.'
     )
@@ -142,6 +184,16 @@ def _build_compact_user_prompt(features: BtcFeatures, market: BtcUpDownMarket, u
 
 def _build_minimal_user_prompt(features: BtcFeatures, market: BtcUpDownMarket, up_snapshot=None, down_snapshot=None) -> str:
     time_remaining_seconds = max(market.end_ts - int(features.as_of.timestamp()), 0)
+    gap_to_target = (
+        None
+        if market.settlement_threshold in (None, 0)
+        else features.price_usd - market.settlement_threshold
+    )
+    required_velocity_to_win = (
+        None
+        if gap_to_target is None or time_remaining_seconds <= 0
+        else abs(gap_to_target) / time_remaining_seconds
+    )
     return (
         f"beat={market.settlement_threshold}\n"
         f"t={time_remaining_seconds}\n"
@@ -149,11 +201,18 @@ def _build_minimal_user_prompt(features: BtcFeatures, market: BtcUpDownMarket, u
         f"delta_pct={features.delta_pct_from_window_open * 100:.4f}\n"
         f"up_ask={getattr(up_snapshot, 'buy_quote', None)}\n"
         f"down_ask={getattr(down_snapshot, 'buy_quote', None)}\n"
+        f"up_imb={getattr(up_snapshot, 'top_level_book_imbalance', None)}\n"
+        f"dn_imb={getattr(down_snapshot, 'top_level_book_imbalance', None)}\n"
         f"rsi14={features.rsi_14}\n"
         f"mom1m={features.momentum_1m}\n"
         f"mom5m={features.momentum_5m}\n"
+        f"v15={features.velocity_15s}\n"
+        f"v30={features.velocity_30s}\n"
         f"vol5m={features.volatility_5m}\n"
+        f"reqv={required_velocity_to_win}\n"
+        f"dir_ticks={features.consecutive_directional_ticks}\n"
         "UP above beat. DOWN below beat.\n"
+        "No fade of parabolic trend; no chase if dir_ticks>=8; if reqv>vol5m prefer NO_TRADE.\n"
         "Return direction + confidence as win probability.\n"
         'Return one JSON object with keys: decision, confidence, max_price_to_pay, reason.'
     )
@@ -166,6 +225,16 @@ def _build_openai_realtime_user_prompt(
     down_snapshot=None,
 ) -> str:
     time_remaining_seconds = max(market.end_ts - int(features.as_of.timestamp()), 0)
+    gap_to_target = (
+        None
+        if market.settlement_threshold in (None, 0)
+        else features.price_usd - market.settlement_threshold
+    )
+    required_velocity_to_win = (
+        None
+        if gap_to_target is None or time_remaining_seconds <= 0
+        else abs(gap_to_target) / time_remaining_seconds
+    )
     return (
         f"beat={market.settlement_threshold};"
         f"t={time_remaining_seconds};"
@@ -173,10 +242,16 @@ def _build_openai_realtime_user_prompt(
         f"d={features.delta_pct_from_window_open * 100:.4f};"
         f"u={getattr(up_snapshot, 'buy_quote', None)};"
         f"dn={getattr(down_snapshot, 'buy_quote', None)};"
+        f"ui={getattr(up_snapshot, 'top_level_book_imbalance', None)};"
+        f"di={getattr(down_snapshot, 'top_level_book_imbalance', None)};"
         f"rsi={features.rsi_14};"
         f"m1={features.momentum_1m};"
         f"m5={features.momentum_5m};"
+        f"v15={features.velocity_15s};"
+        f"v30={features.velocity_30s};"
         f"v5={features.volatility_5m};"
+        f"reqv={required_velocity_to_win};"
+        f"dt={features.consecutive_directional_ticks};"
         "json only"
     )
 

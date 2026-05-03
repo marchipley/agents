@@ -246,6 +246,7 @@ class TestBtcIndicators(unittest.TestCase):
         self.assertEqual(features.velocity_15s, 2.0)
         self.assertEqual(features.velocity_30s, 5.0)
         self.assertEqual(features.consecutive_flat_ticks, 0)
+        self.assertEqual(features.consecutive_directional_ticks, 1)
 
     def test_estimate_market_window_reference_price_prefers_boundary_sample_before_start(self):
         indicators._record_price_sample(
@@ -293,6 +294,7 @@ class TestBtcIndicators(unittest.TestCase):
             velocity_30s=None,
             volatility_5m=None,
             consecutive_flat_ticks=0,
+            consecutive_directional_ticks=0,
             retained_sample_count=3,
             window_sample_count=1,
             trailing_5m_sample_count=1,
@@ -320,6 +322,7 @@ class TestBtcIndicators(unittest.TestCase):
             velocity_30s=6.0,
             volatility_5m=6.0,
             consecutive_flat_ticks=1,
+            consecutive_directional_ticks=3,
             retained_sample_count=20,
             window_sample_count=3,
             trailing_5m_sample_count=3,

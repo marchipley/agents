@@ -321,6 +321,26 @@ def _rsi_regime(features) -> str:
         return "unknown"
     momentum_5m = getattr(features, "momentum_5m", None)
     delta_pct = getattr(features, "delta_pct_from_window_open", None)
+    price_usd = getattr(features, "price_usd", None)
+    parabolic_threshold = None
+    if momentum_5m is not None and price_usd not in (None, 0):
+        parabolic_threshold = abs(momentum_5m) / price_usd
+    if (
+        rsi >= 75
+        and momentum_5m is not None
+        and momentum_5m > 0
+        and parabolic_threshold is not None
+        and parabolic_threshold > 0.0003
+    ):
+        return "PARABOLIC_UP"
+    if (
+        rsi <= 25
+        and momentum_5m is not None
+        and momentum_5m < 0
+        and parabolic_threshold is not None
+        and parabolic_threshold > 0.0003
+    ):
+        return "PARABOLIC_DOWN"
     if rsi >= 80:
         if (momentum_5m is not None and momentum_5m > 15) or (delta_pct is not None and delta_pct > 0.0015):
             return "strong_trend_high"
@@ -356,9 +376,14 @@ def _build_regime_fingerprint(
 
     gap_to_target = None
     gap_to_target_pct = None
+    time_remaining_seconds = _market_time_remaining_seconds(market_slug, observed_at)
     if current_price is not None and period_open_price_to_beat not in (None, 0):
         gap_to_target = current_price - period_open_price_to_beat
         gap_to_target_pct = (gap_to_target / period_open_price_to_beat) * 100
+
+    required_velocity_to_win = None
+    if gap_to_target is not None and time_remaining_seconds not in (None, 0):
+        required_velocity_to_win = abs(gap_to_target) / time_remaining_seconds
 
     selected_snapshot = None
     if up_snapshot is not None and down_snapshot is not None:
@@ -372,14 +397,17 @@ def _build_regime_fingerprint(
         selected_snapshot = up_snapshot or down_snapshot
 
     return {
-        "time_remaining_seconds": _market_time_remaining_seconds(market_slug, observed_at),
-        "next_slug_proximity": _market_time_remaining_seconds(market_slug, observed_at),
+        "time_remaining_seconds": time_remaining_seconds,
+        "next_slug_proximity": time_remaining_seconds,
         "volatility_regime": _volatility_regime(getattr(features, "volatility_5m", None)) if features is not None else "unknown",
         "trend_regime": _trend_regime(features) if features is not None else "unknown",
         "rsi_regime": _rsi_regime(features) if features is not None else "unknown",
         "liquidity_regime": _liquidity_regime(selected_snapshot) if selected_snapshot is not None else "unknown",
         "threshold_gap_usd": None if gap_to_target is None else round(gap_to_target, 4),
         "threshold_gap_pct": None if gap_to_target_pct is None else round(gap_to_target_pct, 4),
+        "required_velocity_to_win": None
+        if required_velocity_to_win is None
+        else round(required_velocity_to_win, 4),
         "window_delta_pct": None
         if features is None or getattr(features, "delta_pct_from_window_open", None) is None
         else round(getattr(features, "delta_pct_from_window_open") * 100, 4),
@@ -398,6 +426,9 @@ def _build_regime_fingerprint(
         "consecutive_flat_ticks": None
         if features is None
         else getattr(features, "consecutive_flat_ticks", None),
+        "consecutive_directional_ticks": None
+        if features is None
+        else getattr(features, "consecutive_directional_ticks", None),
     }
 
 
@@ -447,6 +478,7 @@ def append_pending_period_tick_analysis(
                     f"velocity_30s={getattr(features, 'velocity_30s', None)}",
                     f"volatility_5m={getattr(features, 'volatility_5m', None)}",
                     f"consecutive_flat_ticks={getattr(features, 'consecutive_flat_ticks', None)}",
+                    f"consecutive_directional_ticks={getattr(features, 'consecutive_directional_ticks', None)}",
                     f"window_open_price={_fmt(getattr(features, 'window_open_price', None))}",
                     f"delta_from_window_pct={((getattr(features, 'delta_pct_from_window_open', 0.0) or 0.0) * 100):.4f}%",
                     f"trailing_5m_open_price={_fmt(getattr(features, 'trailing_5m_open_price', None))}",
@@ -592,6 +624,7 @@ def append_completed_order_tick(
                         f"feature_velocity_30s={getattr(features, 'velocity_30s', None)}",
                         f"feature_volatility_5m={getattr(features, 'volatility_5m', None)}",
                         f"feature_consecutive_flat_ticks={getattr(features, 'consecutive_flat_ticks', None)}",
+                        f"feature_consecutive_directional_ticks={getattr(features, 'consecutive_directional_ticks', None)}",
                         f"feature_window_open_price={_fmt(getattr(features, 'window_open_price', None))}",
                         f"feature_delta_from_window_pct={((getattr(features, 'delta_pct_from_window_open', 0.0) or 0.0) * 100):.4f}%",
                         f"feature_trailing_5m_open_price={_fmt(getattr(features, 'trailing_5m_open_price', None))}",
@@ -935,6 +968,7 @@ def print_features(features, debug: bool) -> None:
     print(f"  velocity_30s          = {features.velocity_30s}")
     print(f"  volatility_5m         = {features.volatility_5m}")
     print(f"  consecutive_flat_ticks= {features.consecutive_flat_ticks}")
+    print(f"  directional_ticks     = {features.consecutive_directional_ticks}")
     if not debug:
         return
 
@@ -1066,9 +1100,8 @@ def run_once() -> None:
         if active_orders:
             up_snapshot = None
             down_snapshot = None
-            if use_recommended_limit:
-                up_snapshot = get_token_quote_snapshot(market.up_token_id)
-                down_snapshot = get_token_quote_snapshot(market.down_token_id)
+            up_snapshot = get_token_quote_snapshot(market.up_token_id)
+            down_snapshot = get_token_quote_snapshot(market.down_token_id)
             try:
                 features = build_btc_features(window_start_ts=market.start_ts)
                 current_btc_price = features.price_usd
@@ -1108,7 +1141,7 @@ def run_once() -> None:
             up_snapshot = None
             down_snapshot = None
             active_orders = get_active_orders()
-            if active_orders and use_recommended_limit:
+            if active_orders:
                 up_snapshot = get_token_quote_snapshot(market.up_token_id)
                 down_snapshot = get_token_quote_snapshot(market.down_token_id)
 
@@ -1170,6 +1203,11 @@ def run_once() -> None:
         if cfg.debug:
             print("-" * 80)
         return
+
+    if up_snapshot is None:
+        up_snapshot = get_token_quote_snapshot(market.up_token_id)
+    if down_snapshot is None:
+        down_snapshot = get_token_quote_snapshot(market.down_token_id)
 
     if cfg.max_trades_per_period > 1 and state.trades_executed > 0:
         losing_active_orders = _get_losing_active_orders(features.price_usd)

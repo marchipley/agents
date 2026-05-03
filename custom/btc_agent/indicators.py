@@ -50,6 +50,7 @@ class BtcFeatures:
     velocity_30s: Optional[float]
     volatility_5m: Optional[float]
     consecutive_flat_ticks: int
+    consecutive_directional_ticks: int
     retained_sample_count: int
     window_sample_count: int
     trailing_5m_sample_count: int
@@ -514,6 +515,27 @@ def _count_consecutive_flat_ticks(prices: List[float], epsilon: float = 1e-9) ->
     return flat_count
 
 
+def _count_consecutive_directional_ticks(prices: List[float], epsilon: float = 1e-9) -> int:
+    if len(prices) < 2:
+        return 0
+
+    deltas = [prices[idx] - prices[idx - 1] for idx in range(1, len(prices))]
+    trailing_sign = 0
+    streak = 0
+
+    for delta in reversed(deltas):
+        if abs(delta) <= epsilon:
+            break
+        sign = 1 if delta > 0 else -1
+        if trailing_sign == 0:
+            trailing_sign = sign
+        if sign != trailing_sign:
+            break
+        streak += 1
+
+    return streak
+
+
 def _get_market_window_reference_sample(
     window_start: datetime,
     max_lookback_seconds: int = _WINDOW_BASELINE_CARRY_FORWARD_SECONDS,
@@ -605,6 +627,7 @@ def build_btc_features(window_start_ts: int) -> BtcFeatures:
     velocity_30s = _compute_velocity(now, price_now, 30)
     volatility_5m = statistics.pstdev(trailing_5m_prices) if len(trailing_5m_prices) >= 2 else None
     consecutive_flat_ticks = _count_consecutive_flat_ticks(prices)
+    consecutive_directional_ticks = _count_consecutive_directional_ticks(prices)
 
     return BtcFeatures(
         as_of=now,
@@ -621,6 +644,7 @@ def build_btc_features(window_start_ts: int) -> BtcFeatures:
         velocity_30s=velocity_30s,
         volatility_5m=volatility_5m,
         consecutive_flat_ticks=consecutive_flat_ticks,
+        consecutive_directional_ticks=consecutive_directional_ticks,
         retained_sample_count=len(prices),
         window_sample_count=len(window_prices),
         trailing_5m_sample_count=len(trailing_5m_prices),
