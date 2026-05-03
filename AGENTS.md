@@ -219,7 +219,15 @@ Goal:
 Current status:
 
 - In progress.
-- Completed-order logs now include richer per-tick feature data, active-order snapshots, book context, and a deterministic `regime_fingerprint`.
+- Completed-order logs now include richer per-tick feature data, active-order snapshots, internal CLOB book context, and a deterministic `regime_fingerprint`.
+- Phase 1 now also captures micro-momentum and reachability context:
+  - `velocity_15s`
+  - `velocity_30s`
+  - `consecutive_flat_ticks`
+  - `consecutive_directional_ticks`
+  - `required_velocity_to_win`
+- Deterministic regime labeling now includes `PARABOLIC_UP` / `PARABOLIC_DOWN` so extreme RSI in strong momentum is treated as trend continuation context rather than automatic mean-reversion.
+- Even when `USE_RECOMMENDED_LIMIT=false`, the agent still fetches internal `UP` / `DOWN` book context for logging and LLM reasoning, while continuing to suppress the old pre-trade quote snapshot console output.
 
 Data required:
 
@@ -255,6 +263,7 @@ Completion criteria:
 
 - Completed-order files consistently explain wins and losses without requiring manual reconstruction from console logs.
 - Rollover finalization uses the next slug’s `price_to_beat` or an equivalent resolved closing price rather than a stale live spot sample.
+- `top_level_book_imbalance`, `imbalance_pressure`, and `liquidity_regime` should no longer be routinely null/unknown in Phase 1 win/loss files.
 
 ### Phase 2: Indicator Expansion
 
