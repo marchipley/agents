@@ -50,6 +50,7 @@ class BtcFeatures:
     momentum_5m: Optional[float]
     velocity_15s: Optional[float]
     velocity_30s: Optional[float]
+    momentum_acceleration: Optional[float]
     ema_9: Optional[float]
     ema_21: Optional[float]
     ema_alignment: Optional[bool]
@@ -682,6 +683,11 @@ def build_btc_features(window_start_ts: int) -> BtcFeatures:
     momentum_5m = price_now - trailing_5m_open_price if len(trailing_5m_prices) >= 2 else None
     velocity_15s = _compute_velocity(now, price_now, 15)
     velocity_30s = _compute_velocity(now, price_now, 30)
+    momentum_acceleration = (
+        None
+        if velocity_15s is None or velocity_30s is None
+        else velocity_15s - velocity_30s
+    )
     ema_9 = _compute_ema(prices, period=9)
     ema_21 = _compute_ema(prices, period=21)
     ema_alignment = None
@@ -715,6 +721,7 @@ def build_btc_features(window_start_ts: int) -> BtcFeatures:
         momentum_5m=momentum_5m,
         velocity_15s=velocity_15s,
         velocity_30s=velocity_30s,
+        momentum_acceleration=momentum_acceleration,
         ema_9=ema_9,
         ema_21=ema_21,
         ema_alignment=ema_alignment,

@@ -253,6 +253,7 @@ class TestBtcIndicators(unittest.TestCase):
 
         self.assertEqual(features.velocity_15s, 2.0)
         self.assertEqual(features.velocity_30s, 5.0)
+        self.assertEqual(features.momentum_acceleration, -3.0)
         self.assertEqual(features.consecutive_flat_ticks, 0)
         self.assertEqual(features.consecutive_directional_ticks, 3)
 
@@ -356,6 +357,7 @@ class TestBtcIndicators(unittest.TestCase):
             momentum_5m=None,
             velocity_15s=None,
             velocity_30s=None,
+            momentum_acceleration=None,
             ema_9=None,
             ema_21=None,
             ema_alignment=None,
@@ -393,6 +395,7 @@ class TestBtcIndicators(unittest.TestCase):
             momentum_5m=10.0,
             velocity_15s=4.0,
             velocity_30s=6.0,
+            momentum_acceleration=-2.0,
             ema_9=74995.0,
             ema_21=74980.0,
             ema_alignment=True,

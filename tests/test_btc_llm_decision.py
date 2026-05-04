@@ -27,6 +27,7 @@ class DummyFeatures:
     momentum_5m = 10.0
     velocity_15s = 4.0
     velocity_30s = 6.0
+    momentum_acceleration = -2.0
     ema_9 = 74980.0
     ema_21 = 74960.0
     ema_alignment = True
@@ -122,6 +123,7 @@ class TestBtcLlmDecision(unittest.TestCase):
         self.assertIn("RSI(9): 61.0", prompt)
         self.assertIn("ADX(14): 31.0", prompt)
         self.assertIn("EMA alignment (Price > EMA9 > EMA21): True", prompt)
+        self.assertIn("Momentum acceleration: -2.0", prompt)
         self.assertIn("Focus on regime detection and direction, not limit pricing.", prompt)
         self.assertIn("execution layer will apply regime-aware EV, deadline, liquidity, and FOK rules", prompt)
 

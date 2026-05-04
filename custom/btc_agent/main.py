@@ -316,7 +316,9 @@ def _liquidity_regime(snapshot: TokenQuoteSnapshot) -> str:
 
 
 def _rsi_regime(features) -> str:
-    rsi = getattr(features, "rsi_14", None)
+    rsi_fast = getattr(features, "rsi_9", None)
+    rsi_slow = getattr(features, "rsi_14", None)
+    rsi = rsi_fast if rsi_fast is not None else rsi_slow
     if rsi is None:
         return "unknown"
     momentum_5m = getattr(features, "momentum_5m", None)
@@ -326,7 +328,8 @@ def _rsi_regime(features) -> str:
     if momentum_5m is not None and price_usd not in (None, 0):
         parabolic_threshold = abs(momentum_5m) / price_usd
     if (
-        rsi >= 75
+        rsi_fast is not None
+        and rsi_fast >= 80
         and momentum_5m is not None
         and momentum_5m > 0
         and parabolic_threshold is not None
@@ -334,7 +337,8 @@ def _rsi_regime(features) -> str:
     ):
         return "PARABOLIC_UP"
     if (
-        rsi <= 25
+        rsi_fast is not None
+        and rsi_fast <= 20
         and momentum_5m is not None
         and momentum_5m < 0
         and parabolic_threshold is not None
@@ -388,6 +392,9 @@ def _build_regime_fingerprint(
     volatility_normalized_gap = None
     if gap_to_target is not None and atr_14 not in (None, 0):
         volatility_normalized_gap = abs(gap_to_target) / atr_14
+    oracle_gap_ratio = None
+    if gap_to_target is not None and atr_14 not in (None, 0):
+        oracle_gap_ratio = gap_to_target / atr_14
 
     selected_snapshot = None
     if up_snapshot is not None and down_snapshot is not None:
@@ -412,6 +419,9 @@ def _build_regime_fingerprint(
         "required_velocity_to_win": None
         if required_velocity_to_win is None
         else round(required_velocity_to_win, 4),
+        "oracle_gap_ratio": None
+        if oracle_gap_ratio is None
+        else round(oracle_gap_ratio, 4),
         "rsi_speed_divergence": None
         if features is None
         else getattr(features, "rsi_speed_divergence", None),
@@ -492,6 +502,7 @@ def append_pending_period_tick_analysis(
                     f"momentum_5m={getattr(features, 'momentum_5m', None)}",
                     f"velocity_15s={getattr(features, 'velocity_15s', None)}",
                     f"velocity_30s={getattr(features, 'velocity_30s', None)}",
+                    f"momentum_acceleration={getattr(features, 'momentum_acceleration', None)}",
                     f"volatility_5m={getattr(features, 'volatility_5m', None)}",
                     f"consecutive_flat_ticks={getattr(features, 'consecutive_flat_ticks', None)}",
                     f"consecutive_directional_ticks={getattr(features, 'consecutive_directional_ticks', None)}",
@@ -646,6 +657,7 @@ def append_completed_order_tick(
                         f"feature_momentum_5m={getattr(features, 'momentum_5m', None)}",
                         f"feature_velocity_15s={getattr(features, 'velocity_15s', None)}",
                         f"feature_velocity_30s={getattr(features, 'velocity_30s', None)}",
+                        f"feature_momentum_acceleration={getattr(features, 'momentum_acceleration', None)}",
                         f"feature_volatility_5m={getattr(features, 'volatility_5m', None)}",
                         f"feature_consecutive_flat_ticks={getattr(features, 'consecutive_flat_ticks', None)}",
                         f"feature_consecutive_directional_ticks={getattr(features, 'consecutive_directional_ticks', None)}",
@@ -998,6 +1010,7 @@ def print_features(features, debug: bool) -> None:
     print(f"  momentum_5m           = {features.momentum_5m}")
     print(f"  velocity_15s          = {features.velocity_15s}")
     print(f"  velocity_30s          = {features.velocity_30s}")
+    print(f"  momentum_acceleration = {features.momentum_acceleration}")
     print(f"  volatility_5m         = {features.volatility_5m}")
     print(f"  consecutive_flat_ticks= {features.consecutive_flat_ticks}")
     print(f"  directional_ticks     = {features.consecutive_directional_ticks}")

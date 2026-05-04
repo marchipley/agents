@@ -127,6 +127,7 @@ What the BTC agent does today:
 - Approximates market-window open price using the earliest retained BTC sample inside the current 5-minute market window, not a true historical open fetched from a historical BTC data source.
 - Computes 5-minute momentum and volatility from a trailing 5-minute BTC sample window, so analysis continues to reference recent cross-period history even immediately after a new market window begins.
 - Computes a Phase 2 indicator set from the retained BTC history, including `RSI(9)`, `RSI(14)`, `EMA(9)`, `EMA(21)`, `ADX(14)`, `ATR(14)`, `rsi_speed_divergence`, `ema_alignment`, and `ema_cross_direction`.
+- Applies a Phase 2.5 refinement layer that also computes `momentum_acceleration` and `oracle_gap_ratio`, and uses the faster `RSI(9)` reading as the primary trigger for aggressive `PARABOLIC_UP` / `PARABOLIC_DOWN` labeling.
 - Falls back across multiple live BTC spot-price APIs first, then to the most recent in-memory BTC price sample when all configured live price requests fail during the current process lifetime, which prevents active paper-order reporting from aborting immediately on a single-provider rate-limit response after recent successful samples.
 - Uses the current 5-minute BTC Up/Down slug by timestamp alignment, unless overridden.
 - Performs a startup IP geolocation check and refuses to run unless the current public IP resolves to an allowed country, currently Indonesia or Mexico.
@@ -146,6 +147,9 @@ What the BTC agent does today:
 - Skips LLM decision calls entirely when both the current `UP` and `DOWN` quote snapshots are already not safe to submit, preserving AI API calls when neither side is actionable.
 - Provides the LLM with time remaining, window delta, and current `UP` / `DOWN` ask prices so the model can apply EV- and timing-based rules for late-window decisions.
 - Provides the LLM with the Phase 2 trend-strength and normalization fields as well, including `RSI(9)`, `RSI speed divergence`, `EMA` alignment/cross direction, `ADX(14)`, `ATR(14)`, and the volatility-normalized / required-velocity context derived from the current target gap.
+- The LLM prompt now also includes `momentum_acceleration` and follows stricter ADX guidance:
+  - if `ADX(14) > 35`, do not trade against the trend
+  - if `ADX(14) > 45`, treat the move as potentially exhausted and avoid late trend-chasing
 - Skips LLM decisioning and execution during the last 60 seconds of the current 5-minute market window and only continues collecting trend data for the upcoming period.
 - Prints the exact execution snapshot used by the paper-trade path, including the calculated `reference_price`, `target_limit_price`, and `recommended_limit_price`.
 - Executes paper trades by default and can submit live Polymarket buy orders through `agents/polymarket/polymarket.py` when `USE_PAPER_TRADES=false`.
@@ -278,7 +282,7 @@ Goal:
 
 Current status:
 
-- In progress, with the first Phase 2 indicator pass implemented.
+- In progress, with the first Phase 2 indicator pass implemented and a Phase 2.5 refinement layer added after reviewing the first Phase 2 losses.
 - The BTC feature set now includes:
   - `RSI(9)` alongside `RSI(14)`
   - `EMA(9)` and `EMA(21)`
@@ -288,6 +292,9 @@ Current status:
   - `ATR(14)`
   - `rsi_speed_divergence`
   - `volatility_normalized_gap` in the regime fingerprint
+  - `momentum_acceleration`
+  - `oracle_gap_ratio`
+- The regime builder now prioritizes the fast RSI signal when deciding whether the environment is `PARABOLIC_UP` or `PARABOLIC_DOWN`.
 - Feature readiness now requires enough retained history for the longer Phase 2 calculations, so the bot waits for the extended warmup when those values are missing.
 
 Implemented additions:
@@ -298,6 +305,8 @@ Implemented additions:
 - `ADX(14)` for trend-strength detection
 - `rsi_speed_divergence`
 - `volatility_normalized_gap`
+- `momentum_acceleration`
+- `oracle_gap_ratio`
 
 Still optional / not implemented yet:
 
@@ -314,6 +323,7 @@ Completion criteria:
 - New indicators are computed reliably on every eligible tick.
 - Completed-order files show the new indicator values for later post-trade review.
 - The LLM prompt and completed-order logs both contain the new Phase 2 values so the expanded indicator set can be evaluated against real wins and losses.
+- Phase 2.5 loss review fields should be present as well, especially `momentum_acceleration`, `oracle_gap_ratio`, and the fast-RSI-driven parabolic regime labels.
 
 ### Phase 3: Execution And Microstructure Features
 

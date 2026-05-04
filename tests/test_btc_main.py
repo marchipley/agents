@@ -166,6 +166,7 @@ class TestBtcMain(unittest.TestCase):
             momentum_5m=-6.079999999987194,
             velocity_15s=-3.2,
             velocity_30s=-7.4,
+            momentum_acceleration=4.2,
             volatility_5m=7.832826962356144,
             consecutive_flat_ticks=2,
             consecutive_directional_ticks=4,
@@ -220,6 +221,7 @@ class TestBtcMain(unittest.TestCase):
         self.assertIn("feature_momentum_5m=-6.079999999987194", content)
         self.assertIn("feature_velocity_15s=-3.2", content)
         self.assertIn("feature_velocity_30s=-7.4", content)
+        self.assertIn("feature_momentum_acceleration=4.2", content)
         self.assertIn("feature_volatility_5m=7.832826962356144", content)
         self.assertIn("feature_consecutive_flat_ticks=2", content)
         self.assertIn("feature_consecutive_directional_ticks=4", content)
@@ -294,6 +296,7 @@ class TestBtcMain(unittest.TestCase):
             momentum_5m=10.0,
             velocity_15s=3.0,
             velocity_30s=4.0,
+            momentum_acceleration=-1.0,
             volatility_5m=22.0,
             consecutive_flat_ticks=0,
             consecutive_directional_ticks=3,
@@ -335,6 +338,7 @@ class TestBtcMain(unittest.TestCase):
         self.assertIn("consecutive_flat_ticks=0", content)
         self.assertIn("\"next_slug_proximity\"", content)
         self.assertIn("\"required_velocity_to_win\"", content)
+        self.assertIn("\"oracle_gap_ratio\"", content)
 
     def test_promote_pending_period_log_to_completed_renames_file(self):
         with open(
@@ -586,6 +590,7 @@ class TestBtcMain(unittest.TestCase):
             momentum_5m=2.0,
             velocity_15s=0.5,
             velocity_30s=1.0,
+            momentum_acceleration=-0.5,
             volatility_5m=3.0,
             consecutive_flat_ticks=0,
             consecutive_directional_ticks=2,
@@ -685,6 +690,7 @@ class TestBtcMain(unittest.TestCase):
             momentum_5m=2.0,
             velocity_15s=0.5,
             velocity_30s=1.0,
+            momentum_acceleration=-0.5,
             volatility_5m=3.0,
             consecutive_flat_ticks=0,
             consecutive_directional_ticks=2,
@@ -801,6 +807,7 @@ class TestBtcMain(unittest.TestCase):
             momentum_5m=2.0,
             velocity_15s=0.5,
             velocity_30s=1.0,
+            momentum_acceleration=-0.5,
             volatility_5m=3.0,
             consecutive_flat_ticks=0,
             consecutive_directional_ticks=2,
@@ -883,6 +890,7 @@ class TestBtcMain(unittest.TestCase):
             momentum_5m=-3.0,
             velocity_15s=-1.0,
             velocity_30s=-2.0,
+            momentum_acceleration=1.0,
             volatility_5m=4.0,
             consecutive_flat_ticks=0,
             consecutive_directional_ticks=6,
