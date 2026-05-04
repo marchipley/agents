@@ -23,6 +23,7 @@ from .indicators import (
     build_btc_features,
     estimate_market_window_reference_price,
     fetch_btc_spot_price,
+    get_display_btc_price_poly,
     get_feature_readiness,
 )
 from .llm_decision import decide_trade, test_llm_connection
@@ -430,6 +431,22 @@ def _build_regime_fingerprint(
     oracle_gap_ratio = None
     if gap_to_target is not None and atr_14 not in (None, 0):
         oracle_gap_ratio = gap_to_target / atr_14
+    implied_oracle_price = None
+    feed_drift_usd = None
+    if (
+        period_open_price_to_beat not in (None, 0)
+        and atr_14 not in (None, 0)
+        and up_snapshot is not None
+        and down_snapshot is not None
+        and getattr(up_snapshot, "buy_quote", None) is not None
+        and getattr(down_snapshot, "buy_quote", None) is not None
+    ):
+        implied_oracle_price = (
+            period_open_price_to_beat
+            + (float(up_snapshot.buy_quote) - float(down_snapshot.buy_quote)) * atr_14
+        )
+        if current_price is not None:
+            feed_drift_usd = current_price - implied_oracle_price
 
     selected_snapshot = None
     if up_snapshot is not None and down_snapshot is not None:
@@ -457,6 +474,12 @@ def _build_regime_fingerprint(
         "oracle_gap_ratio": None
         if oracle_gap_ratio is None
         else round(oracle_gap_ratio, 4),
+        "implied_oracle_price": None
+        if implied_oracle_price is None
+        else round(implied_oracle_price, 4),
+        "feed_drift_usd": None
+        if feed_drift_usd is None
+        else round(feed_drift_usd, 4),
         "rsi_speed_divergence": None
         if features is None
         else getattr(features, "rsi_speed_divergence", None),
@@ -490,6 +513,9 @@ def _build_regime_fingerprint(
         "consecutive_directional_ticks": None
         if features is None
         else getattr(features, "consecutive_directional_ticks", None),
+        "last_10_ticks_direction": None
+        if features is None
+        else getattr(features, "last_10_ticks_direction", None),
     }
 
 
@@ -543,6 +569,7 @@ def append_pending_period_tick_analysis(
                     f"volatility_5m={getattr(features, 'volatility_5m', None)}",
                     f"consecutive_flat_ticks={getattr(features, 'consecutive_flat_ticks', None)}",
                     f"consecutive_directional_ticks={getattr(features, 'consecutive_directional_ticks', None)}",
+                    f"last_10_ticks_direction={getattr(features, 'last_10_ticks_direction', None)}",
                     f"rsi_9={getattr(features, 'rsi_9', None)}",
                     f"rsi_speed_divergence={getattr(features, 'rsi_speed_divergence', None)}",
                     f"ema_9={getattr(features, 'ema_9', None)}",
@@ -705,6 +732,7 @@ def append_completed_order_tick(
                         f"feature_volatility_5m={getattr(features, 'volatility_5m', None)}",
                         f"feature_consecutive_flat_ticks={getattr(features, 'consecutive_flat_ticks', None)}",
                         f"feature_consecutive_directional_ticks={getattr(features, 'consecutive_directional_ticks', None)}",
+                        f"feature_last_10_ticks_direction={getattr(features, 'last_10_ticks_direction', None)}",
                         f"feature_rsi_9={getattr(features, 'rsi_9', None)}",
                         f"feature_rsi_speed_divergence={getattr(features, 'rsi_speed_divergence', None)}",
                         f"feature_ema_9={getattr(features, 'ema_9', None)}",
@@ -1056,6 +1084,11 @@ def print_active_orders(current_btc_price: float) -> None:
 def print_features(features, debug: bool) -> None:
     print("Features:")
     print(f"  btc_price             = {features.price_usd:.2f}")
+    btc_price_poly = getattr(features, "btc_price_poly", None)
+    if btc_price_poly is None:
+        print("  btc_price_poly        = None")
+    else:
+        print(f"  btc_price_poly        = {btc_price_poly:.5f}")
     print(f"  delta_prev_tick       = {features.delta_from_previous_tick}")
     print(f"  momentum_1m           = {features.momentum_1m}")
     print(f"  momentum_5m           = {features.momentum_5m}")
@@ -1074,6 +1107,7 @@ def print_features(features, debug: bool) -> None:
     print(f"  ema_cross_direction   = {features.ema_cross_direction}")
     print(f"  adx_14                = {features.adx_14}")
     print(f"  atr_14                = {features.atr_14}")
+    print(f"  last_10_ticks_dir     = {features.last_10_ticks_direction}")
     if not debug:
         return
 
@@ -1104,6 +1138,10 @@ def print_market_context(market, debug: bool) -> None:
 def print_llm_skip_reason(reason: str) -> None:
     print("LLM decision skipped:")
     print(f"  reason            = {reason}")
+
+
+def _attach_display_prices(features) -> None:
+    setattr(features, "btc_price_poly", get_display_btc_price_poly())
 
 
 def both_sides_untradable_reason(up_snapshot: TokenQuoteSnapshot, down_snapshot: TokenQuoteSnapshot) -> str:
@@ -1208,6 +1246,7 @@ def run_once() -> None:
             down_snapshot = get_token_quote_snapshot(market.down_token_id)
             try:
                 features = build_btc_features(window_start_ts=market.start_ts)
+                _attach_display_prices(features)
                 current_btc_price = features.price_usd
                 observed_at = features.as_of
             except Exception:
@@ -1234,6 +1273,7 @@ def run_once() -> None:
             print_market_context(market, debug=cfg.debug)
             try:
                 features = build_btc_features(window_start_ts=market.start_ts)
+                _attach_display_prices(features)
                 print_features(features, debug=cfg.debug)
                 current_btc_price = features.price_usd
                 observed_at = features.as_of
@@ -1292,6 +1332,7 @@ def run_once() -> None:
             return
 
     features = build_btc_features(window_start_ts=market.start_ts)
+    _attach_display_prices(features)
     print_features(features, debug=cfg.debug)
     features_ready, feature_skip_reason = get_feature_readiness(features)
     if not features_ready:

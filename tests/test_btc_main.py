@@ -3,6 +3,7 @@ import types
 import unittest
 import os
 import glob
+import io
 from datetime import datetime, timezone
 from contextlib import ExitStack
 from unittest.mock import patch
@@ -29,6 +30,7 @@ from custom.btc_agent.main import (
     promote_pending_period_log_to_completed,
     run_once,
     main,
+    print_features,
     resolve_price_to_beat_with_retries,
     wait_for_next_tick_or_quit,
     write_price_to_beat_debug_file,
@@ -119,6 +121,39 @@ class TestBtcMain(unittest.TestCase):
 
     def test_has_valid_price_to_beat_accepts_realistic_btc_values(self):
         self.assertTrue(has_valid_price_to_beat(78218.01972274295))
+
+    def test_print_features_outputs_btc_price_poly(self):
+        features = SimpleNamespace(
+            price_usd=80382.04,
+            btc_price_poly=80381.12345,
+            delta_from_previous_tick=5.0,
+            momentum_1m=7.0,
+            momentum_5m=10.0,
+            velocity_15s=4.0,
+            velocity_30s=6.0,
+            momentum_acceleration=-2.0,
+            volatility_5m=22.0,
+            consecutive_flat_ticks=0,
+            consecutive_directional_ticks=3,
+            rsi_9=61.0,
+            rsi_14=55.0,
+            rsi_speed_divergence=6.0,
+            ema_9=74980.0,
+            ema_21=74960.0,
+            ema_alignment=True,
+            ema_cross_direction="bullish",
+            adx_14=31.0,
+            atr_14=12.0,
+            last_10_ticks_direction="UUUDUUUUUU",
+        )
+
+        stdout = io.StringIO()
+        with patch("sys.stdout", stdout):
+            print_features(features, debug=False)
+
+        content = stdout.getvalue()
+        self.assertIn("btc_price             = 80382.04", content)
+        self.assertIn("btc_price_poly        = 80381.12345", content)
 
     def test_append_completed_order_tick_writes_completed_order_file(self):
         order = ActivePaperOrder(
@@ -257,6 +292,7 @@ class TestBtcMain(unittest.TestCase):
         self.assertIn("feature_volatility_5m=7.832826962356144", content)
         self.assertIn("feature_consecutive_flat_ticks=2", content)
         self.assertIn("feature_consecutive_directional_ticks=4", content)
+        self.assertIn("feature_last_10_ticks_direction=", content)
         self.assertIn("active_up_buy_quote=0.250", content)
         self.assertIn("active_down_buy_quote=0.700", content)
         self.assertIn("\"liquidity_regime\"", content)
@@ -368,10 +404,13 @@ class TestBtcMain(unittest.TestCase):
         self.assertIn("decision_side=UP", content)
         self.assertIn("velocity_15s=3.0", content)
         self.assertIn("consecutive_flat_ticks=0", content)
+        self.assertIn("last_10_ticks_direction=", content)
         self.assertIn("market_time_remaining_mmss=", content)
         self.assertIn("\"next_slug_proximity\"", content)
         self.assertIn("\"required_velocity_to_win\"", content)
         self.assertIn("\"oracle_gap_ratio\"", content)
+        self.assertIn("\"implied_oracle_price\"", content)
+        self.assertIn("\"feed_drift_usd\"", content)
 
     def test_promote_pending_period_log_to_completed_copies_and_preserves_file(self):
         with open(

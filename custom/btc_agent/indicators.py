@@ -32,6 +32,13 @@ _POLYMARKET_RTDS_FILTERS = json.dumps({"symbol": _POLYMARKET_RTDS_SYMBOL})
 _POLYMARKET_RTDS_TIMEOUT_SECONDS = 3.0
 _POLYMARKET_RTDS_MAX_MESSAGES = 8
 _POLYMARKET_RTDS_MAX_SNAPSHOT_AGE_SECONDS = 3.0
+_POLY_HERMES_URL = "https://hermes.pyth.network/v2/updates/price/latest"
+_POLY_BTC_PRICE_ID = "0xe62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43"
+_POLY_PRICE_CACHE_SECONDS = 5.0
+_POLY_PRICE_FAILURE_CACHE_SECONDS = 30.0
+_LAST_POLY_DISPLAY_PRICE: Optional[float] = None
+_LAST_POLY_DISPLAY_PRICE_FETCHED_AT: float = 0.0
+_LAST_POLY_DISPLAY_PRICE_FAILED_AT: float = 0.0
 
 
 @dataclass
@@ -60,6 +67,7 @@ class BtcFeatures:
     volatility_5m: Optional[float]
     consecutive_flat_ticks: int
     consecutive_directional_ticks: int
+    last_10_ticks_direction: str
     retained_sample_count: int
     window_sample_count: int
     trailing_5m_sample_count: int
@@ -84,6 +92,59 @@ def _fetch_spot_price_from_coinbase() -> float:
     resp.raise_for_status()
     data = resp.json()
     return float(data["data"]["amount"])
+
+
+def _fetch_btc_price_from_poly_reference() -> float:
+    resp = http_get(
+        _POLY_HERMES_URL,
+        params={
+            "ids[]": _POLY_BTC_PRICE_ID,
+            "parsed": "true",
+        },
+        timeout=5,
+    )
+    resp.raise_for_status()
+    payload = resp.json()
+    parsed = payload.get("parsed") or []
+    if not parsed:
+        raise requests.RequestException("Poly reference price payload did not include parsed data")
+    price_payload = (parsed[0] or {}).get("price") or {}
+    raw_price = price_payload.get("price")
+    expo = price_payload.get("expo")
+    if raw_price is None or expo is None:
+        raise requests.RequestException("Poly reference price payload did not include price/expo")
+    return float(raw_price) * (10 ** int(expo))
+
+
+def get_display_btc_price_poly() -> Optional[float]:
+    global _LAST_POLY_DISPLAY_PRICE
+    global _LAST_POLY_DISPLAY_PRICE_FETCHED_AT
+    global _LAST_POLY_DISPLAY_PRICE_FAILED_AT
+
+    now_monotonic = time.monotonic()
+    if (
+        _LAST_POLY_DISPLAY_PRICE is not None
+        and (now_monotonic - _LAST_POLY_DISPLAY_PRICE_FETCHED_AT) <= _POLY_PRICE_CACHE_SECONDS
+    ):
+        return _LAST_POLY_DISPLAY_PRICE
+    if (
+        _LAST_POLY_DISPLAY_PRICE is None
+        and _LAST_POLY_DISPLAY_PRICE_FAILED_AT
+        and (now_monotonic - _LAST_POLY_DISPLAY_PRICE_FAILED_AT) <= _POLY_PRICE_FAILURE_CACHE_SECONDS
+    ):
+        return None
+
+    try:
+        price = _fetch_btc_price_from_poly_reference()
+    except Exception:
+        _LAST_POLY_DISPLAY_PRICE = None
+        _LAST_POLY_DISPLAY_PRICE_FAILED_AT = now_monotonic
+        return None
+
+    _LAST_POLY_DISPLAY_PRICE = price
+    _LAST_POLY_DISPLAY_PRICE_FETCHED_AT = now_monotonic
+    _LAST_POLY_DISPLAY_PRICE_FAILED_AT = 0.0
+    return price
 
 
 def _create_polymarket_rtds_connection():
@@ -597,6 +658,21 @@ def _count_consecutive_directional_ticks(prices: List[float], epsilon: float = 1
     return streak
 
 
+def _build_last_ticks_direction(prices: List[float], max_ticks: int = 10, epsilon: float = 1e-9) -> str:
+    if len(prices) < 2:
+        return ""
+    deltas = [prices[idx] - prices[idx - 1] for idx in range(1, len(prices))]
+    chars = []
+    for delta in deltas[-max_ticks:]:
+        if abs(delta) <= epsilon:
+            chars.append("F")
+        elif delta > 0:
+            chars.append("U")
+        else:
+            chars.append("D")
+    return "".join(chars)
+
+
 def _get_market_window_reference_sample(
     window_start: datetime,
     max_lookback_seconds: int = _WINDOW_BASELINE_CARRY_FORWARD_SECONDS,
@@ -710,6 +786,7 @@ def build_btc_features(window_start_ts: int) -> BtcFeatures:
     volatility_5m = statistics.pstdev(trailing_5m_prices) if len(trailing_5m_prices) >= 2 else None
     consecutive_flat_ticks = _count_consecutive_flat_ticks(prices)
     consecutive_directional_ticks = _count_consecutive_directional_ticks(prices)
+    last_10_ticks_direction = _build_last_ticks_direction(prices)
 
     return BtcFeatures(
         as_of=now,
@@ -736,6 +813,7 @@ def build_btc_features(window_start_ts: int) -> BtcFeatures:
         volatility_5m=volatility_5m,
         consecutive_flat_ticks=consecutive_flat_ticks,
         consecutive_directional_ticks=consecutive_directional_ticks,
+        last_10_ticks_direction=last_10_ticks_direction,
         retained_sample_count=len(prices),
         window_sample_count=len(window_prices),
         trailing_5m_sample_count=len(trailing_5m_prices),

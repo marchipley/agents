@@ -41,6 +41,7 @@ class DummyFeatures:
     volatility_5m = 22.0
     consecutive_flat_ticks = 0
     consecutive_directional_ticks = 3
+    last_10_ticks_direction = "UUUDUUUUUU"
     as_of = datetime.fromtimestamp(1777513792, tz=timezone.utc)
 
 

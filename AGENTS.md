@@ -124,6 +124,7 @@ Notes:
 What the BTC agent does today:
 
 - Pulls the current BTC/USD spot price from a fallback chain of live providers, currently preferring Polymarket RTDS and then falling back through Binance, Coinbase, and CoinGecko.
+- Also fetches a separate display-only `btc_price_poly` reference from the Hermes/Pyth endpoint the user specified, purely for operator comparison against the primary `btc_price`; this value does not affect features, decisions, or execution.
 - Maintains an in-memory rolling price history during process lifetime only.
 - Backfills enough recent BTC history on startup to support the Phase 2 indicator set, including the longer EMA(21) warmup.
 - Approximates market-window open price using the earliest retained BTC sample inside the current 5-minute market window, not a true historical open fetched from a historical BTC data source.
@@ -149,7 +150,7 @@ What the BTC agent does today:
 - Skips LLM decision calls entirely when both the current `UP` and `DOWN` quote snapshots are already not safe to submit, preserving AI API calls when neither side is actionable.
 - Provides the LLM with time remaining, window delta, and current `UP` / `DOWN` ask prices so the model can apply EV- and timing-based rules for late-window decisions.
 - Provides the LLM with the Phase 2 trend-strength and normalization fields as well, including `RSI(9)`, `RSI speed divergence`, `EMA` alignment/cross direction, `ADX(14)`, `ATR(14)`, and the volatility-normalized / required-velocity context derived from the current target gap.
-- The LLM prompt now also includes `momentum_acceleration` and follows stricter ADX guidance:
+- The LLM prompt now also includes `momentum_acceleration`, `last_10_ticks_direction`, and follows stricter ADX guidance:
   - if `ADX(14) > 35`, do not trade against the trend
   - if `ADX(14) > 45`, treat the move as potentially exhausted and avoid late trend-chasing
 - The LLM prompt now treats `time_remaining_seconds` as the authoritative clock:
@@ -160,6 +161,10 @@ What the BTC agent does today:
 - The LLM prompt now treats `window_delta_pct` as the source of truth for overall trend direction and uses `velocity_30s` only as a micro-momentum entry-timing signal, which is intended to prevent early-window reversal hallucinations.
 - The LLM prompt also includes a stronger quote-sanity rule: if the chosen side is priced below `0.15` and `time_remaining_seconds >= 15`, the model should prefer `NO_TRADE`; only in the final 15 seconds should it consider fading that consensus on a clear reversal.
 - The LLM prompt includes a sign-consistency rule: if `window_delta_pct` is positive and the model chooses `DOWN`, or negative and it chooses `UP`, confidence should stay below `0.50` unless trend exhaustion is genuinely clear.
+- The Phase 2.7 prompt layer now also instructs the model to prefer `NO_TRADE` when:
+  - the market is too close to call, meaning `abs(gap_to_target_usd) < 0.2 * volatility_5m` with more than 60 seconds remaining
+  - it wants `UP` while the `UP` quote is below `0.45`
+  - `RSI(9) > 85` and BTC is already above the strike, unless it is inside the final 15 seconds and continuation is exceptionally clear
 - Skips LLM decisioning and execution during the last 60 seconds of the current 5-minute market window and only continues collecting trend data for the upcoming period.
 - Prints the exact execution snapshot used by the paper-trade path, including the calculated `reference_price`, `target_limit_price`, and `recommended_limit_price`.
 - Executes paper trades by default and can submit live Polymarket buy orders through `agents/polymarket/polymarket.py` when `USE_PAPER_TRADES=false`.
@@ -169,10 +174,17 @@ What the BTC agent does today:
 - Before live BUY submission, the agent quantizes share size to a Polymarket-compatible precision so the quote-side amount stays within the exchange’s 2-decimal maker-amount constraint while still respecting the 4-decimal taker-size limit.
 - Rejects live submissions cleanly when the configured budget cannot satisfy the venue minimum order size instead of silently scaling above the configured budget.
 - Applies a hard execution-side quote-floor veto before submission: if the chosen side quote is below `0.15` and there are 15 seconds or more remaining, the trade is rejected even if the LLM asks for it.
+- Applies a Phase 2.7 victory-margin veto before submission: if there are more than 60 seconds remaining and the BTC gap to target is smaller than `0.2 * volatility_5m`, the trade is rejected as too close to call.
+- Applies a Phase 2.7 quote-price divergence veto for `UP`: if the bot wants `UP` but the `UP` quote is below `0.45`, the trade is rejected because the market is not confirming the breakout.
+- Applies a Phase 2.7 RSI ceiling veto for `UP`: if `RSI(9) > 85` while BTC is already above the strike, the trade is rejected as an exhaustion-risk breakout chase.
 - Tracks in-memory active orders for the current 5-minute market window and prints each order’s target BTC level plus whether the position is currently winning, losing, or tied.
 - Writes a per-slug order-tracking file under `completed_orders/` for each executed order, appending one status snapshot per tick plus the pre-order tick history that led into the trade.
 - Preserves every analyzed 5-minute window under `completed_orders/completed_period_<slug_timestamp>.txt`, even when no trade executes; executed-order files receive a copy of the pre-order period analysis, while the standalone period log is still finalized and retained on slug rollover.
 - Completed-order and completed-period loop entries now include both raw remaining seconds and a `mm:ss` market-time-remaining field for easier late-window analysis.
+- Completed-order and completed-period logs now also carry Phase 2.7 price-lag diagnostics in the regime fingerprint:
+  - `implied_oracle_price`
+  - `feed_drift_usd`
+  - `last_10_ticks_direction`
 - On graceful exit (`q` or `KeyboardInterrupt`), the current slug’s `pending_period_<timestamp>.txt` is finalized into `completed_period_<timestamp>.txt` so pending analysis files are not stranded.
 - Evaluates paper-order win/loss status against the market-period settlement reference, preferring Polymarket’s parsed threshold and otherwise falling back to the closest retained BTC sample at the start of the 5-minute period rather than the trade-entry BTC price.
 - Enforces `BTC_AGENT_MAX_TRADES_PER_PERIOD` per 5-minute market slug; once that limit is reached, subsequent loop ticks skip quote snapshots and LLM trade decisions until the next market window begins.
@@ -185,6 +197,9 @@ What the BTC agent does today:
 - Retrieves Polymarket portfolio value separately from the on-chain cash balance lookup so one failure does not suppress the other.
 - Approves or rejects a trade based on confidence, entry caps, quote drift, and in live mode also account cash availability.
 - Prints diagnostics for balances, quotes, features, decision, and simulated execution.
+- The `Features:` block now prints both:
+  - `btc_price`: the active strategy price source
+  - `btc_price_poly`: the display-only Hermes/Pyth comparison price
 
 What it does not do yet:
 

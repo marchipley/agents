@@ -773,6 +773,11 @@ def _validate_trade_candidate(
     window_delta_master_switch = _is_window_delta_master_switch(features, time_remaining_seconds)
     min_edge_required = 0.0 if high_confidence_override else 0.05
     chosen_side_quote = snapshot.buy_quote if snapshot.buy_quote is not None else implied_probability
+    gap_to_target = None
+    if features is not None and getattr(features, "price_usd", None) is not None and market.settlement_threshold not in (None, 0):
+        gap_to_target = float(features.price_usd) - float(market.settlement_threshold)
+    volatility_5m = None if features is None else getattr(features, "volatility_5m", None)
+    rsi_9 = None if features is None else getattr(features, "rsi_9", None)
 
     if (
         chosen_side_quote is not None
@@ -787,6 +792,61 @@ def _validate_trade_candidate(
             reason=(
                 "Quote-floor veto blocked low-probability reversal trade "
                 f"(buy_quote={chosen_side_quote:.3f}; time_remaining={time_remaining_seconds}s)"
+            ),
+            snapshot=snapshot,
+        )
+
+    if (
+        gap_to_target is not None
+        and volatility_5m not in (None, 0)
+        and time_remaining_seconds > 60
+        and abs(gap_to_target) < (float(volatility_5m) * 0.2)
+    ):
+        return None, _build_rejected_trade_result(
+            side=decision.side,
+            size=0.0,
+            price=submission_limit_price,
+            token_id=token_id,
+            reason=(
+                "Too close to call: target gap is inside the victory-margin buffer "
+                f"(gap={gap_to_target:.3f}; volatility_5m={float(volatility_5m):.3f}; "
+                f"buffer={(float(volatility_5m) * 0.2):.3f}; time_remaining={time_remaining_seconds}s)"
+            ),
+            snapshot=snapshot,
+        )
+
+    if (
+        decision.side == "UP"
+        and chosen_side_quote is not None
+        and chosen_side_quote < 0.45
+    ):
+        return None, _build_rejected_trade_result(
+            side=decision.side,
+            size=0.0,
+            price=submission_limit_price,
+            token_id=token_id,
+            reason=(
+                "Quote-price divergence veto blocked UP trade "
+                f"(up_buy_quote={chosen_side_quote:.3f})"
+            ),
+            snapshot=snapshot,
+        )
+
+    if (
+        decision.side == "UP"
+        and rsi_9 is not None
+        and rsi_9 > 85
+        and gap_to_target is not None
+        and gap_to_target > 0
+    ):
+        return None, _build_rejected_trade_result(
+            side=decision.side,
+            size=0.0,
+            price=submission_limit_price,
+            token_id=token_id,
+            reason=(
+                "RSI ceiling veto blocked UP trade above strike "
+                f"(rsi_9={rsi_9:.3f}; gap={gap_to_target:.3f})"
             ),
             snapshot=snapshot,
         )

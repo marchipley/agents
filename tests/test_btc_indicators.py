@@ -13,6 +13,9 @@ class TestBtcIndicators(unittest.TestCase):
         indicators._PRICE_HISTORY.clear()
         indicators._LAST_SUCCESSFUL_PROVIDER_INDEX = 0
         indicators._PRICE_HISTORY_BACKFILLED = False
+        indicators._LAST_POLY_DISPLAY_PRICE = None
+        indicators._LAST_POLY_DISPLAY_PRICE_FETCHED_AT = 0.0
+        indicators._LAST_POLY_DISPLAY_PRICE_FAILED_AT = 0.0
 
     @staticmethod
     def _recorded_price_return(price: float):
@@ -75,6 +78,39 @@ class TestBtcIndicators(unittest.TestCase):
         ):
             with self.assertRaises(requests.HTTPError):
                 indicators.fetch_btc_spot_price()
+
+    def test_get_display_btc_price_poly_parses_reference_payload(self):
+        fake_response = MagicMock()
+        fake_response.json.return_value = {
+            "parsed": [
+                {
+                    "price": {
+                        "price": "8038212345",
+                        "expo": -5,
+                    }
+                }
+            ]
+        }
+
+        with patch(
+            "custom.btc_agent.indicators.http_get",
+            return_value=fake_response,
+        ):
+            price = indicators.get_display_btc_price_poly()
+
+        self.assertAlmostEqual(price, 80382.12345, places=5)
+
+    def test_get_display_btc_price_poly_uses_cache(self):
+        with patch(
+            "custom.btc_agent.indicators._fetch_btc_price_from_poly_reference",
+            return_value=80382.12345,
+        ) as mock_fetch:
+            first = indicators.get_display_btc_price_poly()
+            second = indicators.get_display_btc_price_poly()
+
+        self.assertEqual(first, 80382.12345)
+        self.assertEqual(second, 80382.12345)
+        mock_fetch.assert_called_once()
 
     def test_fetch_spot_price_from_binance_websocket_parses_ticker_message(self):
         fake_socket = MagicMock()
@@ -438,6 +474,7 @@ class TestBtcIndicators(unittest.TestCase):
             volatility_5m=None,
             consecutive_flat_ticks=0,
             consecutive_directional_ticks=0,
+            last_10_ticks_direction="",
             retained_sample_count=3,
             window_sample_count=1,
             trailing_5m_sample_count=1,
@@ -476,6 +513,7 @@ class TestBtcIndicators(unittest.TestCase):
             volatility_5m=6.0,
             consecutive_flat_ticks=1,
             consecutive_directional_ticks=3,
+            last_10_ticks_direction="UUUDUUUUUU",
             retained_sample_count=21,
             window_sample_count=3,
             trailing_5m_sample_count=3,
