@@ -34,11 +34,6 @@ _POLYMARKET_RTDS_MAX_MESSAGES = 8
 _POLYMARKET_RTDS_MAX_SNAPSHOT_AGE_SECONDS = 3.0
 _POLY_HERMES_URL = "https://hermes.pyth.network/v2/updates/price/latest"
 _POLY_BTC_PRICE_ID = "0xe62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43"
-_POLY_PRICE_CACHE_SECONDS = 5.0
-_POLY_PRICE_FAILURE_CACHE_SECONDS = 30.0
-_LAST_POLY_DISPLAY_PRICE: Optional[float] = None
-_LAST_POLY_DISPLAY_PRICE_FETCHED_AT: float = 0.0
-_LAST_POLY_DISPLAY_PRICE_FAILED_AT: float = 0.0
 
 
 @dataclass
@@ -114,37 +109,6 @@ def _fetch_btc_price_from_poly_reference() -> float:
     if raw_price is None or expo is None:
         raise requests.RequestException("Poly reference price payload did not include price/expo")
     return float(raw_price) * (10 ** int(expo))
-
-
-def get_display_btc_price_poly() -> Optional[float]:
-    global _LAST_POLY_DISPLAY_PRICE
-    global _LAST_POLY_DISPLAY_PRICE_FETCHED_AT
-    global _LAST_POLY_DISPLAY_PRICE_FAILED_AT
-
-    now_monotonic = time.monotonic()
-    if (
-        _LAST_POLY_DISPLAY_PRICE is not None
-        and (now_monotonic - _LAST_POLY_DISPLAY_PRICE_FETCHED_AT) <= _POLY_PRICE_CACHE_SECONDS
-    ):
-        return _LAST_POLY_DISPLAY_PRICE
-    if (
-        _LAST_POLY_DISPLAY_PRICE is None
-        and _LAST_POLY_DISPLAY_PRICE_FAILED_AT
-        and (now_monotonic - _LAST_POLY_DISPLAY_PRICE_FAILED_AT) <= _POLY_PRICE_FAILURE_CACHE_SECONDS
-    ):
-        return None
-
-    try:
-        price = _fetch_btc_price_from_poly_reference()
-    except Exception:
-        _LAST_POLY_DISPLAY_PRICE = None
-        _LAST_POLY_DISPLAY_PRICE_FAILED_AT = now_monotonic
-        return None
-
-    _LAST_POLY_DISPLAY_PRICE = price
-    _LAST_POLY_DISPLAY_PRICE_FETCHED_AT = now_monotonic
-    _LAST_POLY_DISPLAY_PRICE_FAILED_AT = 0.0
-    return price
 
 
 def _create_polymarket_rtds_connection():
@@ -365,6 +329,7 @@ def _fetch_spot_price_from_polymarket_rtds() -> float:
 
 def _get_price_providers():
     return [
+        ("Poly Hermes", _fetch_btc_price_from_poly_reference),
         ("Polymarket RTDS", _fetch_spot_price_from_polymarket_rtds),
         ("Binance WebSocket", _fetch_spot_price_from_binance_websocket),
         ("Coinbase", _fetch_spot_price_from_coinbase),

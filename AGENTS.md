@@ -123,8 +123,7 @@ Notes:
 
 What the BTC agent does today:
 
-- Pulls the current BTC/USD spot price from a fallback chain of live providers, currently preferring Polymarket RTDS and then falling back through Binance, Coinbase, and CoinGecko.
-- Also fetches a separate display-only `btc_price_poly` reference from the Hermes/Pyth endpoint the user specified, purely for operator comparison against the primary `btc_price`; this value does not affect features, decisions, or execution.
+- Pulls the current BTC/USD spot price from a fallback chain of live providers, now preferring the Hermes/Pyth BTC reference endpoint the user specified, then falling back through Polymarket RTDS, Binance, Coinbase, and CoinGecko.
 - Maintains an in-memory rolling price history during process lifetime only.
 - Backfills enough recent BTC history on startup to support the Phase 2 indicator set, including the longer EMA(21) warmup.
 - Approximates market-window open price using the earliest retained BTC sample inside the current 5-minute market window, not a true historical open fetched from a historical BTC data source.
@@ -197,9 +196,7 @@ What the BTC agent does today:
 - Retrieves Polymarket portfolio value separately from the on-chain cash balance lookup so one failure does not suppress the other.
 - Approves or rejects a trade based on confidence, entry caps, quote drift, and in live mode also account cash availability.
 - Prints diagnostics for balances, quotes, features, decision, and simulated execution.
-- The `Features:` block now prints both:
-  - `btc_price`: the active strategy price source
-  - `btc_price_poly`: the display-only Hermes/Pyth comparison price
+- The `Features:` block prints a single `btc_price`, which now comes from the Hermes/Pyth reference feed first and only falls back to the older providers if that feed is unavailable.
 
 What it does not do yet:
 

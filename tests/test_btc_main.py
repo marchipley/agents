@@ -122,10 +122,9 @@ class TestBtcMain(unittest.TestCase):
     def test_has_valid_price_to_beat_accepts_realistic_btc_values(self):
         self.assertTrue(has_valid_price_to_beat(78218.01972274295))
 
-    def test_print_features_outputs_btc_price_poly(self):
+    def test_print_features_outputs_primary_btc_price(self):
         features = SimpleNamespace(
             price_usd=80382.04,
-            btc_price_poly=80381.12345,
             delta_from_previous_tick=5.0,
             momentum_1m=7.0,
             momentum_5m=10.0,
@@ -153,7 +152,7 @@ class TestBtcMain(unittest.TestCase):
 
         content = stdout.getvalue()
         self.assertIn("btc_price             = 80382.04", content)
-        self.assertIn("btc_price_poly        = 80381.12345", content)
+        self.assertNotIn("btc_price_poly", content)
 
     def test_append_completed_order_tick_writes_completed_order_file(self):
         order = ActivePaperOrder(

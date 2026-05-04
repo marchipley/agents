@@ -23,7 +23,6 @@ from .indicators import (
     build_btc_features,
     estimate_market_window_reference_price,
     fetch_btc_spot_price,
-    get_display_btc_price_poly,
     get_feature_readiness,
 )
 from .llm_decision import decide_trade, test_llm_connection
@@ -1084,11 +1083,6 @@ def print_active_orders(current_btc_price: float) -> None:
 def print_features(features, debug: bool) -> None:
     print("Features:")
     print(f"  btc_price             = {features.price_usd:.2f}")
-    btc_price_poly = getattr(features, "btc_price_poly", None)
-    if btc_price_poly is None:
-        print("  btc_price_poly        = None")
-    else:
-        print(f"  btc_price_poly        = {btc_price_poly:.5f}")
     print(f"  delta_prev_tick       = {features.delta_from_previous_tick}")
     print(f"  momentum_1m           = {features.momentum_1m}")
     print(f"  momentum_5m           = {features.momentum_5m}")
@@ -1138,10 +1132,6 @@ def print_market_context(market, debug: bool) -> None:
 def print_llm_skip_reason(reason: str) -> None:
     print("LLM decision skipped:")
     print(f"  reason            = {reason}")
-
-
-def _attach_display_prices(features) -> None:
-    setattr(features, "btc_price_poly", get_display_btc_price_poly())
 
 
 def both_sides_untradable_reason(up_snapshot: TokenQuoteSnapshot, down_snapshot: TokenQuoteSnapshot) -> str:
@@ -1246,7 +1236,6 @@ def run_once() -> None:
             down_snapshot = get_token_quote_snapshot(market.down_token_id)
             try:
                 features = build_btc_features(window_start_ts=market.start_ts)
-                _attach_display_prices(features)
                 current_btc_price = features.price_usd
                 observed_at = features.as_of
             except Exception:
@@ -1273,7 +1262,6 @@ def run_once() -> None:
             print_market_context(market, debug=cfg.debug)
             try:
                 features = build_btc_features(window_start_ts=market.start_ts)
-                _attach_display_prices(features)
                 print_features(features, debug=cfg.debug)
                 current_btc_price = features.price_usd
                 observed_at = features.as_of
@@ -1332,7 +1320,6 @@ def run_once() -> None:
             return
 
     features = build_btc_features(window_start_ts=market.start_ts)
-    _attach_display_prices(features)
     print_features(features, debug=cfg.debug)
     features_ready, feature_skip_reason = get_feature_readiness(features)
     if not features_ready:

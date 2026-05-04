@@ -13,9 +13,6 @@ class TestBtcIndicators(unittest.TestCase):
         indicators._PRICE_HISTORY.clear()
         indicators._LAST_SUCCESSFUL_PROVIDER_INDEX = 0
         indicators._PRICE_HISTORY_BACKFILLED = False
-        indicators._LAST_POLY_DISPLAY_PRICE = None
-        indicators._LAST_POLY_DISPLAY_PRICE_FETCHED_AT = 0.0
-        indicators._LAST_POLY_DISPLAY_PRICE_FAILED_AT = 0.0
 
     @staticmethod
     def _recorded_price_return(price: float):
@@ -27,6 +24,9 @@ class TestBtcIndicators(unittest.TestCase):
 
     def test_fetch_btc_spot_price_uses_secondary_provider_after_primary_failure(self):
         with patch(
+            "custom.btc_agent.indicators._fetch_btc_price_from_poly_reference",
+            side_effect=requests.HTTPError("503 Service Unavailable"),
+        ), patch(
             "custom.btc_agent.indicators._fetch_spot_price_from_polymarket_rtds",
             side_effect=requests.HTTPError("429 Too Many Requests"),
         ), patch(
@@ -40,12 +40,32 @@ class TestBtcIndicators(unittest.TestCase):
 
         self.assertEqual(price, 75123.0)
         self.assertEqual(indicators.get_latest_cached_price(), 75123.0)
-        self.assertEqual(indicators._LAST_SUCCESSFUL_PROVIDER_INDEX, 1)
+        self.assertEqual(indicators._LAST_SUCCESSFUL_PROVIDER_INDEX, 2)
+
+    def test_fetch_btc_spot_price_prefers_poly_reference_provider(self):
+        with patch(
+            "custom.btc_agent.indicators._fetch_btc_price_from_poly_reference",
+            return_value=80382.12345,
+        ), patch(
+            "custom.btc_agent.indicators._fetch_spot_price_from_binance_websocket",
+            return_value=75123.0,
+        ), patch(
+            "custom.btc_agent.indicators._fetch_spot_price_from_coinbase",
+            return_value=75200.0,
+        ):
+            price = indicators.fetch_btc_spot_price()
+
+        self.assertAlmostEqual(price, 80382.12345, places=5)
+        self.assertAlmostEqual(indicators.get_latest_cached_price(), 80382.12345, places=5)
+        self.assertEqual(indicators._LAST_SUCCESSFUL_PROVIDER_INDEX, 0)
 
     def test_fetch_btc_spot_price_uses_cached_value_when_all_providers_fail(self):
         indicators._record_price_sample(75000.0)
 
         with patch(
+            "custom.btc_agent.indicators._fetch_btc_price_from_poly_reference",
+            side_effect=requests.HTTPError("429 Too Many Requests"),
+        ), patch(
             "custom.btc_agent.indicators._fetch_spot_price_from_polymarket_rtds",
             side_effect=requests.HTTPError("429 Too Many Requests"),
         ), patch(
@@ -64,6 +84,9 @@ class TestBtcIndicators(unittest.TestCase):
 
     def test_fetch_btc_spot_price_raises_without_cache_when_all_providers_fail(self):
         with patch(
+            "custom.btc_agent.indicators._fetch_btc_price_from_poly_reference",
+            side_effect=requests.HTTPError("429 Too Many Requests"),
+        ), patch(
             "custom.btc_agent.indicators._fetch_spot_price_from_polymarket_rtds",
             side_effect=requests.HTTPError("429 Too Many Requests"),
         ), patch(
@@ -79,7 +102,7 @@ class TestBtcIndicators(unittest.TestCase):
             with self.assertRaises(requests.HTTPError):
                 indicators.fetch_btc_spot_price()
 
-    def test_get_display_btc_price_poly_parses_reference_payload(self):
+    def test_fetch_btc_price_from_poly_reference_parses_reference_payload(self):
         fake_response = MagicMock()
         fake_response.json.return_value = {
             "parsed": [
@@ -96,21 +119,9 @@ class TestBtcIndicators(unittest.TestCase):
             "custom.btc_agent.indicators.http_get",
             return_value=fake_response,
         ):
-            price = indicators.get_display_btc_price_poly()
+            price = indicators._fetch_btc_price_from_poly_reference()
 
         self.assertAlmostEqual(price, 80382.12345, places=5)
-
-    def test_get_display_btc_price_poly_uses_cache(self):
-        with patch(
-            "custom.btc_agent.indicators._fetch_btc_price_from_poly_reference",
-            return_value=80382.12345,
-        ) as mock_fetch:
-            first = indicators.get_display_btc_price_poly()
-            second = indicators.get_display_btc_price_poly()
-
-        self.assertEqual(first, 80382.12345)
-        self.assertEqual(second, 80382.12345)
-        mock_fetch.assert_called_once()
 
     def test_fetch_spot_price_from_binance_websocket_parses_ticker_message(self):
         fake_socket = MagicMock()
