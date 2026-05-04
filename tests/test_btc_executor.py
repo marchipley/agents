@@ -204,6 +204,41 @@ class TestBtcExecutor(unittest.TestCase):
         self.assertIs(validated_snapshot, snapshot)
         self.assertIsNone(rejection)
 
+    def test_execute_paper_trade_uses_high_confidence_share_override(self):
+        from custom.btc_agent.executor import _execute_paper_trade
+
+        decision = types.SimpleNamespace(side="UP", confidence=0.91, max_price_to_pay=1.0)
+        snapshot = TokenQuoteSnapshot(
+            token_id="up-token",
+            buy_quote=0.90,
+            midpoint=0.90,
+            last_trade_price=0.90,
+            reference_price=0.90,
+            target_limit_price=0.90,
+            recommended_limit_price=0.90,
+            ok_to_submit=True,
+            submit_reason="ok",
+            best_bid=0.89,
+            best_ask=0.90,
+            tick_size=0.01,
+            spread=0.01,
+        )
+
+        with patch(
+            "custom.btc_agent.executor.get_trading_config",
+            return_value=types.SimpleNamespace(
+                max_order_price_usd=2.0,
+                max_size_high_confidence_threshold=0.9,
+                max_size_high_confidence_shares=5.0,
+                use_recommended_limit=False,
+            ),
+        ):
+            result = _execute_paper_trade(decision=decision, snapshot=snapshot)
+
+        self.assertTrue(result.executed)
+        self.assertEqual(result.size, 5.0)
+        self.assertIn("high_confidence_size_override=True", result.reason)
+
     def test_validate_trade_candidate_allows_t5_deadline_execution_despite_negative_edge(self):
         market = types.SimpleNamespace(
             up_token_id="up-token",
@@ -421,6 +456,8 @@ class TestBtcExecutor(unittest.TestCase):
             "custom.btc_agent.executor.get_trading_config",
             return_value=types.SimpleNamespace(
                 max_order_price_usd=5.0,
+                max_size_high_confidence_threshold=1.1,
+                max_size_high_confidence_shares=0.0,
                 live_min_order_usd=1.0,
                 live_fee_rate_bps=1000,
                 use_recommended_limit=False,
@@ -469,6 +506,8 @@ class TestBtcExecutor(unittest.TestCase):
             "custom.btc_agent.executor.get_trading_config",
             return_value=types.SimpleNamespace(
                 max_order_price_usd=5.0,
+                max_size_high_confidence_threshold=1.1,
+                max_size_high_confidence_shares=0.0,
                 live_min_order_usd=1.0,
                 live_fee_rate_bps=1000,
                 use_recommended_limit=False,
@@ -513,6 +552,8 @@ class TestBtcExecutor(unittest.TestCase):
             "custom.btc_agent.executor.get_trading_config",
             return_value=types.SimpleNamespace(
                 max_order_price_usd=2.0,
+                max_size_high_confidence_threshold=1.1,
+                max_size_high_confidence_shares=0.0,
                 live_min_order_usd=1.0,
                 live_fee_rate_bps=1000,
                 use_recommended_limit=False,
@@ -528,6 +569,49 @@ class TestBtcExecutor(unittest.TestCase):
         self.assertFalse(result.executed)
         self.assertIn("Exchange minimum size exceeds configured order budget", result.reason)
         self.assertEqual(client.execute_order.call_count, 1)
+
+    def test_execute_live_trade_uses_high_confidence_share_override(self):
+        market = types.SimpleNamespace(end_ts=int(datetime.now(timezone.utc).timestamp()) + 30)
+        decision = types.SimpleNamespace(side="UP", confidence=0.95, max_price_to_pay=1.0)
+        snapshot = TokenQuoteSnapshot(
+            token_id="up-token",
+            buy_quote=0.70,
+            midpoint=0.70,
+            last_trade_price=0.70,
+            reference_price=0.70,
+            target_limit_price=0.70,
+            recommended_limit_price=0.70,
+            ok_to_submit=True,
+            submit_reason="ok",
+            best_bid=0.69,
+            best_ask=0.70,
+            tick_size=0.01,
+            spread=0.01,
+        )
+        client = types.SimpleNamespace(execute_order=unittest.mock.Mock(return_value={"ok": True}))
+
+        with patch(
+            "custom.btc_agent.executor.get_trading_config",
+            return_value=types.SimpleNamespace(
+                max_order_price_usd=2.0,
+                max_size_high_confidence_threshold=0.9,
+                max_size_high_confidence_shares=5.0,
+                live_min_order_usd=1.0,
+                live_fee_rate_bps=1000,
+                use_recommended_limit=False,
+            ),
+        ), patch(
+            "custom.btc_agent.executor.ensure_live_trade_cash_available",
+        ), patch(
+            "custom.btc_agent.executor.Polymarket",
+            return_value=client,
+        ):
+            result = _execute_live_trade(decision=decision, market=market, snapshot=snapshot)
+
+        self.assertTrue(result.executed)
+        self.assertEqual(result.size, 5.0)
+        self.assertIn("high_confidence_size_override=True", result.reason)
+        self.assertEqual(client.execute_order.call_args.kwargs["size"], 5.0)
 
 
 if __name__ == "__main__":

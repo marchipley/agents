@@ -102,7 +102,9 @@ Optional / supported:
 - `BTC_AGENT_DEBUG` default: `false`
 - `BTC_AGENT_LOOP_INTERVAL` default: `30`
 - `BTC_AGENT_MAX_TRADE_USD` default: `5`
-- `BTC_AGENT_TRADE_SHARES_SIZE` default: `5`
+- `BTC_AGENT_MAX_PRICE` default: `5`; maximum pUSD budget for a normal order, with size derived to stay at or below that budget
+- `BTC_AGENT_MAX_SIZE_HIGH_CONFIDENCE_THRESHOLD` default: disabled above `1.0`; when confidence is at or above this threshold, the normal price-budget cap is ignored
+- `BTC_AGENT_MAX_SIZE_HIGH_CONFIDENCE_SHARES` default: `0`; fixed share size to use when the high-confidence threshold override is active
 - `BTC_AGENT_MAX_TRADES_PER_PERIOD` default: `1`
 - `MAX_AUTOMATED_LOSS_TRADES` default: `0` meaning disabled; when set above zero, the agent counts completed losing trades since launch and stops once that loss count reaches the configured threshold
 - `CONFIDENCE` optional alias for `BTC_AGENT_MIN_CONFIDENCE`
@@ -160,6 +162,7 @@ What the BTC agent does today:
 - Executes paper trades by default and can submit live Polymarket buy orders through `agents/polymarket/polymarket.py` when `USE_PAPER_TRADES=false`.
 - Submits live orders with a configurable maker fee rate from `BTC_AGENT_LIVE_FEE_RATE_BPS`, defaulting to `1000` bps to match the current BTC Up/Down market requirement observed during live submission attempts.
 - Sizes paper and live orders from `BTC_AGENT_MAX_PRICE`, deriving the share count from the selected submission limit while keeping the order notional at or below the configured pUSD budget.
+- If `decision.confidence` is at or above `BTC_AGENT_MAX_SIZE_HIGH_CONFIDENCE_THRESHOLD`, the agent ignores the normal price-budget cap and uses `BTC_AGENT_MAX_SIZE_HIGH_CONFIDENCE_SHARES` instead.
 - Rejects live submissions cleanly when the configured budget cannot satisfy the venue minimum order size instead of silently scaling above the configured budget.
 - Tracks in-memory active orders for the current 5-minute market window and prints each order’s target BTC level plus whether the position is currently winning, losing, or tied.
 - Writes a per-slug order-tracking file under `completed_orders/` for each executed order, appending one status snapshot per tick plus the pre-order tick history that led into the trade.

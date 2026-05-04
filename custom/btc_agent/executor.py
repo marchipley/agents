@@ -836,7 +836,11 @@ def _execute_paper_trade(
     token_id = snapshot.token_id
     if submission_limit_price is None or live_price is None:
         raise RuntimeError("Paper trade execution called without a valid priced snapshot.")
-    size = _size_for_max_budget(max_order_budget_usd, submission_limit_price)
+    size, used_high_confidence_override = _get_order_size_for_decision(
+        decision,
+        cfg,
+        submission_limit_price,
+    )
     order_notional = _get_order_notional(size, submission_limit_price)
     if size <= 0 or order_notional <= 0:
         return TradeExecutionResult(
@@ -863,7 +867,9 @@ def _execute_paper_trade(
             f"Paper trade approved at {submission_limit_label} {submission_limit_price:.3f} "
             f"for {size:.4f} shares "
             f"(reference={live_price:.3f}; order_notional={order_notional:.3f}; "
-            f"max_order_price_usd={max_order_budget_usd:.3f}; {snapshot.submit_reason})"
+            f"max_order_price_usd={max_order_budget_usd:.3f}; "
+            f"high_confidence_size_override={used_high_confidence_override}; "
+            f"{snapshot.submit_reason})"
         ),
         live_order_response=None,
         execution_snapshot=snapshot,
@@ -894,6 +900,18 @@ def _get_max_order_budget_usd(cfg) -> float:
     if hasattr(cfg, "trade_shares_size"):
         return max(float(cfg.trade_shares_size), 0.0)
     return 0.0
+
+
+def _get_order_size_for_decision(
+    decision: LlmDecision,
+    cfg,
+    submission_limit_price: float,
+) -> tuple[float, bool]:
+    threshold = getattr(cfg, "max_size_high_confidence_threshold", 1.1)
+    override_shares = max(getattr(cfg, "max_size_high_confidence_shares", 0.0), 0.0)
+    if override_shares > 0 and decision.confidence >= threshold:
+        return override_shares, True
+    return _size_for_max_budget(_get_max_order_budget_usd(cfg), submission_limit_price), False
 
 
 def _scale_live_size_for_min_notional(
@@ -968,7 +986,11 @@ def _execute_live_trade(
     if submission_limit_price is None or live_price is None:
         raise RuntimeError("Live trade execution called without a valid priced snapshot.")
 
-    size = _size_for_max_budget(max_order_budget_usd, submission_limit_price)
+    size, used_high_confidence_override = _get_order_size_for_decision(
+        decision,
+        cfg,
+        submission_limit_price,
+    )
     min_order_size = _scale_live_size_for_min_notional(
         0.0,
         submission_limit_price,
@@ -988,7 +1010,7 @@ def _execute_live_trade(
             live_order_response=None,
             execution_snapshot=snapshot,
         )
-    if size < min_order_size:
+    if size < min_order_size and not used_high_confidence_override:
         return TradeExecutionResult(
             executed=False,
             side=decision.side,
@@ -1087,6 +1109,7 @@ def _execute_live_trade(
             f"edge={edge:.3f}; "
             f"time_remaining={time_remaining_seconds}s; "
             f"order_type={order_type_label}; "
+            f"high_confidence_size_override={used_high_confidence_override}; "
             f"required_cash={required_cash:.3f}; "
             f"estimated_fee={estimated_fee:.3f}; fee_rate_bps={cfg.live_fee_rate_bps}; "
             f"{snapshot.submit_reason})"
