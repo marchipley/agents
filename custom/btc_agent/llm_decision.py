@@ -54,11 +54,16 @@ def _build_system_prompt() -> str:
         'Be conservative and prefer "NO_TRADE" when signals are weak.\n'
         "Your job is regime detection and directional confidence, not price-capping.\n"
         "Interpret confidence as the mathematical probability that your chosen side wins.\n"
-        "Treat Window Delta as the primary confidence signal in the final 10 seconds.\n"
+        "time_remaining_seconds is authoritative. Do not infer time from any other number.\n"
+        "Final 10 seconds means time_remaining_seconds < 15.\n"
+        "If time_remaining_seconds > 240, you are in the Discovery Phase. Avoid high-confidence trades unless trend intensity is extreme.\n"
+        "Treat Window Delta as the primary confidence signal only in the final 10 seconds.\n"
+        "Window Delta means the percent change from the market window open price only. Do not confuse it with oracle_gap_ratio or any ATR-normalized value.\n"
         "If Window Delta is below 0.005% near T-10, ignore TA noise and prefer NO_TRADE.\n"
         "If Window Delta is above 0.15% near T-10, confidence should usually be 0.95 or higher.\n"
         "If confidence is above 0.90, treat it as a directive to get in rather than demanding extra edge buffer.\n"
         "If time remaining is under 5 seconds and confidence is above 0.70, avoid NO_TRADE unless the signal is clearly invalid.\n"
+        "Respect market consensus. If you are betting DOWN while the DOWN buy quote is below 0.10, only do so if the last 30 seconds show a clear reversal. The same rule applies symmetrically for UP.\n"
         "`max_price_to_pay` is informational only and is not used by execution.\n"
         "For directional trades, set `max_price_to_pay` to 1.0 unless you have a strong reason not to.\n"
         "If Window Delta is above 0.15% near T-10, you may set `max_price_to_pay` as high as 0.97."
@@ -70,9 +75,12 @@ def _build_openai_realtime_system_prompt() -> str:
         "Return one JSON object only with keys decision, confidence, max_price_to_pay, reason. "
         "decision must be UP, DOWN, or NO_TRADE. "
         "confidence is win probability 0..1. "
-        "Use Window Delta as the strongest late signal. "
+        "time_remaining_seconds is authoritative. Final 10 seconds means time_remaining_seconds < 15. "
+        "If time_remaining_seconds > 240, you are in Discovery Phase and should avoid high-confidence trades unless trend intensity is extreme. "
+        "Use Window Delta as the strongest late signal. Window Delta only means change from market window open, not oracle_gap_ratio. "
         "If abs(Window Delta) < 0.005 near T-10, prefer NO_TRADE. "
         "If abs(Window Delta) > 0.15 near T-10, confidence should usually be very high. "
+        "Respect market consensus: do not bet against a sub-0.10 side quote unless the last 30 seconds show a clear reversal. "
         "max_price_to_pay is informational only; use 1.0 for directional trades."
     )
 
@@ -88,6 +96,12 @@ def _build_user_prompt(features: BtcFeatures, market: BtcUpDownMarket, up_snapsh
         None
         if gap_to_target is None or time_remaining_seconds <= 0
         else abs(gap_to_target) / time_remaining_seconds
+    )
+    trend_intensity = features.adx_14
+    oracle_gap_ratio = (
+        None
+        if gap_to_target is None or features.atr_14 in (None, 0)
+        else gap_to_target / features.atr_14
     )
     return (
         f"Market title: {market.title}\n"
@@ -125,16 +139,22 @@ def _build_user_prompt(features: BtcFeatures, market: BtcUpDownMarket, up_snapsh
         f"- EMA alignment (Price > EMA9 > EMA21): {features.ema_alignment}\n"
         f"- EMA cross direction: {features.ema_cross_direction}\n"
         f"- ADX(14): {features.adx_14}\n"
+        f"- Trend intensity (ADX): {trend_intensity}\n"
         f"- ATR(14): {features.atr_14}\n"
+        f"- Oracle gap ratio: {oracle_gap_ratio}\n"
         f"- Trailing 5-minute volatility: {features.volatility_5m}\n"
         f"- Consecutive flat ticks: {features.consecutive_flat_ticks}\n"
         f"- Consecutive directional ticks: {features.consecutive_directional_ticks}\n\n"
         "Decision policy:\n"
         "- Focus on regime detection and direction, not limit pricing.\n"
         "- Confidence should represent your estimated win probability for the chosen side.\n"
-        "- Window Delta is the master confidence signal near T-10.\n"
+        "- time_remaining_seconds is authoritative. Final 10 seconds means time_remaining_seconds < 15.\n"
+        "- If time_remaining_seconds > 240, you are in the Discovery Phase. Avoid high-confidence trades unless trend intensity is extreme.\n"
+        "- Window Delta is the master confidence signal near T-10 only.\n"
+        "- Window Delta means percent change from market window open only. Do not confuse it with Oracle gap ratio.\n"
         "- Treat order-book imbalance and imbalance pressure as leading indicators.\n"
         "- Do not fade PARABOLIC_UP or PARABOLIC_DOWN regimes just because RSI is extreme.\n"
+        "- If betting DOWN while the DOWN buy quote is below 0.10, only do so if velocity_30s and momentum_acceleration show a clear downside reversal. Apply the same rule symmetrically for UP.\n"
         "- If required velocity to win exceeds trailing volatility, prefer NO_TRADE.\n"
         "- If consecutive directional ticks are 8 or more, do not chase further in that same direction.\n"
         "- If ADX(14) is above 35, do not trade against the trend.\n"
@@ -167,6 +187,11 @@ def _build_compact_user_prompt(features: BtcFeatures, market: BtcUpDownMarket, u
         if gap_to_target is None or time_remaining_seconds <= 0
         else abs(gap_to_target) / time_remaining_seconds
     )
+    oracle_gap_ratio = (
+        None
+        if gap_to_target is None or features.atr_14 in (None, 0)
+        else gap_to_target / features.atr_14
+    )
     return (
         f"BTC 5m market slug: {market.slug}\n"
         f"Price to beat USD: {market.settlement_threshold}\n"
@@ -195,11 +220,16 @@ def _build_compact_user_prompt(features: BtcFeatures, market: BtcUpDownMarket, u
         f"EMA alignment: {features.ema_alignment}\n"
         f"EMA cross: {features.ema_cross_direction}\n"
         f"ADX14: {features.adx_14}\n"
+        f"Trend intensity: {features.adx_14}\n"
         f"ATR14: {features.atr_14}\n"
+        f"Oracle gap ratio: {oracle_gap_ratio}\n"
         f"Trailing 5-minute volatility: {features.volatility_5m}\n"
         f"Directional ticks: {features.consecutive_directional_ticks}\n"
         "Settlement: UP wins only above the price to beat; DOWN wins only below it.\n"
+        "time_remaining_seconds is authoritative; final 10 seconds means <15, and >240 is Discovery Phase.\n"
+        "Window Delta only means change from market window open, never Oracle gap ratio.\n"
         "Do not fade parabolic trend and do not chase if directional ticks are >= 8.\n"
+        "Do not bet against a sub-0.10 side quote unless the last 30 seconds show a clear reversal.\n"
         "If ADX14 > 35, do not fight the trend. If ADX14 > 45, avoid late trend-chasing and look for exhaustion/reversal logic.\n"
         "If required velocity to win exceeds volatility, prefer NO_TRADE.\n"
         "Provide direction plus confidence as win probability. Execution handles EV and timing.\n"
@@ -218,6 +248,11 @@ def _build_minimal_user_prompt(features: BtcFeatures, market: BtcUpDownMarket, u
         None
         if gap_to_target is None or time_remaining_seconds <= 0
         else abs(gap_to_target) / time_remaining_seconds
+    )
+    oracle_gap_ratio = (
+        None
+        if gap_to_target is None or features.atr_14 in (None, 0)
+        else gap_to_target / features.atr_14
     )
     return (
         f"beat={market.settlement_threshold}\n"
@@ -240,12 +275,17 @@ def _build_minimal_user_prompt(features: BtcFeatures, market: BtcUpDownMarket, u
         f"ema21={features.ema_21}\n"
         f"ema_ok={features.ema_alignment}\n"
         f"adx14={features.adx_14}\n"
+        f"trend_intensity={features.adx_14}\n"
         f"atr14={features.atr_14}\n"
+        f"ogr={oracle_gap_ratio}\n"
         f"vol5m={features.volatility_5m}\n"
         f"reqv={required_velocity_to_win}\n"
         f"dir_ticks={features.consecutive_directional_ticks}\n"
         "UP above beat. DOWN below beat.\n"
+        "t is authoritative; final 10 seconds means t<15; if t>240 you are in Discovery Phase.\n"
+        "delta_pct is Window Delta only; ogr is oracle gap ratio and must not be treated as Window Delta.\n"
         "No fade of parabolic trend; no chase if dir_ticks>=8; if adx14>35 follow trend; if adx14>45 expect exhaustion; if reqv>vol5m prefer NO_TRADE.\n"
+        "Do not bet against a sub-0.10 side quote unless v30 and acc show a clear reversal.\n"
         "Return direction + confidence as win probability.\n"
         'Return one JSON object with keys: decision, confidence, max_price_to_pay, reason.'
     )
@@ -268,6 +308,11 @@ def _build_openai_realtime_user_prompt(
         if gap_to_target is None or time_remaining_seconds <= 0
         else abs(gap_to_target) / time_remaining_seconds
     )
+    oracle_gap_ratio = (
+        None
+        if gap_to_target is None or features.atr_14 in (None, 0)
+        else gap_to_target / features.atr_14
+    )
     return (
         f"beat={market.settlement_threshold};"
         f"t={time_remaining_seconds};"
@@ -289,10 +334,15 @@ def _build_openai_realtime_user_prompt(
         f"e21={features.ema_21};"
         f"ea={features.ema_alignment};"
         f"adx={features.adx_14};"
+        f"ti={features.adx_14};"
         f"atr={features.atr_14};"
+        f"ogr={oracle_gap_ratio};"
         f"v5={features.volatility_5m};"
         f"reqv={required_velocity_to_win};"
         f"dt={features.consecutive_directional_ticks};"
+        "t_is_authoritative;"
+        "if_t_gt_240_discovery_phase;"
+        "if_side_quote_lt_0.10_need_clear_30s_reversal;"
         "json only"
     )
 

@@ -485,10 +485,11 @@ def _compute_rsi(prices: List[float], period: int = 14) -> Optional[float]:
     if len(prices) < period + 1:
         return None
 
+    recent_prices = prices[-(period + 1) :]
     gains = []
     losses = []
     for i in range(1, period + 1):
-        diff = prices[i] - prices[i - 1]
+        diff = recent_prices[i] - recent_prices[i - 1]
         if diff >= 0:
             gains.append(diff)
         else:
@@ -575,6 +576,8 @@ def _count_consecutive_directional_ticks(prices: List[float], epsilon: float = 1
     if len(prices) < 2:
         return 0
 
+    latest_price = prices[-1]
+    reversal_threshold = abs(latest_price) * 0.0001 if latest_price else 0.0
     deltas = [prices[idx] - prices[idx - 1] for idx in range(1, len(prices))]
     trailing_sign = 0
     streak = 0
@@ -586,6 +589,8 @@ def _count_consecutive_directional_ticks(prices: List[float], epsilon: float = 1
         if trailing_sign == 0:
             trailing_sign = sign
         if sign != trailing_sign:
+            if abs(delta) <= reversal_threshold:
+                continue
             break
         streak += 1
 
@@ -676,8 +681,8 @@ def build_btc_features(window_start_ts: int) -> BtcFeatures:
         else 0.0
     )
     delta_from_previous_tick = price_now - prices[-2] if len(prices) >= 2 else None
-    rsi_9 = _compute_rsi(prices[-10:], period=9)
-    rsi = _compute_rsi(prices[-15:])
+    rsi_9 = _compute_rsi(prices, period=9)
+    rsi = _compute_rsi(prices, period=14)
     rsi_speed_divergence = None if rsi_9 is None or rsi is None else rsi_9 - rsi
     momentum_1m = price_now - one_minute_prices[0] if len(one_minute_prices) >= 2 else None
     momentum_5m = price_now - trailing_5m_open_price if len(trailing_5m_prices) >= 2 else None

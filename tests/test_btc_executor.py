@@ -313,6 +313,42 @@ class TestBtcExecutor(unittest.TestCase):
         self.assertIsNotNone(rejection)
         self.assertIn("liquidity filter", rejection.reason)
 
+    def test_validate_trade_candidate_blocks_thin_liquidity_by_spread(self):
+        market = types.SimpleNamespace(
+            up_token_id="up-token",
+            down_token_id="down-token",
+            end_ts=0,
+            volume=5000.0,
+        )
+        decision = types.SimpleNamespace(
+            side="UP",
+            confidence=0.80,
+            max_price_to_pay=1.0,
+            reason="test",
+        )
+        snapshot = TokenQuoteSnapshot(
+            token_id="up-token",
+            buy_quote=0.82,
+            midpoint=0.82,
+            last_trade_price=0.82,
+            reference_price=0.82,
+            target_limit_price=0.82,
+            recommended_limit_price=0.82,
+            ok_to_submit=True,
+            submit_reason="ok",
+            best_bid=0.70,
+            best_ask=0.94,
+            tick_size=0.01,
+            spread=0.24,
+            spread_bps=2926.8,
+        )
+
+        validated_snapshot, rejection = _validate_trade_candidate(market, decision, snapshot=snapshot)
+
+        self.assertIsNone(validated_snapshot)
+        self.assertIsNotNone(rejection)
+        self.assertIn("Thin liquidity blocked execution", rejection.reason)
+
     def test_validate_trade_candidate_allows_high_price_low_liquidity_trade_when_filter_disabled(self):
         market = types.SimpleNamespace(
             up_token_id="up-token",
@@ -384,7 +420,7 @@ class TestBtcExecutor(unittest.TestCase):
         with patch(
             "custom.btc_agent.executor.get_trading_config",
             return_value=types.SimpleNamespace(
-                trade_shares_size=5.0,
+                max_order_price_usd=5.0,
                 live_min_order_usd=1.0,
                 live_fee_rate_bps=1000,
                 use_recommended_limit=False,
@@ -432,7 +468,7 @@ class TestBtcExecutor(unittest.TestCase):
         with patch(
             "custom.btc_agent.executor.get_trading_config",
             return_value=types.SimpleNamespace(
-                trade_shares_size=5.0,
+                max_order_price_usd=5.0,
                 live_min_order_usd=1.0,
                 live_fee_rate_bps=1000,
                 use_recommended_limit=False,
@@ -449,37 +485,34 @@ class TestBtcExecutor(unittest.TestCase):
         self.assertIn("FOK order could not be fully filled", result.reason)
         self.assertEqual(client.execute_order.call_count, 1)
 
-    def test_execute_live_trade_retries_with_exchange_minimum_size(self):
+    def test_execute_live_trade_returns_budget_rejection_when_minimum_size_exceeds_budget(self):
         market = types.SimpleNamespace(end_ts=int(datetime.now(timezone.utc).timestamp()) + 30)
         decision = types.SimpleNamespace(side="UP", confidence=0.8, max_price_to_pay=1.0)
         snapshot = TokenQuoteSnapshot(
             token_id="up-token",
-            buy_quote=0.35,
-            midpoint=0.35,
-            last_trade_price=0.35,
-            reference_price=0.35,
-            target_limit_price=0.35,
-            recommended_limit_price=0.35,
+            buy_quote=0.70,
+            midpoint=0.70,
+            last_trade_price=0.70,
+            reference_price=0.70,
+            target_limit_price=0.70,
+            recommended_limit_price=0.70,
             ok_to_submit=True,
             submit_reason="ok",
-            best_bid=0.34,
-            best_ask=0.35,
+            best_bid=0.69,
+            best_ask=0.70,
             tick_size=0.01,
             spread=0.01,
         )
         client = types.SimpleNamespace(
             execute_order=unittest.mock.Mock(
-                side_effect=[
-                    Exception("order xyz is invalid. Size (2.88) lower than the minimum: 5"),
-                    {"ok": True},
-                ]
+                side_effect=Exception("order xyz is invalid. Size (2.88) lower than the minimum: 5")
             )
         )
 
         with patch(
             "custom.btc_agent.executor.get_trading_config",
             return_value=types.SimpleNamespace(
-                trade_shares_size=2.0,
+                max_order_price_usd=2.0,
                 live_min_order_usd=1.0,
                 live_fee_rate_bps=1000,
                 use_recommended_limit=False,
@@ -492,12 +525,9 @@ class TestBtcExecutor(unittest.TestCase):
         ):
             result = _execute_live_trade(decision=decision, market=market, snapshot=snapshot)
 
-        self.assertTrue(result.executed)
-        self.assertEqual(result.size, 5.0)
-        self.assertIn("minimum_size_retry=5.0000", result.reason)
-        self.assertEqual(client.execute_order.call_count, 2)
-        self.assertEqual(client.execute_order.call_args_list[0].kwargs["size"], 2.8858)
-        self.assertEqual(client.execute_order.call_args_list[1].kwargs["size"], 5.0)
+        self.assertFalse(result.executed)
+        self.assertIn("Exchange minimum size exceeds configured order budget", result.reason)
+        self.assertEqual(client.execute_order.call_count, 1)
 
 
 if __name__ == "__main__":

@@ -267,11 +267,24 @@ def _volatility_regime(volatility_5m) -> str:
     return "extreme"
 
 
-def _trend_regime(features) -> str:
+def _trend_regime(features, period_open_price_to_beat: Optional[float] = None) -> str:
     delta_pct = getattr(features, "delta_pct_from_window_open", None)
     momentum_5m = getattr(features, "momentum_5m", None)
+    price_usd = getattr(features, "price_usd", None)
     if delta_pct is None or momentum_5m is None:
         return "unknown"
+
+    if price_usd not in (None, 0) and period_open_price_to_beat not in (None, 0):
+        gap_pct = (price_usd - period_open_price_to_beat) / period_open_price_to_beat
+        if gap_pct > 0.0005 and not (delta_pct < -0.0015 and momentum_5m < -15):
+            if gap_pct > 0.0015 or delta_pct > 0.0015 or momentum_5m > 15:
+                return "strong_up"
+            return "weak_up"
+        if gap_pct < -0.0005 and not (delta_pct > 0.0015 and momentum_5m > 15):
+            if gap_pct < -0.0015 or delta_pct < -0.0015 or momentum_5m < -15:
+                return "strong_down"
+            return "weak_down"
+
     if abs(delta_pct) < 0.0005 and abs(momentum_5m) < 8:
         return "ranging"
     if delta_pct > 0.0015 and momentum_5m > 15:
@@ -296,6 +309,8 @@ def _liquidity_regime(snapshot: TokenQuoteSnapshot) -> str:
             total_top_size += size
     if spread_bps is None and total_top_size <= 0:
         return "unknown"
+    if spread_bps is not None and spread_bps > 150:
+        return "THIN_LIQUIDITY"
     if spread_bps is not None and spread_bps > 80:
         return "low"
     if total_top_size > 0 and total_top_size < 25:
@@ -411,7 +426,7 @@ def _build_regime_fingerprint(
         "time_remaining_seconds": time_remaining_seconds,
         "next_slug_proximity": time_remaining_seconds,
         "volatility_regime": _volatility_regime(getattr(features, "volatility_5m", None)) if features is not None else "unknown",
-        "trend_regime": _trend_regime(features) if features is not None else "unknown",
+        "trend_regime": _trend_regime(features, period_open_price_to_beat=period_open_price_to_beat) if features is not None else "unknown",
         "rsi_regime": _rsi_regime(features) if features is not None else "unknown",
         "liquidity_regime": _liquidity_regime(selected_snapshot) if selected_snapshot is not None else "unknown",
         "threshold_gap_usd": None if gap_to_target is None else round(gap_to_target, 4),

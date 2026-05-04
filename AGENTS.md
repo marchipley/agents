@@ -150,12 +150,17 @@ What the BTC agent does today:
 - The LLM prompt now also includes `momentum_acceleration` and follows stricter ADX guidance:
   - if `ADX(14) > 35`, do not trade against the trend
   - if `ADX(14) > 45`, treat the move as potentially exhausted and avoid late trend-chasing
+- The LLM prompt now treats `time_remaining_seconds` as the authoritative clock:
+  - final 10 seconds means `time_remaining_seconds < 15`
+  - `time_remaining_seconds > 240` is treated as an early-window Discovery Phase where high-confidence trades should be rare unless trend intensity is extreme
+  - `Window Delta` is explicitly defined as the change from the market window open price and must not be confused with `oracle_gap_ratio`
+- The LLM prompt also includes a quote-sanity rule: if betting against a side that is already priced below `0.10`, the model should only do so when the last 30 seconds show a clear reversal.
 - Skips LLM decisioning and execution during the last 60 seconds of the current 5-minute market window and only continues collecting trend data for the upcoming period.
 - Prints the exact execution snapshot used by the paper-trade path, including the calculated `reference_price`, `target_limit_price`, and `recommended_limit_price`.
 - Executes paper trades by default and can submit live Polymarket buy orders through `agents/polymarket/polymarket.py` when `USE_PAPER_TRADES=false`.
 - Submits live orders with a configurable maker fee rate from `BTC_AGENT_LIVE_FEE_RATE_BPS`, defaulting to `1000` bps to match the current BTC Up/Down market requirement observed during live submission attempts.
-- Keeps paper trade size fixed at `BTC_AGENT_TRADE_SHARES_SIZE`, but auto-scales live order size upward when needed so the live order notional meets `BTC_AGENT_LIVE_MIN_ORDER_USD`.
-- Uses a fixed paper-trade share size from `BTC_AGENT_TRADE_SHARES_SIZE` instead of deriving the trade size from USD notional.
+- Sizes paper and live orders from `BTC_AGENT_MAX_PRICE`, deriving the share count from the selected submission limit while keeping the order notional at or below the configured pUSD budget.
+- Rejects live submissions cleanly when the configured budget cannot satisfy the venue minimum order size instead of silently scaling above the configured budget.
 - Tracks in-memory active orders for the current 5-minute market window and prints each order’s target BTC level plus whether the position is currently winning, losing, or tied.
 - Writes a per-slug order-tracking file under `completed_orders/` for each executed order, appending one status snapshot per tick plus the pre-order tick history that led into the trade.
 - Evaluates paper-order win/loss status against the market-period settlement reference, preferring Polymarket’s parsed threshold and otherwise falling back to the closest retained BTC sample at the start of the 5-minute period rather than the trade-entry BTC price.
@@ -225,7 +230,7 @@ Goal:
 
 Current status:
 
-- Complete, with one follow-up metric correction applied after review.
+- Complete, with follow-up metric and calibration corrections applied after review.
 - Completed-order logs now include richer per-tick feature data, active-order snapshots, internal CLOB book context, and a deterministic `regime_fingerprint`.
 - Phase 1 now also captures micro-momentum and reachability context:
   - `velocity_15s`
@@ -235,7 +240,8 @@ Current status:
   - `required_velocity_to_win`
 - Deterministic regime labeling now includes `PARABOLIC_UP` / `PARABOLIC_DOWN` so extreme RSI in strong momentum is treated as trend continuation context rather than automatic mean-reversion.
 - Even when `USE_RECOMMENDED_LIMIT=false`, the agent still fetches internal `UP` / `DOWN` book context for logging and LLM reasoning, while continuing to suppress the old pre-trade quote snapshot console output.
-- The `consecutive_directional_ticks` counter now ignores short flat-tick interruptions and near-duplicate same-price samples, so it better reflects real one-way streaks for falling-knife / exhaustion detection.
+- The `consecutive_directional_ticks` counter now ignores short flat-tick interruptions, near-duplicate same-price samples, and small counter-moves below a 0.01% BTC-price reversal threshold, so it better reflects real one-way streaks for falling-knife / exhaustion detection.
+- `liquidity_regime` now explicitly marks very wide books as `THIN_LIQUIDITY` when `spread_bps > 150`, which keeps obviously toxic 5-minute books from being treated as merely "low" liquidity.
 
 Data required:
 
@@ -272,7 +278,7 @@ Completion criteria:
 - Completed-order files consistently explain wins and losses without requiring manual reconstruction from console logs.
 - Rollover finalization uses the next slug’s `price_to_beat` or an equivalent resolved closing price rather than a stale live spot sample.
 - `top_level_book_imbalance`, `imbalance_pressure`, and `liquidity_regime` should no longer be routinely null/unknown in Phase 1 win/loss files.
-- `consecutive_directional_ticks` should move with genuine one-way price streaks instead of sticking at zero because of duplicate or flat samples.
+- `consecutive_directional_ticks` should move with genuine one-way price streaks instead of resetting on flat ticks or tiny counter-moves.
 
 ### Phase 2: Indicator Expansion
 
@@ -282,7 +288,7 @@ Goal:
 
 Current status:
 
-- In progress, with the first Phase 2 indicator pass implemented and a Phase 2.5 refinement layer added after reviewing the first Phase 2 losses.
+- In progress, with the first Phase 2 indicator pass implemented, a Phase 2.5 refinement layer added after reviewing the first Phase 2 losses, and a Phase 2.6 cleanup pass applied after validating the first enriched win/loss files.
 - The BTC feature set now includes:
   - `RSI(9)` alongside `RSI(14)`
   - `EMA(9)` and `EMA(21)`
@@ -295,7 +301,15 @@ Current status:
   - `momentum_acceleration`
   - `oracle_gap_ratio`
 - The regime builder now prioritizes the fast RSI signal when deciding whether the environment is `PARABOLIC_UP` or `PARABOLIC_DOWN`.
+- The regime builder is also now strike-aware, so if BTC is materially above or below the current `price_to_beat`, the trend label will not flip to the opposite side just because the very recent window delta is slightly negative or positive.
+- `RSI(9)` and `RSI(14)` are now computed independently from the trailing price window, so the fast RSI can diverge from the slow RSI instead of silently collapsing onto the same value.
 - Feature readiness now requires enough retained history for the longer Phase 2 calculations, so the bot waits for the extended warmup when those values are missing.
+- The LLM prompt paths now explicitly carry the advanced Phase 2.5 / 2.6 fields, including:
+  - `momentum_acceleration`
+  - `trend_intensity` / `ADX(14)`
+  - `oracle_gap_ratio`
+  - authoritative `time_remaining_seconds` / Discovery Phase guidance
+  - quote-sanity handling for sub-`0.10` consensus-priced sides
 
 Implemented additions:
 
@@ -324,6 +338,7 @@ Completion criteria:
 - Completed-order files show the new indicator values for later post-trade review.
 - The LLM prompt and completed-order logs both contain the new Phase 2 values so the expanded indicator set can be evaluated against real wins and losses.
 - Phase 2.5 loss review fields should be present as well, especially `momentum_acceleration`, `oracle_gap_ratio`, and the fast-RSI-driven parabolic regime labels.
+- Thin-liquidity books with `spread_bps > 150` should be classified as `THIN_LIQUIDITY` and rejected before they become noisy Phase 3 execution data.
 
 ### Phase 3: Execution And Microstructure Features
 

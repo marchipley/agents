@@ -2,8 +2,12 @@ import unittest
 from datetime import datetime, timezone
 from unittest.mock import Mock, patch
 import types
+import sys
 
 import requests
+
+sys.modules.setdefault("dotenv", types.SimpleNamespace(load_dotenv=lambda *args, **kwargs: None))
+sys.modules.setdefault("websocket", types.SimpleNamespace(WebSocketApp=object, create_connection=object))
 
 from custom.btc_agent.llm_decision import (
     _build_user_prompt,
@@ -122,8 +126,14 @@ class TestBtcLlmDecision(unittest.TestCase):
         self.assertIn("DOWN Polymarket ask/buy quote: 0.17", prompt)
         self.assertIn("RSI(9): 61.0", prompt)
         self.assertIn("ADX(14): 31.0", prompt)
+        self.assertIn("Trend intensity (ADX): 31.0", prompt)
         self.assertIn("EMA alignment (Price > EMA9 > EMA21): True", prompt)
         self.assertIn("Momentum acceleration: -2.0", prompt)
+        self.assertIn("Oracle gap ratio:", prompt)
+        self.assertIn("time_remaining_seconds is authoritative", prompt)
+        self.assertIn("Discovery Phase", prompt)
+        self.assertIn("Do not confuse it with Oracle gap ratio", prompt)
+        self.assertIn("If betting DOWN while the DOWN buy quote is below 0.10", prompt)
         self.assertIn("Focus on regime detection and direction, not limit pricing.", prompt)
         self.assertIn("execution layer will apply regime-aware EV, deadline, liquidity, and FOK rules", prompt)
 

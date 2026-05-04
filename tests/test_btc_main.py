@@ -3,6 +3,7 @@ import types
 import unittest
 import os
 import glob
+from datetime import datetime, timezone
 from contextlib import ExitStack
 from unittest.mock import patch
 from types import SimpleNamespace
@@ -17,6 +18,7 @@ sys.modules.setdefault(
 
 from custom.btc_agent.main import (
     _SESSION_LOSS_TRADES,
+    _build_regime_fingerprint,
     append_completed_order_tick,
     append_pending_period_tick_analysis,
     clear_price_to_beat_debug_files,
@@ -147,6 +149,33 @@ class TestBtcMain(unittest.TestCase):
         self.assertIn("btc_move_from_entry=10.00", content)
         self.assertIn("btc_gap_to_target=6.99", content)
         self.assertIn("outcome_label=win", content)
+
+    def test_regime_fingerprint_uses_price_to_beat_to_avoid_false_weak_down_label(self):
+        features = SimpleNamespace(
+            price_usd=78134.0,
+            delta_pct_from_window_open=-0.000155,
+            momentum_5m=-2.0,
+            volatility_5m=9.0,
+            rsi_9=82.0,
+            rsi_14=76.0,
+            atr_14=20.0,
+            adx_14=38.0,
+            rsi_speed_divergence=6.0,
+            velocity_15s=4.0,
+            velocity_30s=7.0,
+            consecutive_flat_ticks=0,
+            consecutive_directional_ticks=4,
+        )
+        observed_at = datetime.fromtimestamp(1777859410, tz=timezone.utc)
+
+        fingerprint = _build_regime_fingerprint(
+            market_slug="btc-updown-5m-1777859400",
+            observed_at=observed_at,
+            features=features,
+            period_open_price_to_beat=78000.0,
+        )
+
+        self.assertIn(fingerprint["trend_regime"], {"weak_up", "strong_up"})
 
     def test_append_completed_order_tick_active_includes_feature_and_quote_data(self):
         order = ActivePaperOrder(
