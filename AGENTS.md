@@ -163,6 +163,7 @@ What the BTC agent does today:
 - Submits live orders with a configurable maker fee rate from `BTC_AGENT_LIVE_FEE_RATE_BPS`, defaulting to `1000` bps to match the current BTC Up/Down market requirement observed during live submission attempts.
 - Sizes paper and live orders from `BTC_AGENT_MAX_PRICE`, deriving the share count from the selected submission limit while keeping the order notional at or below the configured pUSD budget.
 - If `decision.confidence` is at or above `BTC_AGENT_MAX_SIZE_HIGH_CONFIDENCE_THRESHOLD`, the agent ignores the normal price-budget cap and uses `BTC_AGENT_MAX_SIZE_HIGH_CONFIDENCE_SHARES` instead.
+- Before live BUY submission, the agent quantizes share size to a Polymarket-compatible precision so the quote-side amount stays within the exchange’s 2-decimal maker-amount constraint while still respecting the 4-decimal taker-size limit.
 - Rejects live submissions cleanly when the configured budget cannot satisfy the venue minimum order size instead of silently scaling above the configured budget.
 - Tracks in-memory active orders for the current 5-minute market window and prints each order’s target BTC level plus whether the position is currently winning, losing, or tied.
 - Writes a per-slug order-tracking file under `completed_orders/` for each executed order, appending one status snapshot per tick plus the pre-order tick history that led into the trade.

@@ -3,6 +3,7 @@
 import math
 import requests
 import re
+from decimal import Decimal, ROUND_DOWN
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional, Any, Dict, List, Tuple
@@ -894,6 +895,36 @@ def _size_for_max_budget(max_budget_usd: float, limit_price: float) -> float:
     return math.floor(raw_size * 10_000) / 10_000
 
 
+def _quantize_live_buy_size_for_amount_precision(price: float, size: float) -> float:
+    """
+    Polymarket BUY orders require quote-side (maker) amount precision of 2 decimals
+    and token-side (taker) amount precision of 4 decimals.
+
+    To satisfy both constraints, round size down to the nearest 4-decimal quantum
+    that makes price * size representable to cents.
+    """
+    if price <= 0 or size <= 0:
+        return 0.0
+
+    price_dec = Decimal(str(price)).normalize()
+    size_dec = Decimal(str(size)).quantize(Decimal("0.0001"), rounding=ROUND_DOWN)
+    exponent = price_dec.as_tuple().exponent
+    price_decimals = -exponent if exponent < 0 else 0
+    scale = 10 ** price_decimals
+    price_int = int((price_dec * scale).to_integral_value())
+
+    required_divisor = 10 ** (price_decimals + 2)
+    gcd_value = math.gcd(price_int, required_divisor)
+    quantum_numerator = required_divisor // gcd_value
+    quantum = Decimal(quantum_numerator) / Decimal(10_000)
+    if quantum <= 0:
+        return float(size_dec)
+
+    units = (size_dec / quantum).to_integral_value(rounding=ROUND_DOWN)
+    quantized_size = units * quantum
+    return float(quantized_size.quantize(Decimal("0.0001"), rounding=ROUND_DOWN))
+
+
 def _get_max_order_budget_usd(cfg) -> float:
     if hasattr(cfg, "max_order_price_usd"):
         return max(float(cfg.max_order_price_usd), 0.0)
@@ -991,6 +1022,7 @@ def _execute_live_trade(
         cfg,
         submission_limit_price,
     )
+    size = _quantize_live_buy_size_for_amount_precision(submission_limit_price, size)
     min_order_size = _scale_live_size_for_min_notional(
         0.0,
         submission_limit_price,
