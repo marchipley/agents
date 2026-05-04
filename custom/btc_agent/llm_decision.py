@@ -38,6 +38,17 @@ _OPENAI_REALTIME_CLIENT = None
 _OPENAI_REALTIME_CLIENT_LOCK = threading.Lock()
 
 
+def _get_time_remaining_seconds(market: BtcUpDownMarket, as_of_ts: int) -> int:
+    canonical_end_ts = getattr(market, "start_ts", 0) + 300 if getattr(market, "start_ts", None) else None
+    effective_end_ts = getattr(market, "end_ts", None)
+    if canonical_end_ts is not None:
+        if effective_end_ts is None or canonical_end_ts > effective_end_ts:
+            effective_end_ts = canonical_end_ts
+    if effective_end_ts is None:
+        return 0
+    return max(int(effective_end_ts) - as_of_ts, 0)
+
+
 def _build_system_prompt() -> str:
     return (
         "You are an automated trading decision assistant for a 5-minute Bitcoin "
@@ -89,7 +100,7 @@ def _build_openai_realtime_system_prompt() -> str:
 
 
 def _build_user_prompt(features: BtcFeatures, market: BtcUpDownMarket, up_snapshot=None, down_snapshot=None) -> str:
-    time_remaining_seconds = max(market.end_ts - int(features.as_of.timestamp()), 0)
+    time_remaining_seconds = _get_time_remaining_seconds(market, int(features.as_of.timestamp()))
     gap_to_target = (
         None
         if market.settlement_threshold in (None, 0)
@@ -183,7 +194,7 @@ def _build_user_prompt(features: BtcFeatures, market: BtcUpDownMarket, up_snapsh
 
 
 def _build_compact_user_prompt(features: BtcFeatures, market: BtcUpDownMarket, up_snapshot=None, down_snapshot=None) -> str:
-    time_remaining_seconds = max(market.end_ts - int(features.as_of.timestamp()), 0)
+    time_remaining_seconds = _get_time_remaining_seconds(market, int(features.as_of.timestamp()))
     gap_to_target = (
         None
         if market.settlement_threshold in (None, 0)
@@ -247,7 +258,7 @@ def _build_compact_user_prompt(features: BtcFeatures, market: BtcUpDownMarket, u
 
 
 def _build_minimal_user_prompt(features: BtcFeatures, market: BtcUpDownMarket, up_snapshot=None, down_snapshot=None) -> str:
-    time_remaining_seconds = max(market.end_ts - int(features.as_of.timestamp()), 0)
+    time_remaining_seconds = _get_time_remaining_seconds(market, int(features.as_of.timestamp()))
     gap_to_target = (
         None
         if market.settlement_threshold in (None, 0)
@@ -308,7 +319,7 @@ def _build_openai_realtime_user_prompt(
     up_snapshot=None,
     down_snapshot=None,
 ) -> str:
-    time_remaining_seconds = max(market.end_ts - int(features.as_of.timestamp()), 0)
+    time_remaining_seconds = _get_time_remaining_seconds(market, int(features.as_of.timestamp()))
     gap_to_target = (
         None
         if market.settlement_threshold in (None, 0)

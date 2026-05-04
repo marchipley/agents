@@ -107,6 +107,17 @@ def _fmt(value):
     return str(value)
 
 
+def _fmt_mmss_from_seconds(seconds: Optional[int]) -> str:
+    if seconds is None:
+        return "None"
+    try:
+        total_seconds = max(int(seconds), 0)
+    except (TypeError, ValueError):
+        return "None"
+    minutes, secs = divmod(total_seconds, 60)
+    return f"{minutes:02d}:{secs:02d}"
+
+
 def wait_for_next_tick_or_quit(
     interval_seconds: int,
     quit_monitor=None,
@@ -511,6 +522,8 @@ def append_pending_period_tick_analysis(
             f"observed_at={observed_at.isoformat()}",
             "phase=PRE_ORDER_TICK",
             f"period_open_price_to_beat={_fmt(market.settlement_threshold)}",
+            f"market_time_remaining_seconds={_fmt(_market_time_remaining_seconds(market.slug, observed_at))}",
+            f"market_time_remaining_mmss={_fmt_mmss_from_seconds(_market_time_remaining_seconds(market.slug, observed_at))}",
         ]
         if up_snapshot is not None:
             lines.extend(_snapshot_summary("up", up_snapshot))
@@ -669,6 +682,7 @@ def append_completed_order_tick(
                     f"btc_move_from_entry_pct={btc_move_from_entry_pct:.4f}%",
                     f"btc_gap_to_target={btc_gap_to_target:.2f}",
                     f"market_time_remaining_seconds={_fmt(regime_fingerprint.get('time_remaining_seconds'))}",
+                    f"market_time_remaining_mmss={_fmt_mmss_from_seconds(regime_fingerprint.get('time_remaining_seconds'))}",
                     f"position_state={status}",
                     f"target_description={describe_target(order)}",
                     f"outcome_label={outcome_label}",
@@ -737,6 +751,13 @@ def finalize_completed_orders(previous_orders, current_btc_price: float) -> int:
         if outcome_label == "loss":
             loss_count += 1
     return loss_count
+
+
+def finalize_current_period_logs_on_exit() -> None:
+    state = get_state()
+    market_slug = getattr(state, "market_slug", None)
+    if market_slug:
+        finalize_pending_period_log(market_slug)
 
 
 def update_active_order_logs(
@@ -1155,7 +1176,7 @@ def run_once() -> None:
                 )
             except Exception:
                 pass
-        elif previous_market_slug:
+        if previous_market_slug:
             finalize_pending_period_log(previous_market_slug)
         print(f"New 5-minute market period detected: {market.slug}")
         clear_price_to_beat_debug_files()
@@ -1471,14 +1492,17 @@ def main() -> None:
         with monitor_context as quit_monitor:
             while True:
                 if quit_monitor.poll_quit_requested():
+                    finalize_current_period_logs_on_exit()
                     print("Quit requested via keyboard. Exiting BTC agent.")
                     return
                 run_once()
                 print(f"Sleeping {interval} seconds before next tick...")
                 if wait_for_next_tick_or_quit(interval, quit_monitor=quit_monitor):
+                    finalize_current_period_logs_on_exit()
                     print("Quit requested via keyboard. Exiting BTC agent.")
                     return
     except KeyboardInterrupt:
+        finalize_current_period_logs_on_exit()
         print("Keyboard interrupt received. Exiting BTC agent.")
         return
 

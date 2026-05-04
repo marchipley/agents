@@ -22,6 +22,7 @@ from custom.btc_agent.main import (
     append_completed_order_tick,
     append_pending_period_tick_analysis,
     clear_price_to_beat_debug_files,
+    finalize_current_period_logs_on_exit,
     finalize_pending_period_log,
     enforce_session_loss_trade_limit,
     has_valid_price_to_beat,
@@ -148,6 +149,7 @@ class TestBtcMain(unittest.TestCase):
         self.assertIn("position_state=WINNING", content)
         self.assertIn("btc_move_from_entry=10.00", content)
         self.assertIn("btc_gap_to_target=6.99", content)
+        self.assertIn("market_time_remaining_mmss=", content)
         self.assertIn("outcome_label=win", content)
 
     def test_regime_fingerprint_uses_price_to_beat_to_avoid_false_weak_down_label(self):
@@ -246,6 +248,7 @@ class TestBtcMain(unittest.TestCase):
 
         self.assertIn("phase=ACTIVE", content)
         self.assertIn("feature_btc_price=77959.600", content)
+        self.assertIn("market_time_remaining_mmss=", content)
         self.assertIn("feature_momentum_1m=-12.5", content)
         self.assertIn("feature_momentum_5m=-6.079999999987194", content)
         self.assertIn("feature_velocity_15s=-3.2", content)
@@ -365,6 +368,7 @@ class TestBtcMain(unittest.TestCase):
         self.assertIn("decision_side=UP", content)
         self.assertIn("velocity_15s=3.0", content)
         self.assertIn("consecutive_flat_ticks=0", content)
+        self.assertIn("market_time_remaining_mmss=", content)
         self.assertIn("\"next_slug_proximity\"", content)
         self.assertIn("\"required_velocity_to_win\"", content)
         self.assertIn("\"oracle_gap_ratio\"", content)
@@ -411,6 +415,27 @@ class TestBtcMain(unittest.TestCase):
         self.assertFalse(os.path.exists("/appl/agents/completed_orders/pending_period_1999999997.txt"))
         with open(
             "/appl/agents/completed_orders/completed_period_1999999997.txt",
+            encoding="utf-8",
+        ) as completed_file:
+            self.assertEqual(completed_file.read(), "pre-order analysis\n")
+
+    def test_finalize_current_period_logs_on_exit_renames_active_pending_period(self):
+        with open(
+            "/appl/agents/completed_orders/pending_period_1999999999.txt",
+            "w",
+            encoding="utf-8",
+        ) as pending_file:
+            pending_file.write("pre-order analysis\n")
+
+        with patch(
+            "custom.btc_agent.main.get_state",
+            return_value=SimpleNamespace(market_slug="btc-updown-5m-1999999999"),
+        ), patch("custom.btc_agent.main.os.getcwd", return_value="/appl/agents"):
+            finalize_current_period_logs_on_exit()
+
+        self.assertFalse(os.path.exists("/appl/agents/completed_orders/pending_period_1999999999.txt"))
+        with open(
+            "/appl/agents/completed_orders/completed_period_1999999999.txt",
             encoding="utf-8",
         ) as completed_file:
             self.assertEqual(completed_file.read(), "pre-order analysis\n")

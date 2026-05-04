@@ -49,6 +49,7 @@ class DummyMarket:
     slug = "btc-updown-test"
     settlement_threshold = 74982.25
     end_ts = 1777513800
+    start_ts = 1777513500
 
 
 class TestBtcLlmDecision(unittest.TestCase):
@@ -139,6 +140,22 @@ class TestBtcLlmDecision(unittest.TestCase):
         self.assertIn("If window_delta_pct is positive and you choose DOWN", prompt)
         self.assertIn("Focus on regime detection and direction, not limit pricing.", prompt)
         self.assertIn("execution layer will apply regime-aware EV, deadline, liquidity, and FOK rules", prompt)
+
+    def test_user_prompt_uses_canonical_window_time_when_end_ts_is_stale(self):
+        class StaleEndMarket(DummyMarket):
+            end_ts = 1777513505
+            start_ts = 1777513500
+
+        up_snapshot = Mock(buy_quote=0.84)
+        down_snapshot = Mock(buy_quote=0.17)
+        prompt = _build_user_prompt(
+            DummyFeatures(),
+            StaleEndMarket(),
+            up_snapshot=up_snapshot,
+            down_snapshot=down_snapshot,
+        )
+
+        self.assertIn("Time remaining seconds: 8", prompt)
 
     def test_gemini_503_returns_no_trade(self):
         error_response = requests.Response()
