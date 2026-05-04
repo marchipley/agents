@@ -58,6 +58,8 @@ class TradingConfig:
     disable_liquidity_filter: bool = False
     max_trade_usd: float = 5.0
     max_order_price_usd: float = 5.0
+    max_size_high_confidence_threshold: float = 1.1
+    max_size_high_confidence_shares: float = 0.0
     max_trades_per_period: int = 1
     max_automated_loss_trades: int = 0
     min_confidence: float = 0.7
@@ -153,6 +155,13 @@ def get_trading_config() -> TradingConfig:
                     os.getenv("BTC_AGENT_MAX_TRADE_USD", "5"),
                 )
             ),
+            0.0,
+        ),
+        max_size_high_confidence_threshold=float(
+            os.getenv("BTC_AGENT_MAX_SIZE_HIGH_CONFIDENCE_THRESHOLD", "1.1")
+        ),
+        max_size_high_confidence_shares=max(
+            float(os.getenv("BTC_AGENT_MAX_SIZE_HIGH_CONFIDENCE_SHARES", "0")),
             0.0,
         ),
         max_trades_per_period=max(int(os.getenv("BTC_AGENT_MAX_TRADES_PER_PERIOD", "1")), 1),
