@@ -772,6 +772,24 @@ def _validate_trade_candidate(
     high_confidence_override = decision.confidence > 0.90
     window_delta_master_switch = _is_window_delta_master_switch(features, time_remaining_seconds)
     min_edge_required = 0.0 if high_confidence_override else 0.05
+    chosen_side_quote = snapshot.buy_quote if snapshot.buy_quote is not None else implied_probability
+
+    if (
+        chosen_side_quote is not None
+        and chosen_side_quote < 0.15
+        and time_remaining_seconds >= 15
+    ):
+        return None, _build_rejected_trade_result(
+            side=decision.side,
+            size=0.0,
+            price=submission_limit_price,
+            token_id=token_id,
+            reason=(
+                "Quote-floor veto blocked low-probability reversal trade "
+                f"(buy_quote={chosen_side_quote:.3f}; time_remaining={time_remaining_seconds}s)"
+            ),
+            snapshot=snapshot,
+        )
 
     if (
         not cfg.disable_liquidity_filter

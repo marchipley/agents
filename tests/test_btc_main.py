@@ -22,7 +22,7 @@ from custom.btc_agent.main import (
     append_completed_order_tick,
     append_pending_period_tick_analysis,
     clear_price_to_beat_debug_files,
-    delete_pending_period_log,
+    finalize_pending_period_log,
     enforce_session_loss_trade_limit,
     has_valid_price_to_beat,
     promote_pending_period_log_to_completed,
@@ -369,7 +369,7 @@ class TestBtcMain(unittest.TestCase):
         self.assertIn("\"required_velocity_to_win\"", content)
         self.assertIn("\"oracle_gap_ratio\"", content)
 
-    def test_promote_pending_period_log_to_completed_renames_file(self):
+    def test_promote_pending_period_log_to_completed_copies_and_preserves_file(self):
         with open(
             "/appl/agents/completed_orders/pending_period_1999999998.txt",
             "w",
@@ -391,8 +391,13 @@ class TestBtcMain(unittest.TestCase):
             content = completed_file.read()
 
         self.assertEqual(content, "pre-order analysis\n")
+        with open(
+            "/appl/agents/completed_orders/pending_period_1999999998.txt",
+            encoding="utf-8",
+        ) as pending_file:
+            self.assertEqual(pending_file.read(), "pre-order analysis\n")
 
-    def test_delete_pending_period_log_removes_unexecuted_period_analysis(self):
+    def test_finalize_pending_period_log_renames_unexecuted_period_analysis(self):
         with open(
             "/appl/agents/completed_orders/pending_period_1999999997.txt",
             "w",
@@ -401,11 +406,14 @@ class TestBtcMain(unittest.TestCase):
             pending_file.write("pre-order analysis\n")
 
         with patch("custom.btc_agent.main.os.getcwd", return_value="/appl/agents"):
-            delete_pending_period_log("btc-updown-5m-1999999997")
+            finalize_pending_period_log("btc-updown-5m-1999999997")
 
-        self.assertFalse(
-            os.path.exists("/appl/agents/completed_orders/pending_period_1999999997.txt")
-        )
+        self.assertFalse(os.path.exists("/appl/agents/completed_orders/pending_period_1999999997.txt"))
+        with open(
+            "/appl/agents/completed_orders/completed_period_1999999997.txt",
+            encoding="utf-8",
+        ) as completed_file:
+            self.assertEqual(completed_file.read(), "pre-order analysis\n")
 
     def test_write_price_to_beat_debug_file_writes_report(self):
         with patch(

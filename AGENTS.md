@@ -156,7 +156,9 @@ What the BTC agent does today:
   - final 10 seconds means `time_remaining_seconds < 15`
   - `time_remaining_seconds > 240` is treated as an early-window Discovery Phase where high-confidence trades should be rare unless trend intensity is extreme
   - `Window Delta` is explicitly defined as the change from the market window open price and must not be confused with `oracle_gap_ratio`
-- The LLM prompt also includes a quote-sanity rule: if betting against a side that is already priced below `0.10`, the model should only do so when the last 30 seconds show a clear reversal.
+- The LLM prompt now treats `window_delta_pct` as the source of truth for overall trend direction and uses `velocity_30s` only as a micro-momentum entry-timing signal, which is intended to prevent early-window reversal hallucinations.
+- The LLM prompt also includes a stronger quote-sanity rule: if the chosen side is priced below `0.15` and `time_remaining_seconds >= 15`, the model should prefer `NO_TRADE`; only in the final 15 seconds should it consider fading that consensus on a clear reversal.
+- The LLM prompt includes a sign-consistency rule: if `window_delta_pct` is positive and the model chooses `DOWN`, or negative and it chooses `UP`, confidence should stay below `0.50` unless trend exhaustion is genuinely clear.
 - Skips LLM decisioning and execution during the last 60 seconds of the current 5-minute market window and only continues collecting trend data for the upcoming period.
 - Prints the exact execution snapshot used by the paper-trade path, including the calculated `reference_price`, `target_limit_price`, and `recommended_limit_price`.
 - Executes paper trades by default and can submit live Polymarket buy orders through `agents/polymarket/polymarket.py` when `USE_PAPER_TRADES=false`.
@@ -165,8 +167,10 @@ What the BTC agent does today:
 - If `decision.confidence` is at or above `BTC_AGENT_MAX_SIZE_HIGH_CONFIDENCE_THRESHOLD`, the agent ignores the normal price-budget cap and uses `BTC_AGENT_MAX_SIZE_HIGH_CONFIDENCE_SHARES` instead.
 - Before live BUY submission, the agent quantizes share size to a Polymarket-compatible precision so the quote-side amount stays within the exchange’s 2-decimal maker-amount constraint while still respecting the 4-decimal taker-size limit.
 - Rejects live submissions cleanly when the configured budget cannot satisfy the venue minimum order size instead of silently scaling above the configured budget.
+- Applies a hard execution-side quote-floor veto before submission: if the chosen side quote is below `0.15` and there are 15 seconds or more remaining, the trade is rejected even if the LLM asks for it.
 - Tracks in-memory active orders for the current 5-minute market window and prints each order’s target BTC level plus whether the position is currently winning, losing, or tied.
 - Writes a per-slug order-tracking file under `completed_orders/` for each executed order, appending one status snapshot per tick plus the pre-order tick history that led into the trade.
+- Preserves every analyzed 5-minute window under `completed_orders/completed_period_<slug_timestamp>.txt`, even when no trade executes; executed-order files receive a copy of the pre-order period analysis, while the standalone period log is still finalized and retained on slug rollover.
 - Evaluates paper-order win/loss status against the market-period settlement reference, preferring Polymarket’s parsed threshold and otherwise falling back to the closest retained BTC sample at the start of the 5-minute period rather than the trade-entry BTC price.
 - Enforces `BTC_AGENT_MAX_TRADES_PER_PERIOD` per 5-minute market slug; once that limit is reached, subsequent loop ticks skip quote snapshots and LLM trade decisions until the next market window begins.
 - Enforces `MAX_AUTOMATED_LOSS_TRADES` across the full process session as a completed-loss stop; once that many trades have actually settled as losses, the agent exits.

@@ -209,6 +209,81 @@ class TestBtcExecutor(unittest.TestCase):
         self.assertIs(validated_snapshot, snapshot)
         self.assertIsNone(rejection)
 
+    def test_validate_trade_candidate_rejects_sub_015_quote_before_final_15_seconds(self):
+        market = types.SimpleNamespace(
+            up_token_id="up-token",
+            down_token_id="down-token",
+            end_ts=1_000_000_100,
+            volume=5000.0,
+        )
+        decision = types.SimpleNamespace(
+            side="DOWN",
+            confidence=0.75,
+            max_price_to_pay=1.0,
+            reason="test",
+        )
+        snapshot = TokenQuoteSnapshot(
+            token_id="down-token",
+            buy_quote=0.01,
+            midpoint=0.01,
+            last_trade_price=0.01,
+            reference_price=0.01,
+            target_limit_price=0.01,
+            recommended_limit_price=0.01,
+            ok_to_submit=True,
+            submit_reason="ok",
+            best_bid=0.01,
+            best_ask=0.02,
+            tick_size=0.01,
+            spread=0.01,
+        )
+
+        fake_now = datetime.fromtimestamp(1_000_000_000, tz=timezone.utc)
+        with patch("custom.btc_agent.executor.datetime") as mock_datetime:
+            mock_datetime.now.return_value = fake_now
+            validated_snapshot, rejection = _validate_trade_candidate(market, decision, snapshot=snapshot)
+
+        self.assertIsNone(validated_snapshot)
+        self.assertIsNotNone(rejection)
+        self.assertIn("Quote-floor veto", rejection.reason)
+
+    def test_validate_trade_candidate_allows_sub_015_quote_inside_final_15_seconds(self):
+        market = types.SimpleNamespace(
+            up_token_id="up-token",
+            down_token_id="down-token",
+            end_ts=1_000_000_010,
+            volume=5000.0,
+        )
+        decision = types.SimpleNamespace(
+            side="DOWN",
+            confidence=0.96,
+            max_price_to_pay=1.0,
+            reason="test",
+        )
+        snapshot = TokenQuoteSnapshot(
+            token_id="down-token",
+            buy_quote=0.01,
+            midpoint=0.01,
+            last_trade_price=0.01,
+            reference_price=0.01,
+            target_limit_price=0.01,
+            recommended_limit_price=0.01,
+            ok_to_submit=True,
+            submit_reason="ok",
+            best_bid=0.01,
+            best_ask=0.02,
+            tick_size=0.01,
+            spread=0.01,
+        )
+
+        fake_now = datetime.fromtimestamp(1_000_000_000, tz=timezone.utc)
+        with patch("custom.btc_agent.executor.datetime") as mock_datetime:
+            mock_datetime.now.return_value = fake_now
+            validated_snapshot, rejection = _validate_trade_candidate(market, decision, snapshot=snapshot)
+
+        self.assertIs(validated_snapshot, snapshot)
+        self.assertIsNone(rejection)
+
     def test_execute_paper_trade_uses_high_confidence_share_override(self):
         from custom.btc_agent.executor import _execute_paper_trade
 

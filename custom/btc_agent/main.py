@@ -171,6 +171,15 @@ def _pending_period_log_path(market_slug: str) -> str:
     )
 
 
+def _completed_period_log_path(market_slug: str) -> str:
+    completed_orders_dir = os.path.join(os.getcwd(), "completed_orders")
+    os.makedirs(completed_orders_dir, exist_ok=True)
+    return os.path.join(
+        completed_orders_dir,
+        f"completed_period_{_extract_slug_timestamp(market_slug)}.txt",
+    )
+
+
 def _completed_order_final_log_path(
     market_slug: str,
     outcome_label: str,
@@ -577,21 +586,27 @@ def promote_pending_period_log_to_completed(
     if not os.path.exists(pending_path):
         return
     if os.path.exists(completed_path):
+        return
+    with open(pending_path, "r", encoding="utf-8") as pending_file:
+        content = pending_file.read()
+    with open(completed_path, "w", encoding="utf-8") as completed_file:
+        completed_file.write(content)
+
+
+def finalize_pending_period_log(market_slug: str) -> None:
+    if not market_slug:
+        return
+    pending_path = _pending_period_log_path(market_slug)
+    completed_path = _completed_period_log_path(market_slug)
+    if not os.path.exists(pending_path):
+        return
+    if os.path.exists(completed_path):
         try:
             os.remove(pending_path)
         except FileNotFoundError:
             pass
         return
     os.replace(pending_path, completed_path)
-
-
-def delete_pending_period_log(market_slug: str) -> None:
-    if not market_slug:
-        return
-    try:
-        os.remove(_pending_period_log_path(market_slug))
-    except FileNotFoundError:
-        pass
 
 
 def append_completed_order_tick(
@@ -1141,7 +1156,7 @@ def run_once() -> None:
             except Exception:
                 pass
         elif previous_market_slug:
-            delete_pending_period_log(previous_market_slug)
+            finalize_pending_period_log(previous_market_slug)
         print(f"New 5-minute market period detected: {market.slug}")
         clear_price_to_beat_debug_files()
         _DEBUG_WRITTEN_SLUGS.clear()

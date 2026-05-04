@@ -133,7 +133,10 @@ class TestBtcLlmDecision(unittest.TestCase):
         self.assertIn("time_remaining_seconds is authoritative", prompt)
         self.assertIn("Discovery Phase", prompt)
         self.assertIn("Do not confuse it with Oracle gap ratio", prompt)
-        self.assertIn("If betting DOWN while the DOWN buy quote is below 0.10", prompt)
+        self.assertIn("window_delta_pct is the source of truth for overall trend direction", prompt)
+        self.assertIn("velocity_30s is micro-momentum for entry timing only", prompt)
+        self.assertIn("If the chosen side buy quote is below 0.15", prompt)
+        self.assertIn("If window_delta_pct is positive and you choose DOWN", prompt)
         self.assertIn("Focus on regime detection and direction, not limit pricing.", prompt)
         self.assertIn("execution layer will apply regime-aware EV, deadline, liquidity, and FOK rules", prompt)
 
