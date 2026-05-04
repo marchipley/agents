@@ -815,8 +815,24 @@ def _execute_paper_trade(
     live_price = snapshot.reference_price
     submission_limit_price = get_submission_limit_price(snapshot)
     submission_limit_label = get_submission_limit_label()
-    size = cfg.trade_shares_size
     token_id = snapshot.token_id
+    size = _size_for_max_budget(cfg.max_order_price_usd, submission_limit_price)
+    order_notional = _get_order_notional(size, submission_limit_price)
+
+    if size <= 0 or order_notional <= 0:
+        return TradeExecutionResult(
+            executed=False,
+            side=decision.side,
+            size=0.0,
+            price=submission_limit_price,
+            token_id=token_id,
+            reason=(
+                f"Order budget {cfg.max_order_price_usd:.3f} is too small for "
+                f"{submission_limit_label} {submission_limit_price:.3f}"
+            ),
+            live_order_response=None,
+            execution_snapshot=snapshot,
+        )
 
     return TradeExecutionResult(
         executed=True,
@@ -827,7 +843,8 @@ def _execute_paper_trade(
         reason=(
             f"Paper trade approved at {submission_limit_label} {submission_limit_price:.3f} "
             f"for {size:.4f} shares "
-            f"(reference={live_price:.3f}; {snapshot.submit_reason})"
+            f"(reference={live_price:.3f}; order_notional={order_notional:.3f}; "
+            f"max_order_price_usd={cfg.max_order_price_usd:.3f}; {snapshot.submit_reason})"
         ),
         live_order_response=None,
         execution_snapshot=snapshot,
@@ -841,6 +858,15 @@ def _estimate_live_fee(size: float, limit_price: float, fee_rate_bps: int) -> fl
 
 def _get_order_notional(size: float, limit_price: float) -> float:
     return round(size * limit_price, 6)
+
+
+def _size_for_max_budget(max_budget_usd: float, limit_price: float) -> float:
+    if limit_price <= 0:
+        raise RuntimeError("Cannot size an order with a non-positive limit price.")
+    if max_budget_usd <= 0:
+        return 0.0
+    raw_size = max_budget_usd / limit_price
+    return math.floor(raw_size * 10_000) / 10_000
 
 
 def _scale_live_size_for_min_notional(
@@ -914,11 +940,42 @@ def _execute_live_trade(
     if submission_limit_price is None or live_price is None:
         raise RuntimeError("Live trade execution called without a valid priced snapshot.")
 
-    size = _scale_live_size_for_min_notional(
-        cfg.trade_shares_size,
+    size = _size_for_max_budget(cfg.max_order_price_usd, submission_limit_price)
+    min_order_size = _scale_live_size_for_min_notional(
+        0.0,
         submission_limit_price,
         cfg.live_min_order_usd,
     )
+    if size <= 0:
+        return TradeExecutionResult(
+            executed=False,
+            side=decision.side,
+            size=0.0,
+            price=submission_limit_price,
+            token_id=snapshot.token_id,
+            reason=(
+                f"Order budget {cfg.max_order_price_usd:.3f} is too small for "
+                f"{submission_limit_label} {submission_limit_price:.3f}"
+            ),
+            live_order_response=None,
+            execution_snapshot=snapshot,
+        )
+    if size < min_order_size:
+        return TradeExecutionResult(
+            executed=False,
+            side=decision.side,
+            size=0.0,
+            price=submission_limit_price,
+            token_id=snapshot.token_id,
+            reason=(
+                "Order budget cannot satisfy live minimum order size "
+                f"(max_order_price_usd={cfg.max_order_price_usd:.3f}; "
+                f"{submission_limit_label}={submission_limit_price:.3f}; "
+                f"max_size={size:.4f}; required_min_size={min_order_size:.4f})"
+            ),
+            live_order_response=None,
+            execution_snapshot=snapshot,
+        )
     client = Polymarket()
 
     def _submit_order(order_size: float, fok_enabled: bool):
@@ -947,15 +1004,21 @@ def _execute_live_trade(
     except Exception as exc:
         minimum_size = _extract_minimum_size_from_error(exc)
         if minimum_size is not None and minimum_size > size:
-            try:
-                size = minimum_size
-                response, order_notional, estimated_fee, required_cash = _submit_order(size, use_fok)
-                minimum_size_retry_applied = minimum_size
-            except Exception as minimum_retry_exc:
-                raise RuntimeError(
-                    "Live order submission failed after minimum-size retry: "
-                    f"initial={exc}; retry={minimum_retry_exc}"
-                ) from minimum_retry_exc
+            return TradeExecutionResult(
+                executed=False,
+                side=decision.side,
+                size=0.0,
+                price=submission_limit_price,
+                token_id=snapshot.token_id,
+                reason=(
+                    "Exchange minimum size exceeds configured order budget "
+                    f"(max_order_price_usd={cfg.max_order_price_usd:.3f}; "
+                    f"attempted_size={size:.4f}; exchange_minimum_size={minimum_size:.4f}; "
+                    f"{submission_limit_label}={submission_limit_price:.3f})"
+                ),
+                live_order_response=None,
+                execution_snapshot=snapshot,
+            )
         elif use_fok and _is_fok_full_fill_error(exc):
             if time_remaining_seconds > 5:
                 try:

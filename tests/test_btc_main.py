@@ -18,6 +18,7 @@ sys.modules.setdefault(
 from custom.btc_agent.main import (
     _SESSION_LOSS_TRADES,
     append_completed_order_tick,
+    append_failed_order_attempt,
     append_pending_period_tick_analysis,
     clear_price_to_beat_debug_files,
     delete_pending_period_log,
@@ -362,6 +363,66 @@ class TestBtcMain(unittest.TestCase):
             content = completed_file.read()
 
         self.assertEqual(content, "pre-order analysis\n")
+
+    def test_append_failed_order_attempt_writes_attempt_log(self):
+        market = SimpleNamespace(
+            slug="btc-updown-5m-1999999998",
+            title="Bitcoin Up or Down",
+            settlement_threshold=77763.01,
+        )
+        decision = SimpleNamespace(
+            side="DOWN",
+            confidence=0.91,
+            max_price_to_pay=0.88,
+            reason="budget test",
+        )
+        result = SimpleNamespace(
+            price=0.71,
+            size=2.8169,
+            token_id="down-token",
+            reason="Order budget cannot satisfy live minimum order size",
+        )
+        features = SimpleNamespace(
+            price_usd=77750.0,
+            delta_from_previous_tick=-3.0,
+            momentum_1m=-7.0,
+            momentum_5m=-12.0,
+            velocity_15s=-3.0,
+            velocity_30s=-2.0,
+            momentum_acceleration=-1.0,
+            volatility_5m=18.0,
+            consecutive_flat_ticks=0,
+            consecutive_directional_ticks=5,
+            rsi_9=22.0,
+            rsi_14=29.0,
+            rsi_speed_divergence=-7.0,
+            ema_9=77745.0,
+            ema_21=77760.0,
+            ema_alignment="bearish",
+            ema_cross_direction="down",
+            adx_14=31.0,
+            atr_14=15.0,
+        )
+
+        with patch("custom.btc_agent.main.os.getcwd", return_value="/appl/agents"):
+            append_failed_order_attempt(
+                market,
+                decision,
+                result,
+                features=features,
+            )
+
+        with open(
+            "/appl/agents/completed_orders/completed_order_attempt_1999999998.txt",
+            encoding="utf-8",
+        ) as order_file:
+            content = order_file.read()
+
+        self.assertIn("phase=ATTEMPT_FAILED", content)
+        self.assertIn("attempt_side=DOWN", content)
+        self.assertIn("attempted_price=0.710", content)
+        self.assertIn("attempted_size=2.817", content)
+        self.assertIn("attempt_reason=Order budget cannot satisfy live minimum order size", content)
 
     def test_delete_pending_period_log_removes_unexecuted_period_analysis(self):
         with open(
@@ -1059,7 +1120,7 @@ class TestBtcMain(unittest.TestCase):
             run_once()
 
         with open(
-            "/appl/agents/completed_orders/completed_order_win_1777513500.txt",
+            "/appl/agents/completed_orders/completed_order_win_down_1777513500.txt",
             encoding="utf-8",
         ) as order_file:
             content = order_file.read()
@@ -1143,7 +1204,7 @@ class TestBtcMain(unittest.TestCase):
 
         mock_resolution_price.assert_called_once_with("btc-updown-5m-1777513500")
         with open(
-            "/appl/agents/completed_orders/completed_order_win_1777513500.txt",
+            "/appl/agents/completed_orders/completed_order_win_down_1777513500.txt",
             encoding="utf-8",
         ) as order_file:
             content = order_file.read()
@@ -1220,7 +1281,7 @@ class TestBtcMain(unittest.TestCase):
 
         mock_resolution_price.assert_not_called()
         with open(
-            "/appl/agents/completed_orders/completed_order_win_1777513500.txt",
+            "/appl/agents/completed_orders/completed_order_win_down_1777513500.txt",
             encoding="utf-8",
         ) as order_file:
             content = order_file.read()

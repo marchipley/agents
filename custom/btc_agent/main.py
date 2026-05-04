@@ -174,13 +174,27 @@ def _pending_period_log_path(market_slug: str) -> str:
 def _completed_order_final_log_path(
     market_slug: str,
     outcome_label: str,
+    side: Optional[str] = None,
+    trade_number_in_period: Optional[int] = None,
+) -> str:
+    completed_orders_dir = os.path.join(os.getcwd(), "completed_orders")
+    os.makedirs(completed_orders_dir, exist_ok=True)
+    side_suffix = f"_{str(side).lower()}" if side else ""
+    return os.path.join(
+        completed_orders_dir,
+        f"completed_order_{outcome_label}{side_suffix}_{_extract_slug_timestamp(market_slug)}{_trade_number_suffix(trade_number_in_period)}.txt",
+    )
+
+
+def _completed_order_attempt_log_path(
+    market_slug: str,
     trade_number_in_period: Optional[int] = None,
 ) -> str:
     completed_orders_dir = os.path.join(os.getcwd(), "completed_orders")
     os.makedirs(completed_orders_dir, exist_ok=True)
     return os.path.join(
         completed_orders_dir,
-        f"completed_order_{outcome_label}_{_extract_slug_timestamp(market_slug)}{_trade_number_suffix(trade_number_in_period)}.txt",
+        f"completed_order_attempt_{_extract_slug_timestamp(market_slug)}{_trade_number_suffix(trade_number_in_period)}.txt",
     )
 
 
@@ -687,6 +701,7 @@ def append_completed_order_tick(
         final_path = _completed_order_final_log_path(
             order.market_slug,
             outcome_label,
+            order.side,
             getattr(order, "trade_number_in_period", None),
         )
         try:
@@ -726,6 +741,88 @@ def update_active_order_logs(
             up_snapshot=up_snapshot,
             down_snapshot=down_snapshot,
         )
+
+
+def append_failed_order_attempt(
+    market,
+    decision,
+    result,
+    *,
+    features=None,
+    up_snapshot: TokenQuoteSnapshot = None,
+    down_snapshot: TokenQuoteSnapshot = None,
+    observed_at: datetime = None,
+    trade_number_in_period: Optional[int] = None,
+) -> None:
+    observed_at = observed_at or datetime.now(timezone.utc)
+    log_path = _completed_order_attempt_log_path(
+        market.slug,
+        trade_number_in_period=trade_number_in_period,
+    )
+    regime_fingerprint = _build_regime_fingerprint(
+        market_slug=market.slug,
+        observed_at=observed_at,
+        features=features,
+        up_snapshot=up_snapshot,
+        down_snapshot=down_snapshot,
+        current_btc_price=None if features is None else getattr(features, "price_usd", None),
+        period_open_price_to_beat=market.settlement_threshold,
+    )
+    with open(log_path, "a", encoding="utf-8") as log_file:
+        if log_file.tell() == 0:
+            log_file.write(
+                "\n".join(
+                    [
+                        f"market_slug={market.slug}",
+                        f"market_title={market.title}",
+                        f"slug_timestamp={_extract_slug_timestamp(market.slug)}",
+                        "",
+                    ]
+                )
+            )
+        lines = [
+            f"observed_at={observed_at.isoformat()}",
+            "phase=ATTEMPT_FAILED",
+            f"period_open_price_to_beat={_fmt(market.settlement_threshold)}",
+            f"attempt_side={getattr(decision, 'side', None)}",
+            f"attempt_confidence={_fmt(getattr(decision, 'confidence', None))}",
+            f"attempt_max_price_to_pay={_fmt(getattr(decision, 'max_price_to_pay', None))}",
+            f"attempted_price={_fmt(getattr(result, 'price', None))}",
+            f"attempted_size={_fmt(getattr(result, 'size', None))}",
+            f"attempt_token_id={getattr(result, 'token_id', None)}",
+            f"attempt_reason={getattr(result, 'reason', '')}",
+        ]
+        if up_snapshot is not None:
+            lines.extend(_snapshot_summary("up", up_snapshot))
+        if down_snapshot is not None:
+            lines.extend(_snapshot_summary("down", down_snapshot))
+        if features is not None:
+            lines.extend(
+                [
+                    f"btc_price={_fmt(getattr(features, 'price_usd', None))}",
+                    f"delta_prev_tick={getattr(features, 'delta_from_previous_tick', None)}",
+                    f"momentum_1m={getattr(features, 'momentum_1m', None)}",
+                    f"momentum_5m={getattr(features, 'momentum_5m', None)}",
+                    f"velocity_15s={getattr(features, 'velocity_15s', None)}",
+                    f"velocity_30s={getattr(features, 'velocity_30s', None)}",
+                    f"momentum_acceleration={getattr(features, 'momentum_acceleration', None)}",
+                    f"volatility_5m={getattr(features, 'volatility_5m', None)}",
+                    f"consecutive_flat_ticks={getattr(features, 'consecutive_flat_ticks', None)}",
+                    f"consecutive_directional_ticks={getattr(features, 'consecutive_directional_ticks', None)}",
+                    f"rsi_9={getattr(features, 'rsi_9', None)}",
+                    f"rsi_14={getattr(features, 'rsi_14', None)}",
+                    f"rsi_speed_divergence={getattr(features, 'rsi_speed_divergence', None)}",
+                    f"ema_9={getattr(features, 'ema_9', None)}",
+                    f"ema_21={getattr(features, 'ema_21', None)}",
+                    f"ema_alignment={getattr(features, 'ema_alignment', None)}",
+                    f"ema_cross_direction={getattr(features, 'ema_cross_direction', None)}",
+                    f"adx_14={getattr(features, 'adx_14', None)}",
+                    f"atr_14={getattr(features, 'atr_14', None)}",
+                    "regime_fingerprint=" + json.dumps(regime_fingerprint, sort_keys=True),
+                ]
+            )
+        lines.append("")
+        log_file.write("\n".join(lines))
 
 
 def enforce_session_loss_trade_limit(cfg) -> None:
@@ -1335,6 +1432,22 @@ def run_once() -> None:
     if result.execution_snapshot is not None and cfg.debug:
         print_quote_snapshot_from_snapshot("Execution", result.execution_snapshot, debug=True)
     print_trade_execution_result(result, debug=cfg.debug)
+
+    if (
+        not result.executed
+        and decision.side in ("UP", "DOWN")
+        and result.token_id
+    ):
+        append_failed_order_attempt(
+            market,
+            decision,
+            result,
+            features=features,
+            up_snapshot=up_snapshot,
+            down_snapshot=down_snapshot,
+            observed_at=features.as_of,
+            trade_number_in_period=state.trades_executed + 1,
+        )
 
     if result.executed:
         if cfg.max_trades_per_period > 1:

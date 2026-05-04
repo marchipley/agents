@@ -102,8 +102,8 @@ Optional / supported:
 - `BTC_AGENT_DEBUG` default: `false`
 - `BTC_AGENT_LOOP_INTERVAL` default: `30`
 - `BTC_AGENT_MAX_TRADE_USD` default: `5`
-- `BTC_AGENT_TRADE_SHARES_SIZE` default: `5`
-- `BTC_AGENT_MAX_TRADES_PER_PERIOD` default: `1`
+- `BTC_AGENT_MAX_PRICE` default: `5`; maximum pUSD budget for a single order, with size derived to stay as close to that budget as possible without going over
+- `BTC_AGENT_MAX_TRADES_PER_PERIOD` default: `1`; current expected runtime setting is `1` while multi-trade-per-period behavior is deferred to a later phase
 - `MAX_AUTOMATED_LOSS_TRADES` default: `0` meaning disabled; when set above zero, the agent counts completed losing trades since launch and stops once that loss count reaches the configured threshold
 - `CONFIDENCE` optional alias for `BTC_AGENT_MIN_CONFIDENCE`
 - `BTC_AGENT_MIN_CONFIDENCE` default: `0.7`
@@ -154,12 +154,14 @@ What the BTC agent does today:
 - Prints the exact execution snapshot used by the paper-trade path, including the calculated `reference_price`, `target_limit_price`, and `recommended_limit_price`.
 - Executes paper trades by default and can submit live Polymarket buy orders through `agents/polymarket/polymarket.py` when `USE_PAPER_TRADES=false`.
 - Submits live orders with a configurable maker fee rate from `BTC_AGENT_LIVE_FEE_RATE_BPS`, defaulting to `1000` bps to match the current BTC Up/Down market requirement observed during live submission attempts.
-- Keeps paper trade size fixed at `BTC_AGENT_TRADE_SHARES_SIZE`, but auto-scales live order size upward when needed so the live order notional meets `BTC_AGENT_LIVE_MIN_ORDER_USD`.
-- Uses a fixed paper-trade share size from `BTC_AGENT_TRADE_SHARES_SIZE` instead of deriving the trade size from USD notional.
+- Sizes paper and live orders from `BTC_AGENT_MAX_PRICE`, deriving the share count from the selected submission limit so the order notional stays at or below the configured pUSD budget.
+- Rejects live submissions cleanly when the configured order budget cannot satisfy the venue minimum order size instead of silently scaling above the configured budget.
 - Tracks in-memory active orders for the current 5-minute market window and prints each order’s target BTC level plus whether the position is currently winning, losing, or tied.
 - Writes a per-slug order-tracking file under `completed_orders/` for each executed order, appending one status snapshot per tick plus the pre-order tick history that led into the trade.
+- Renames finalized completed-order files to include both outcome and side, for example `completed_order_win_up_<slug_ts>.txt` or `completed_order_loss_down_<slug_ts>.txt`.
+- Writes `completed_order_attempt_<slug_ts>.txt` when a directional order attempt fails after a priced execution decision, preserving the same tick context plus the failure reason.
 - Evaluates paper-order win/loss status against the market-period settlement reference, preferring Polymarket’s parsed threshold and otherwise falling back to the closest retained BTC sample at the start of the 5-minute period rather than the trade-entry BTC price.
-- Enforces `BTC_AGENT_MAX_TRADES_PER_PERIOD` per 5-minute market slug; once that limit is reached, subsequent loop ticks skip quote snapshots and LLM trade decisions until the next market window begins.
+- Enforces `BTC_AGENT_MAX_TRADES_PER_PERIOD` per 5-minute market slug; current production usage assumes `1`, so once that limit is reached the remaining loop ticks in the slug skip new trade evaluation and only continue status/data tracking until the next market window begins.
 - Enforces `MAX_AUTOMATED_LOSS_TRADES` across the full process session as a completed-loss stop; once that many trades have actually settled as losses, the agent exits.
 - When `BTC_AGENT_DEBUG=false`, suppresses most verbose diagnostics and only prints a compact subset of geolocation, balances, quote snapshots, BTC features, LLM decision fields, and final paper execution fields.
 - In non-debug mode, account balances print only on the first loop iteration and again at the start of each new 5-minute market period.
@@ -515,3 +517,11 @@ Do not revert unrelated local changes unless the user explicitly asks for that.
 - Added a pre-LLM quote gate so the BTC loop skips AI decision calls when both outcome tokens are already unsubmitable at current prices.
 - Added `MINIMUM_WALLET_BALANCE` so the BTC loop aborts when available trading cash falls below the configured wallet floor.
 - Added a last-minute market gate so the BTC loop stops making LLM decisions or trade attempts during the final 60 seconds of a market window.
+
+### 2026-05-03
+
+- Replaced share-based BTC order sizing with budget-based sizing using `BTC_AGENT_MAX_PRICE`, so both paper and live orders derive the share count from the chosen submission limit while staying at or below the configured pUSD budget.
+- Changed live execution so the agent no longer exceeds the configured budget to satisfy exchange minimum sizes; when the venue minimum cannot be met within budget, the attempt is rejected cleanly and the loop continues running.
+- Added failed directional order-attempt logging under `completed_orders/completed_order_attempt_<slug_ts>.txt`, preserving the same market, feature, quote, and regime context plus the failure reason.
+- Updated finalized completed-order filenames to include the order side, for example `completed_order_win_up_<slug_ts>.txt` and `completed_order_loss_down_<slug_ts>.txt`.
+- Clarified that the code still contains the per-period trade-limit plumbing, but current operation is intentionally back on `BTC_AGENT_MAX_TRADES_PER_PERIOD=1` and future multi-trade-per-period behavior will be handled in a later phase.

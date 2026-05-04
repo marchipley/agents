@@ -15,6 +15,7 @@ sys.modules.setdefault(
 from custom.btc_agent.executor import (
     _extract_minimum_size_from_error,
     _get_order_notional,
+    _size_for_max_budget,
     _scale_live_size_for_min_notional,
     _execute_live_trade,
     _validate_trade_candidate,
@@ -106,6 +107,13 @@ class TestBtcExecutor(unittest.TestCase):
         order_notional = _get_order_notional(size, limit_price)
 
         self.assertGreaterEqual(order_notional, 1.01)
+
+    def test_size_for_max_budget_floors_without_exceeding_budget(self):
+        size = _size_for_max_budget(2.0, 0.71)
+        notional = _get_order_notional(size, 0.71)
+
+        self.assertEqual(size, 2.8169)
+        self.assertLessEqual(notional, 2.0)
 
     def test_account_balance_snapshot_uses_pusd_as_cash_balance(self):
         with patch(
@@ -384,7 +392,7 @@ class TestBtcExecutor(unittest.TestCase):
         with patch(
             "custom.btc_agent.executor.get_trading_config",
             return_value=types.SimpleNamespace(
-                trade_shares_size=5.0,
+                max_order_price_usd=5.0,
                 live_min_order_usd=1.0,
                 live_fee_rate_bps=1000,
                 use_recommended_limit=False,
@@ -432,7 +440,7 @@ class TestBtcExecutor(unittest.TestCase):
         with patch(
             "custom.btc_agent.executor.get_trading_config",
             return_value=types.SimpleNamespace(
-                trade_shares_size=5.0,
+                max_order_price_usd=5.0,
                 live_min_order_usd=1.0,
                 live_fee_rate_bps=1000,
                 use_recommended_limit=False,
@@ -449,37 +457,34 @@ class TestBtcExecutor(unittest.TestCase):
         self.assertIn("FOK order could not be fully filled", result.reason)
         self.assertEqual(client.execute_order.call_count, 1)
 
-    def test_execute_live_trade_retries_with_exchange_minimum_size(self):
+    def test_execute_live_trade_returns_clean_rejection_when_exchange_minimum_exceeds_budget(self):
         market = types.SimpleNamespace(end_ts=int(datetime.now(timezone.utc).timestamp()) + 30)
         decision = types.SimpleNamespace(side="UP", confidence=0.8, max_price_to_pay=1.0)
         snapshot = TokenQuoteSnapshot(
             token_id="up-token",
-            buy_quote=0.35,
-            midpoint=0.35,
-            last_trade_price=0.35,
-            reference_price=0.35,
-            target_limit_price=0.35,
-            recommended_limit_price=0.35,
+            buy_quote=0.70,
+            midpoint=0.70,
+            last_trade_price=0.70,
+            reference_price=0.70,
+            target_limit_price=0.70,
+            recommended_limit_price=0.70,
             ok_to_submit=True,
             submit_reason="ok",
-            best_bid=0.34,
-            best_ask=0.35,
+            best_bid=0.69,
+            best_ask=0.70,
             tick_size=0.01,
             spread=0.01,
         )
         client = types.SimpleNamespace(
             execute_order=unittest.mock.Mock(
-                side_effect=[
-                    Exception("order xyz is invalid. Size (2.88) lower than the minimum: 5"),
-                    {"ok": True},
-                ]
+                side_effect=Exception("order xyz is invalid. Size (2.88) lower than the minimum: 5")
             )
         )
 
         with patch(
             "custom.btc_agent.executor.get_trading_config",
             return_value=types.SimpleNamespace(
-                trade_shares_size=2.0,
+                max_order_price_usd=2.0,
                 live_min_order_usd=1.0,
                 live_fee_rate_bps=1000,
                 use_recommended_limit=False,
@@ -492,12 +497,9 @@ class TestBtcExecutor(unittest.TestCase):
         ):
             result = _execute_live_trade(decision=decision, market=market, snapshot=snapshot)
 
-        self.assertTrue(result.executed)
-        self.assertEqual(result.size, 5.0)
-        self.assertIn("minimum_size_retry=5.0000", result.reason)
-        self.assertEqual(client.execute_order.call_count, 2)
-        self.assertEqual(client.execute_order.call_args_list[0].kwargs["size"], 2.8858)
-        self.assertEqual(client.execute_order.call_args_list[1].kwargs["size"], 5.0)
+        self.assertFalse(result.executed)
+        self.assertIn("Exchange minimum size exceeds configured order budget", result.reason)
+        self.assertEqual(client.execute_order.call_count, 1)
 
 
 if __name__ == "__main__":
