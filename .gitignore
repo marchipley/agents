@@ -33,3 +33,4 @@ data_files/current_period.json
 /logs
 /logs
 /chrome_extension
+/chrome_ext/polymarket-bot/node_modules
