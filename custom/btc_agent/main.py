@@ -33,6 +33,8 @@ from .executor import (
     compute_recommended_limit_price,
     compute_target_limit_price,
     evaluate_ok_to_submit,
+    get_effective_decision_confidence,
+    get_effective_min_confidence,
     get_submission_limit_price,
     get_account_balance_snapshot,
     get_token_quote_snapshot,
@@ -118,6 +120,25 @@ def _fmt_mmss_from_seconds(seconds: Optional[int]) -> str:
     return f"{minutes:02d}:{secs:02d}"
 
 
+def _effective_confidence(decision, market=None, features=None) -> float:
+    if decision is None:
+        return 0.0
+    if market is None:
+        cfg = get_trading_config()
+        confidence = float(getattr(decision, "confidence", 0.0) or 0.0)
+        return confidence if confidence >= float(getattr(cfg, "min_confidence", 0.7)) else 0.0
+    effective_confidence = get_effective_decision_confidence(
+        decision,
+        market,
+        features=features,
+    )
+    min_confidence = get_effective_min_confidence(
+        market,
+        features=features,
+    )
+    return effective_confidence if effective_confidence >= min_confidence else 0.0
+
+
 def wait_for_next_tick_or_quit(
     interval_seconds: int,
     quit_monitor=None,
@@ -191,16 +212,29 @@ def _completed_period_log_path(market_slug: str) -> str:
     )
 
 
+def _completed_period_final_log_path(
+    market_slug: str,
+    period_direction: str,
+) -> str:
+    completed_orders_dir = os.path.join(os.getcwd(), "completed_orders")
+    os.makedirs(completed_orders_dir, exist_ok=True)
+    return os.path.join(
+        completed_orders_dir,
+        f"completed_period_{period_direction}_{_extract_slug_timestamp(market_slug)}.txt",
+    )
+
+
 def _completed_order_final_log_path(
     market_slug: str,
     outcome_label: str,
+    period_direction: str,
     trade_number_in_period: Optional[int] = None,
 ) -> str:
     completed_orders_dir = os.path.join(os.getcwd(), "completed_orders")
     os.makedirs(completed_orders_dir, exist_ok=True)
     return os.path.join(
         completed_orders_dir,
-        f"completed_order_{outcome_label}_{_extract_slug_timestamp(market_slug)}{_trade_number_suffix(trade_number_in_period)}.txt",
+        f"completed_order_{outcome_label}_{period_direction}_{_extract_slug_timestamp(market_slug)}{_trade_number_suffix(trade_number_in_period)}.txt",
     )
 
 
@@ -210,6 +244,29 @@ def _classify_outcome_label(position_state: str) -> str:
     if position_state == "LOSING":
         return "loss"
     return "tied"
+
+
+def _classify_period_direction(current_btc_price: float, target_btc_price: float) -> str:
+    if current_btc_price > target_btc_price:
+        return "up"
+    if current_btc_price < target_btc_price:
+        return "down"
+    return "tied"
+
+
+def _extract_period_open_price_to_beat_from_log(log_path: str) -> Optional[float]:
+    try:
+        with open(log_path, encoding="utf-8") as log_file:
+            for line in log_file:
+                if line.startswith("period_open_price_to_beat="):
+                    value = line.split("=", 1)[1].strip()
+                    try:
+                        return float(value)
+                    except ValueError:
+                        return None
+    except FileNotFoundError:
+        return None
+    return None
 
 
 def _position_outcome_reason(order: ActivePaperOrder, current_btc_price: float, position_state: str) -> str:
@@ -401,6 +458,7 @@ def _rsi_regime(features) -> str:
 
 def _build_regime_fingerprint(
     *,
+    market=None,
     market_slug: str,
     observed_at: datetime,
     features=None,
@@ -415,10 +473,13 @@ def _build_regime_fingerprint(
 
     gap_to_target = None
     gap_to_target_pct = None
+    strike_delta_pct = None
     time_remaining_seconds = _market_time_remaining_seconds(market_slug, observed_at)
     if current_price is not None and period_open_price_to_beat not in (None, 0):
         gap_to_target = current_price - period_open_price_to_beat
         gap_to_target_pct = (gap_to_target / period_open_price_to_beat) * 100
+        if current_price != 0:
+            strike_delta_pct = (gap_to_target / current_price) * 100
 
     required_velocity_to_win = None
     if gap_to_target is not None and time_remaining_seconds not in (None, 0):
@@ -467,6 +528,9 @@ def _build_regime_fingerprint(
         "liquidity_regime": _liquidity_regime(selected_snapshot) if selected_snapshot is not None else "unknown",
         "threshold_gap_usd": None if gap_to_target is None else round(gap_to_target, 4),
         "threshold_gap_pct": None if gap_to_target_pct is None else round(gap_to_target_pct, 4),
+        "strike_delta_pct": None if strike_delta_pct is None else round(strike_delta_pct, 4),
+        "up_market_probability": None if market is None else getattr(market, "up_market_probability", None),
+        "down_market_probability": None if market is None else getattr(market, "down_market_probability", None),
         "required_velocity_to_win": None
         if required_velocity_to_win is None
         else round(required_velocity_to_win, 4),
@@ -547,6 +611,8 @@ def append_pending_period_tick_analysis(
             f"observed_at={observed_at.isoformat()}",
             "phase=PRE_ORDER_TICK",
             f"period_open_price_to_beat={_fmt(market.settlement_threshold)}",
+            f"up_market_probability={_fmt(getattr(market, 'up_market_probability', None))}",
+            f"down_market_probability={_fmt(getattr(market, 'down_market_probability', None))}",
             f"market_time_remaining_seconds={_fmt(_market_time_remaining_seconds(market.slug, observed_at))}",
             f"market_time_remaining_mmss={_fmt_mmss_from_seconds(_market_time_remaining_seconds(market.slug, observed_at))}",
         ]
@@ -589,6 +655,7 @@ def append_pending_period_tick_analysis(
                 + json.dumps(
                     _build_regime_fingerprint(
                         market_slug=market.slug,
+                        market=market,
                         observed_at=observed_at,
                         features=features,
                         up_snapshot=up_snapshot,
@@ -604,10 +671,20 @@ def append_pending_period_tick_analysis(
                 [
                     f"decision_side={decision.side}",
                     f"decision_confidence={decision.confidence:.3f}",
+                    f"effective_confidence={_effective_confidence(decision, market=market, features=features):.3f}",
                     f"decision_max_price_to_pay={decision.max_price_to_pay:.3f}",
                     f"decision_reason={decision.reason}",
                 ]
             )
+            prompt_text = getattr(decision, "prompt_text", None)
+            if prompt_text:
+                lines.extend(
+                    [
+                        "llm_prompt_start",
+                        prompt_text,
+                        "llm_prompt_end",
+                    ]
+                )
 
         if skip_reason:
             lines.append(f"skip_reason={skip_reason}")
@@ -632,13 +709,20 @@ def promote_pending_period_log_to_completed(
         completed_file.write(content)
 
 
-def finalize_pending_period_log(market_slug: str) -> None:
+def finalize_pending_period_log(market_slug: str, final_btc_price: Optional[float] = None) -> None:
     if not market_slug:
         return
     pending_path = _pending_period_log_path(market_slug)
-    completed_path = _completed_period_log_path(market_slug)
     if not os.path.exists(pending_path):
         return
+    completed_path = _completed_period_log_path(market_slug)
+    if final_btc_price is not None:
+        target_btc_price = _extract_period_open_price_to_beat_from_log(pending_path)
+        if target_btc_price not in (None, 0):
+            completed_path = _completed_period_final_log_path(
+                market_slug,
+                _classify_period_direction(final_btc_price, target_btc_price),
+            )
     if os.path.exists(completed_path):
         try:
             os.remove(pending_path)
@@ -755,9 +839,11 @@ def append_completed_order_tick(
         if down_snapshot is not None:
             log_file.write("\n".join(_snapshot_summary("active_down", down_snapshot) + [""]))
     if phase == "COMPLETED":
+        period_direction = _classify_period_direction(current_btc_price, order.target_btc_price)
         final_path = _completed_order_final_log_path(
             order.market_slug,
             outcome_label,
+            period_direction,
             getattr(order, "trade_number_in_period", None),
         )
         try:
@@ -1118,6 +1204,8 @@ def print_market_context(market, debug: bool) -> None:
     print("Market:")
     print(f"  slug                  = {market.slug}")
     print(f"  period_open_price_to_beat = {_fmt(market.settlement_threshold)}")
+    print(f"  up_market_probability = {_fmt(getattr(market, 'up_market_probability', None))}")
+    print(f"  down_market_probability = {_fmt(getattr(market, 'down_market_probability', None))}")
     if not debug:
         return
 
@@ -1142,12 +1230,16 @@ def both_sides_untradable_reason(up_snapshot: TokenQuoteSnapshot, down_snapshot:
     )
 
 
-def print_llm_decision(decision, debug: bool) -> None:
+def print_llm_decision(decision, market, features, debug: bool) -> None:
     print("LLM decision:")
     print(f"  side              = {decision.side}")
     print(f"  confidence        = {decision.confidence:.3f}")
+    print(f"  effective_conf    = {_effective_confidence(decision, market=market, features=features):.3f}")
     print(f"  max_price_to_pay  = {decision.max_price_to_pay:.3f}")
     print(f"  reason            = {decision.reason}")
+    if debug and getattr(decision, "prompt_text", None):
+        print("LLM prompt:")
+        print(decision.prompt_text)
 
 
 def print_trade_execution_result(result, debug: bool) -> None:
@@ -1192,12 +1284,15 @@ def run_once() -> None:
     market = resolve_price_to_beat_with_retries(market)
     if period_changed:
         final_resolution_btc_price = None
+        try:
+            if has_valid_price_to_beat(market.settlement_threshold):
+                final_resolution_btc_price = float(market.settlement_threshold)
+            elif previous_market_slug:
+                final_resolution_btc_price = fetch_btc_resolution_price_for_slug(previous_market_slug)
+        except Exception:
+            final_resolution_btc_price = None
         if previous_orders:
             try:
-                if has_valid_price_to_beat(market.settlement_threshold):
-                    final_resolution_btc_price = float(market.settlement_threshold)
-                elif previous_market_slug:
-                    final_resolution_btc_price = fetch_btc_resolution_price_for_slug(previous_market_slug)
                 _SESSION_LOSS_TRADES += finalize_completed_orders(
                     previous_orders,
                     final_resolution_btc_price if final_resolution_btc_price is not None else fetch_btc_spot_price(),
@@ -1205,7 +1300,7 @@ def run_once() -> None:
             except Exception:
                 pass
         if previous_market_slug:
-            finalize_pending_period_log(previous_market_slug)
+            finalize_pending_period_log(previous_market_slug, final_resolution_btc_price)
         print(f"New 5-minute market period detected: {market.slug}")
         clear_price_to_beat_debug_files()
         _DEBUG_WRITTEN_SLUGS.clear()
@@ -1378,7 +1473,7 @@ def run_once() -> None:
         decision=decision,
         observed_at=features.as_of,
     )
-    print_llm_decision(decision, debug=cfg.debug)
+    print_llm_decision(decision, market=market, features=features, debug=cfg.debug)
 
     decision_snapshot = None
     if decision.side == "UP":

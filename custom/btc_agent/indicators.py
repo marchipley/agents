@@ -626,16 +626,18 @@ def _count_consecutive_directional_ticks(prices: List[float], epsilon: float = 1
 def _build_last_ticks_direction(prices: List[float], max_ticks: int = 10, epsilon: float = 1e-9) -> str:
     if len(prices) < 2:
         return ""
+    latest_price = prices[-1]
+    noise_threshold = max(abs(latest_price) * 0.000005, 0.5) if latest_price else 0.5
     deltas = [prices[idx] - prices[idx - 1] for idx in range(1, len(prices))]
     chars = []
-    for delta in deltas[-max_ticks:]:
-        if abs(delta) <= epsilon:
-            chars.append("F")
-        elif delta > 0:
+    for delta in deltas:
+        if abs(delta) <= max(epsilon, noise_threshold):
+            continue
+        if delta > 0:
             chars.append("U")
         else:
             chars.append("D")
-    return "".join(chars)
+    return "".join(chars[-max_ticks:])
 
 
 def _get_market_window_reference_sample(

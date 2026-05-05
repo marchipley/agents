@@ -141,6 +141,7 @@ What the BTC agent does today:
 - Supports a dedicated `LLM_CONNECTION_DEBUG=true` mode that runs only a one-shot LLM connectivity test, prints the active connection settings, runs a direct Google connectivity probe after LLM connection failures, and exits without touching balances, market lookup, or trading execution.
 - Uses the configured AI engine with JSON output to decide `UP`, `DOWN`, or `NO_TRADE`.
 - Prints the current market `price_to_beat` in the BTC-agent output and includes that same period baseline in the LLM decision prompt, now preferring Vatic's BTC 5-minute timestamp target API and only falling back to Polymarket page / `_next/data` parsing when that external target lookup is unavailable.
+- Pulls Gamma `outcomePrices` from the active market payload and maps them to `up_market_probability` / `down_market_probability`, so the decision layer can see the market-implied odds directly instead of inferring everything from raw momentum and CLOB quotes.
 - Retries LLM API calls across configurable attempts using a single per-attempt timeout, logs each attempt result to stdout, and converts repeated failures into a `NO_TRADE` so the loop can move on to the next tick.
 - Computes a reference price from quote, midpoint, last trade, and order book data.
 - Reuses a single decision-time token quote snapshot for both the printed `UP/DOWN (with decision)` block and the paper execution gate so those logs cannot diverge within one loop tick.
@@ -149,17 +150,30 @@ What the BTC agent does today:
 - Skips LLM decision calls entirely when both the current `UP` and `DOWN` quote snapshots are already not safe to submit, preserving AI API calls when neither side is actionable.
 - Provides the LLM with time remaining, window delta, and current `UP` / `DOWN` ask prices so the model can apply EV- and timing-based rules for late-window decisions.
 - Provides the LLM with the Phase 2 trend-strength and normalization fields as well, including `RSI(9)`, `RSI speed divergence`, `EMA` alignment/cross direction, `ADX(14)`, `ATR(14)`, and the volatility-normalized / required-velocity context derived from the current target gap.
+- To reduce transport timeouts, the live decision path now uses a trimmed minimal LLM payload for both OpenAI Realtime and Gemini instead of the older verbose prompt, while preserving the active Phase 2.x guardrails.
 - The LLM prompt now also includes `momentum_acceleration`, `last_10_ticks_direction`, and follows stricter ADX guidance:
   - if `ADX(14) > 35`, do not trade against the trend
   - if `ADX(14) > 45`, treat the move as potentially exhausted and avoid late trend-chasing
 - The LLM prompt now treats `time_remaining_seconds` as the authoritative clock:
   - final 10 seconds means `time_remaining_seconds < 15`
   - `time_remaining_seconds > 240` is treated as an early-window Discovery Phase where high-confidence trades should be rare unless trend intensity is extreme
-  - `Window Delta` is explicitly defined as the change from the market window open price and must not be confused with `oracle_gap_ratio`
-  - when upstream `end_ts` is stale, the prompt now falls back to the canonical slug-aligned 5-minute boundary so the model sees the same effective clock as execution
-- The LLM prompt now treats `window_delta_pct` as the source of truth for overall trend direction and uses `velocity_30s` only as a micro-momentum entry-timing signal, which is intended to prevent early-window reversal hallucinations.
-- The LLM prompt also includes a stronger quote-sanity rule: if the chosen side is priced below `0.15` and `time_remaining_seconds >= 15`, the model should prefer `NO_TRADE`; only in the final 15 seconds should it consider fading that consensus on a clear reversal.
-- The LLM prompt includes a sign-consistency rule: if `window_delta_pct` is positive and the model chooses `DOWN`, or negative and it chooses `UP`, confidence should stay below `0.50` unless trend exhaustion is genuinely clear.
+  - `Window Delta` is explicitly defined as the change from the market window open price and must not be confused with `DISTANCE_FROM_STRIKE_*`, `MARKET_WIN_CHANCE_*`, or `oracle_gap_ratio`
+  - when upstream `start_ts` / `end_ts` are stale, the prompt now prefers the canonical slug timestamp plus 300 seconds so the model sees the same effective clock as execution
+- The LLM prompt now treats `DISTANCE_FROM_STRIKE_PCT` as the source of truth for whether `UP` or `DOWN` is currently winning relative to the price to beat, while `window_delta_pct` is treated only as recent drift from the market-window open.
+- The live decision prompts now omit `window_delta_pct` entirely from the active minimal decision payload and instead emphasize:
+  - `DISTANCE_FROM_STRIKE_USD`
+  - `DISTANCE_FROM_STRIKE_PCT`
+  - `MARKET_WIN_CHANCE_UP`
+  - `MARKET_WIN_CHANCE_DOWN`
+- The prompt explicitly tells the model not to confuse strike-distance fields with market-win-chance fields, which closes the Phase 2.82 “logic loop hallucination” where the model treated probability and price-distance as the same signal.
+- The LLM prompt now also passes a drift-adjusted effective BTC price, derived from the implied Polymarket oracle price when available, and tells the model to use that effective price instead of the raw feed price when reasoning about strike distance.
+- The LLM prompt uses `velocity_30s` only as a micro-momentum entry-timing signal, which is intended to prevent baseline-confusion reversals where the model mistakes a short dip for being below the strike.
+- The LLM prompt now uses a regime-aware market-win-chance sanity rule instead of the older flat quote veto:
+  - if the chosen side `MARKET_WIN_CHANCE` is below `0.10` and `time_remaining_seconds > 180`, prefer `NO_TRADE`
+  - if the chosen side `MARKET_WIN_CHANCE` is below `0.15` and `15 <= time_remaining_seconds < 120`, prefer `NO_TRADE`
+  - under the final 15 seconds, only fade that consensus on a clear reversal
+- The LLM prompt includes a sign-consistency rule: if `DISTANCE_FROM_STRIKE_PCT` is positive and the model chooses `DOWN`, or negative and it chooses `UP`, confidence should stay below `0.50` unless trend exhaustion is genuinely clear.
+- The LLM prompt now also includes an RSI directional sanity rule: if `RSI(9) < 30`, it should not choose `DOWN`; if `RSI(9) > 70`, it should not choose `UP`.
 - The Phase 2.7 prompt layer now also instructs the model to prefer `NO_TRADE` when:
   - the market is too close to call, meaning `abs(gap_to_target_usd) < 0.2 * volatility_5m` with more than 60 seconds remaining
   - it wants `UP` while the `UP` quote is below `0.45`
@@ -172,18 +186,45 @@ What the BTC agent does today:
 - If `decision.confidence` is at or above `BTC_AGENT_MAX_SIZE_HIGH_CONFIDENCE_THRESHOLD`, the agent ignores the normal price-budget cap and uses `BTC_AGENT_MAX_SIZE_HIGH_CONFIDENCE_SHARES` instead.
 - Before live BUY submission, the agent quantizes share size to a Polymarket-compatible precision so the quote-side amount stays within the exchange’s 2-decimal maker-amount constraint while still respecting the 4-decimal taker-size limit.
 - Rejects live submissions cleanly when the configured budget cannot satisfy the venue minimum order size instead of silently scaling above the configured budget.
-- Applies a hard execution-side quote-floor veto before submission: if the chosen side quote is below `0.15` and there are 15 seconds or more remaining, the trade is rejected even if the LLM asks for it.
+- Applies a regime-aware execution-side market-win-chance veto before submission, using Gamma probability first and falling back to CLOB quote only if Gamma is unavailable:
+  - if the chosen side `MARKET_WIN_CHANCE < 0.10` and there are more than 180 seconds remaining, the trade is rejected as a discovery-phase low-probability reversal attempt
+  - if the chosen side `MARKET_WIN_CHANCE < 0.15` and `15 <= time_remaining_seconds < 120`, the trade is rejected as a low-probability reversal attempt
+- Applies a velocity/volatility sanity veto before submission: if `required_velocity_to_win > volatility_5m / 10`, the trade is rejected as a mathematically implausible late-window move.
+- Applies a Gamma/CLOB consensus-gap veto before submission: if `abs(effective_confidence - market_implied_probability) > 0.50`, the trade is rejected as a hallucinated edge against market consensus.
+- Applies a regime-aware minimum-confidence veto before submission:
+  - base floor remains `CONFIDENCE` / `BTC_AGENT_MIN_CONFIDENCE`
+  - in strong-trend regimes with `ADX(14) > 35`, the operational floor is relaxed to `0.62`
+  - in the final 60 seconds, the operational floor is tightened to `0.75`
+- The execution layer now computes an `effective_confidence` before gating:
+  - if the chosen side is already winning against the strike by more than `0.02%`
+  - and Gamma market consensus on that same side is above `60%`
+  - the confidence is boosted by `+0.10` before floor / edge / consensus-gap checks
+- Execution timing now also prefers the canonical slug timestamp plus 300 seconds over stale upstream `start_ts` / `end_ts`, so late-window vetoes and FOK logic use the same boundary the logs print in `mm:ss`.
 - Applies a Phase 2.7 victory-margin veto before submission: if there are more than 60 seconds remaining and the BTC gap to target is smaller than `0.2 * volatility_5m`, the trade is rejected as too close to call.
 - Applies a Phase 2.7 quote-price divergence veto for `UP`: if the bot wants `UP` but the `UP` quote is below `0.45`, the trade is rejected because the market is not confirming the breakout.
 - Applies a Phase 2.7 RSI ceiling veto for `UP`: if `RSI(9) > 85` while BTC is already above the strike, the trade is rejected as an exhaustion-risk breakout chase.
+- Applies RSI directional vetoes before submission:
+  - if `RSI(9) < 30`, `DOWN` is rejected as bottom-chasing
+  - if `RSI(9) > 70`, `UP` is rejected as top-chasing
 - Tracks in-memory active orders for the current 5-minute market window and prints each order’s target BTC level plus whether the position is currently winning, losing, or tied.
 - Writes a per-slug order-tracking file under `completed_orders/` for each executed order, appending one status snapshot per tick plus the pre-order tick history that led into the trade.
-- Preserves every analyzed 5-minute window under `completed_orders/completed_period_<slug_timestamp>.txt`, even when no trade executes; executed-order files receive a copy of the pre-order period analysis, while the standalone period log is still finalized and retained on slug rollover.
+- Finalized executed-order filenames now encode both trade outcome and actual period result direction:
+  - `completed_order_win_up_<slug_timestamp>.txt`
+  - `completed_order_loss_down_<slug_timestamp>.txt`
+  - and `...-<trade_num>.txt` suffixes still apply when multi-trade-per-period mode is enabled
+- Preserves every analyzed 5-minute window under `completed_orders/completed_period_<slug_timestamp>.txt` while the period is still unresolved, and finalizes resolved no-trade period files as:
+  - `completed_period_up_<slug_timestamp>.txt`
+  - `completed_period_down_<slug_timestamp>.txt`
+  when a final BTC resolution price is available on rollover.
 - Completed-order and completed-period loop entries now include both raw remaining seconds and a `mm:ss` market-time-remaining field for easier late-window analysis.
 - Completed-order and completed-period logs now also carry Phase 2.7 price-lag diagnostics in the regime fingerprint:
   - `implied_oracle_price`
   - `feed_drift_usd`
   - `last_10_ticks_direction`
+- Completed-period logs now also preserve `up_market_probability` and `down_market_probability` from the active Gamma market so post-trade analysis can compare the model’s confidence with the market’s implied odds.
+- Pre-order decision logging now also records `effective_confidence`, which is the regime-adjusted operational confidence after the winning-advantage boost and the dynamic minimum-confidence floor are applied.
+- `last_10_ticks_direction` is now a filtered string of meaningful recent `U` / `D` moves only; flat ticks and sub-threshold micro-jitter are omitted so it better reflects genuine short-term direction instead of noisy tape artifacts.
+- On period rollover, the pending period log now uses the next market’s resolved `price_to_beat` even when no trade was executed in the previous period, so no-trade period files also finalize to an `_up_` or `_down_` filename much more consistently.
 - On graceful exit (`q` or `KeyboardInterrupt`), the current slug’s `pending_period_<timestamp>.txt` is finalized into `completed_period_<timestamp>.txt` so pending analysis files are not stranded.
 - Evaluates paper-order win/loss status against the market-period settlement reference, preferring Polymarket’s parsed threshold and otherwise falling back to the closest retained BTC sample at the start of the 5-minute period rather than the trade-entry BTC price.
 - Enforces `BTC_AGENT_MAX_TRADES_PER_PERIOD` per 5-minute market slug; once that limit is reached, subsequent loop ticks skip quote snapshots and LLM trade decisions until the next market window begins.
@@ -281,6 +322,9 @@ Data required:
 - `time_remaining_seconds`
 - `threshold_gap_usd`
 - `threshold_gap_pct`
+- `strike_delta_pct`
+- `up_market_probability`
+- `down_market_probability`
 - `best_bid`
 - `best_ask`
 - `best_bid_size`
@@ -311,7 +355,7 @@ Goal:
 
 Current status:
 
-- In progress, with the first Phase 2 indicator pass implemented, a Phase 2.5 refinement layer added after reviewing the first Phase 2 losses, and a Phase 2.6 cleanup pass applied after validating the first enriched win/loss files.
+- In progress, with the first Phase 2 indicator pass implemented, a Phase 2.5 refinement layer added after reviewing the first Phase 2 losses, a Phase 2.6 cleanup pass applied after validating the first enriched win/loss files, and a Phase 2.82 prompt/gating calibration pass added after identifying a low order-rate “logic loop hallucination.”
 - The BTC feature set now includes:
   - `RSI(9)` alongside `RSI(14)`
   - `EMA(9)` and `EMA(21)`
@@ -331,8 +375,14 @@ Current status:
   - `momentum_acceleration`
   - `trend_intensity` / `ADX(14)`
   - `oracle_gap_ratio`
+  - `DISTANCE_FROM_STRIKE_PCT`
   - authoritative `time_remaining_seconds` / Discovery Phase guidance
-  - quote-sanity handling for sub-`0.10` consensus-priced sides
+  - explicit `MARKET_WIN_CHANCE_*` vs `DISTANCE_FROM_STRIKE_*` field separation
+  - regime-aware market-win-chance gating for discovery / mid-window periods
+- Phase 2.82 also changed the operational gating logic:
+  - `effective_confidence` now includes a winning-advantage boost when the chosen side is already in the money and the Gamma market agrees
+  - the confidence floor is now regime-aware instead of always flat
+  - the old static quote veto was replaced with a Gamma-first market-win-chance veto tuned for higher order rate earlier in the window
 
 Implemented additions:
 

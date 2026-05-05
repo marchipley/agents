@@ -34,6 +34,8 @@ class BtcUpDownMarket:
     end_ts: int
     settlement_threshold: Optional[float]
     volume: Optional[float] = None
+    up_market_probability: Optional[float] = None
+    down_market_probability: Optional[float] = None
 
 def _current_btc_5m_slug() -> str:
     """
@@ -109,6 +111,47 @@ def _coerce_timestamp(value) -> int:
         return int(datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp())
     except ValueError:
         return 0
+
+
+def _parse_outcome_probabilities(market: dict) -> tuple[Optional[float], Optional[float]]:
+    outcomes = market.get("outcomes")
+    outcome_prices = market.get("outcomePrices") or market.get("outcome_prices")
+
+    try:
+        if isinstance(outcomes, str):
+            outcomes = json.loads(outcomes)
+    except Exception:
+        outcomes = None
+
+    try:
+        if isinstance(outcome_prices, str):
+            outcome_prices = json.loads(outcome_prices)
+    except Exception:
+        outcome_prices = None
+
+    if not isinstance(outcomes, list) or not isinstance(outcome_prices, list):
+        return None, None
+    if len(outcomes) < 2 or len(outcome_prices) < 2:
+        return None, None
+
+    up_probability = None
+    down_probability = None
+    for outcome, price in zip(outcomes, outcome_prices):
+        label = str(outcome or "").strip().lower()
+        parsed_price = _coerce_threshold(price)
+        if parsed_price is None:
+            continue
+        if "up" in label or label == "yes":
+            up_probability = parsed_price
+        elif "down" in label or label == "no":
+            down_probability = parsed_price
+
+    if up_probability is None and len(outcome_prices) >= 1:
+        up_probability = _coerce_threshold(outcome_prices[0])
+    if down_probability is None and len(outcome_prices) >= 2:
+        down_probability = _coerce_threshold(outcome_prices[1])
+
+    return up_probability, down_probability
 
 
 def _parse_threshold_from_text(*values: Optional[str]) -> Optional[float]:
@@ -1035,6 +1078,7 @@ def _extract_market_from_event(event: dict, slug: str) -> Optional[BtcUpDownMark
     question = str(m.get("question") or "")
     settlement_threshold = _extract_settlement_threshold(event, m, title, question, slug=slug)
     volume = _coerce_threshold(m.get("volume"))
+    up_market_probability, down_market_probability = _parse_outcome_probabilities(m)
 
     return BtcUpDownMarket(
         event_id=str(event.get("id")),
@@ -1048,6 +1092,8 @@ def _extract_market_from_event(event: dict, slug: str) -> Optional[BtcUpDownMark
         end_ts=end_ts,
         settlement_threshold=settlement_threshold,
         volume=volume,
+        up_market_probability=up_market_probability,
+        down_market_probability=down_market_probability,
     )
 
 

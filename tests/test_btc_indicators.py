@@ -353,6 +353,33 @@ class TestBtcIndicators(unittest.TestCase):
 
         self.assertGreaterEqual(features.consecutive_directional_ticks, 4)
 
+    def test_build_btc_features_last_10_ticks_direction_omits_flat_and_tiny_noise(self):
+        seeded_samples = [
+            (datetime.fromtimestamp(1_776_968_675, tz=timezone.utc), 80300.0),
+            (datetime.fromtimestamp(1_776_968_680, tz=timezone.utc), 80300.1),
+            (datetime.fromtimestamp(1_776_968_685, tz=timezone.utc), 80301.5),
+            (datetime.fromtimestamp(1_776_968_690, tz=timezone.utc), 80301.5),
+            (datetime.fromtimestamp(1_776_968_695, tz=timezone.utc), 80300.9),
+            (datetime.fromtimestamp(1_776_968_700, tz=timezone.utc), 80303.0),
+            (datetime.fromtimestamp(1_776_968_705, tz=timezone.utc), 80303.2),
+            (datetime.fromtimestamp(1_776_968_708, tz=timezone.utc), 80305.5),
+        ]
+        for sample_time, sample_price in seeded_samples:
+            indicators._record_price_sample(sample_price, as_of=sample_time)
+
+        with patch(
+            "custom.btc_agent.indicators.fetch_btc_spot_price",
+            side_effect=self._recorded_price_return(80306.2),
+        ), patch(
+            "custom.btc_agent.indicators.datetime",
+        ) as mock_datetime:
+            mock_datetime.now.return_value = datetime.fromtimestamp(1_776_968_720, tz=timezone.utc)
+            mock_datetime.fromtimestamp.side_effect = datetime.fromtimestamp
+            mock_datetime.timezone = timezone
+            features = indicators.build_btc_features(window_start_ts=1_776_968_700)
+
+        self.assertEqual(features.last_10_ticks_direction, "UDUUU")
+
     def test_build_btc_features_populates_phase2_indicator_fields(self):
         base_ts = 1_776_968_300
         for idx in range(24):
