@@ -212,10 +212,12 @@ What the BTC agent does today:
   - `completed_order_win_up_<slug_timestamp>.txt`
   - `completed_order_loss_down_<slug_timestamp>.txt`
   - and `...-<trade_num>.txt` suffixes still apply when multi-trade-per-period mode is enabled
+- While an executed order is still unresolved, its working log file remains `completed_order_<slug_timestamp>.txt` and is only renamed to the finalized `completed_order_<win/loss>_<up/down>_<slug_timestamp>.txt` form once the period result is known.
 - Preserves every analyzed 5-minute window under `completed_orders/completed_period_<slug_timestamp>.txt` while the period is still unresolved, and finalizes resolved no-trade period files as:
   - `completed_period_up_<slug_timestamp>.txt`
   - `completed_period_down_<slug_timestamp>.txt`
   when a final BTC resolution price is available on rollover.
+- While a period is still live, the working analysis file is `pending_period_<slug_timestamp>.txt`; that file is finalized on rollover or graceful exit so period analysis is not stranded.
 - Completed-order and completed-period loop entries now include both raw remaining seconds and a `mm:ss` market-time-remaining field for easier late-window analysis.
 - Completed-order and completed-period logs now also carry Phase 2.7 price-lag diagnostics in the regime fingerprint:
   - `implied_oracle_price`
@@ -230,6 +232,7 @@ What the BTC agent does today:
 - Enforces `BTC_AGENT_MAX_TRADES_PER_PERIOD` per 5-minute market slug; once that limit is reached, subsequent loop ticks skip quote snapshots and LLM trade decisions until the next market window begins.
 - Enforces `MAX_AUTOMATED_LOSS_TRADES` across the full process session as a completed-loss stop; once that many trades have actually settled as losses, the agent exits.
 - When `BTC_AGENT_DEBUG=false`, suppresses most verbose diagnostics and only prints a compact subset of geolocation, balances, quote snapshots, BTC features, LLM decision fields, and final paper execution fields.
+- When `BTC_AGENT_DEBUG=true`, the agent also prints the exact LLM prompt text to terminal output and writes that same prompt into the pending-period / completed-order logs for post-trade review.
 - In non-debug mode, account balances print only on the first loop iteration and again at the start of each new 5-minute market period.
 - Stops the process before live order submission when the account does not have enough `cash_balance_pusd` to cover the configured live trade size at the recommended limit price plus the estimated fee buffer.
 - Stops the process when `cash_balance_pusd` falls below `MINIMUM_WALLET_BALANCE`, so no further execution occurs once the configured wallet floor is breached.
