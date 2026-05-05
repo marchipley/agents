@@ -3,6 +3,8 @@ import types
 import unittest
 import os
 import glob
+import io
+from datetime import datetime, timezone
 from contextlib import ExitStack
 from unittest.mock import patch
 from types import SimpleNamespace
@@ -17,16 +19,20 @@ sys.modules.setdefault(
 
 from custom.btc_agent.main import (
     _SESSION_LOSS_TRADES,
+    _build_regime_fingerprint,
     append_completed_order_tick,
     append_failed_order_attempt,
     append_pending_period_tick_analysis,
     clear_price_to_beat_debug_files,
-    delete_pending_period_log,
+    finalize_current_period_logs_on_exit,
+    finalize_pending_period_log,
     enforce_session_loss_trade_limit,
     has_valid_price_to_beat,
     promote_pending_period_log_to_completed,
     run_once,
     main,
+    print_features,
+    print_llm_decision,
     resolve_price_to_beat_with_retries,
     wait_for_next_tick_or_quit,
     write_price_to_beat_debug_file,
@@ -118,6 +124,65 @@ class TestBtcMain(unittest.TestCase):
     def test_has_valid_price_to_beat_accepts_realistic_btc_values(self):
         self.assertTrue(has_valid_price_to_beat(78218.01972274295))
 
+    def test_print_features_outputs_primary_btc_price(self):
+        features = SimpleNamespace(
+            price_usd=80382.04,
+            delta_from_previous_tick=5.0,
+            momentum_1m=7.0,
+            momentum_5m=10.0,
+            velocity_15s=4.0,
+            velocity_30s=6.0,
+            momentum_acceleration=-2.0,
+            volatility_5m=22.0,
+            consecutive_flat_ticks=0,
+            consecutive_directional_ticks=3,
+            rsi_9=61.0,
+            rsi_14=55.0,
+            rsi_speed_divergence=6.0,
+            ema_9=74980.0,
+            ema_21=74960.0,
+            ema_alignment=True,
+            ema_cross_direction="bullish",
+            adx_14=31.0,
+            atr_14=12.0,
+            last_10_ticks_direction="UUUDUUUUUU",
+        )
+
+        stdout = io.StringIO()
+        with patch("sys.stdout", stdout):
+            print_features(features, debug=False)
+
+        content = stdout.getvalue()
+        self.assertIn("btc_price             = 80382.04", content)
+        self.assertNotIn("btc_price_poly", content)
+
+    def test_print_llm_decision_outputs_prompt_in_debug_mode(self):
+        decision = SimpleNamespace(
+            side="UP",
+            confidence=0.8,
+            max_price_to_pay=1.0,
+            reason="test",
+            prompt_text="SYSTEM PROMPT:\nfoo\n\nUSER PROMPT:\nbar",
+        )
+        market = SimpleNamespace(
+            settlement_threshold=100.0,
+            up_market_probability=0.65,
+            down_market_probability=0.35,
+        )
+        features = SimpleNamespace(
+            price_usd=100.5,
+            adx_14=40.0,
+        )
+
+        stdout = io.StringIO()
+        with patch("sys.stdout", stdout):
+            print_llm_decision(decision, market=market, features=features, debug=True)
+
+        content = stdout.getvalue()
+        self.assertIn("LLM prompt:", content)
+        self.assertIn("SYSTEM PROMPT:", content)
+        self.assertIn("USER PROMPT:", content)
+
     def test_append_completed_order_tick_writes_completed_order_file(self):
         order = ActivePaperOrder(
             market_slug="btc-updown-5m-1777513800",
@@ -147,7 +212,69 @@ class TestBtcMain(unittest.TestCase):
         self.assertIn("position_state=WINNING", content)
         self.assertIn("btc_move_from_entry=10.00", content)
         self.assertIn("btc_gap_to_target=6.99", content)
+        self.assertIn("market_time_remaining_mmss=", content)
         self.assertIn("outcome_label=win", content)
+
+    def test_append_pending_period_tick_analysis_writes_llm_prompt_when_present(self):
+        market = SimpleNamespace(
+            slug="btc-updown-5m-1777513999",
+            title="Bitcoin Up or Down",
+            settlement_threshold=77763.01,
+            up_market_probability=0.51,
+            down_market_probability=0.49,
+        )
+        decision = SimpleNamespace(
+            side="UP",
+            confidence=0.8,
+            max_price_to_pay=1.0,
+            reason="test",
+            prompt_text="SYSTEM PROMPT:\nfoo\n\nUSER PROMPT:\nbar",
+        )
+
+        with patch("custom.btc_agent.main.os.getcwd", return_value="/appl/agents"):
+            append_pending_period_tick_analysis(
+                market,
+                decision=decision,
+                observed_at=datetime.now(timezone.utc),
+            )
+
+        with open(
+            "/appl/agents/completed_orders/pending_period_1777513999.txt",
+            encoding="utf-8",
+        ) as pending_file:
+            content = pending_file.read()
+
+        self.assertIn("llm_prompt_start", content)
+        self.assertIn("SYSTEM PROMPT:", content)
+        self.assertIn("USER PROMPT:", content)
+        self.assertIn("llm_prompt_end", content)
+
+    def test_regime_fingerprint_uses_price_to_beat_to_avoid_false_weak_down_label(self):
+        features = SimpleNamespace(
+            price_usd=78134.0,
+            delta_pct_from_window_open=-0.000155,
+            momentum_5m=-2.0,
+            volatility_5m=9.0,
+            rsi_9=82.0,
+            rsi_14=76.0,
+            atr_14=20.0,
+            adx_14=38.0,
+            rsi_speed_divergence=6.0,
+            velocity_15s=4.0,
+            velocity_30s=7.0,
+            consecutive_flat_ticks=0,
+            consecutive_directional_ticks=4,
+        )
+        observed_at = datetime.fromtimestamp(1777859410, tz=timezone.utc)
+
+        fingerprint = _build_regime_fingerprint(
+            market_slug="btc-updown-5m-1777859400",
+            observed_at=observed_at,
+            features=features,
+            period_open_price_to_beat=78000.0,
+        )
+
+        self.assertIn(fingerprint["trend_regime"], {"weak_up", "strong_up"})
 
     def test_append_completed_order_tick_active_includes_feature_and_quote_data(self):
         order = ActivePaperOrder(
@@ -218,6 +345,7 @@ class TestBtcMain(unittest.TestCase):
 
         self.assertIn("phase=ACTIVE", content)
         self.assertIn("feature_btc_price=77959.600", content)
+        self.assertIn("market_time_remaining_mmss=", content)
         self.assertIn("feature_momentum_1m=-12.5", content)
         self.assertIn("feature_momentum_5m=-6.079999999987194", content)
         self.assertIn("feature_velocity_15s=-3.2", content)
@@ -226,6 +354,7 @@ class TestBtcMain(unittest.TestCase):
         self.assertIn("feature_volatility_5m=7.832826962356144", content)
         self.assertIn("feature_consecutive_flat_ticks=2", content)
         self.assertIn("feature_consecutive_directional_ticks=4", content)
+        self.assertIn("feature_last_10_ticks_direction=", content)
         self.assertIn("active_up_buy_quote=0.250", content)
         self.assertIn("active_down_buy_quote=0.700", content)
         self.assertIn("\"liquidity_regime\"", content)
@@ -337,11 +466,15 @@ class TestBtcMain(unittest.TestCase):
         self.assertIn("decision_side=UP", content)
         self.assertIn("velocity_15s=3.0", content)
         self.assertIn("consecutive_flat_ticks=0", content)
+        self.assertIn("last_10_ticks_direction=", content)
+        self.assertIn("market_time_remaining_mmss=", content)
         self.assertIn("\"next_slug_proximity\"", content)
         self.assertIn("\"required_velocity_to_win\"", content)
         self.assertIn("\"oracle_gap_ratio\"", content)
+        self.assertIn("\"implied_oracle_price\"", content)
+        self.assertIn("\"feed_drift_usd\"", content)
 
-    def test_promote_pending_period_log_to_completed_renames_file(self):
+    def test_promote_pending_period_log_to_completed_copies_and_preserves_file(self):
         with open(
             "/appl/agents/completed_orders/pending_period_1999999998.txt",
             "w",
@@ -363,68 +496,13 @@ class TestBtcMain(unittest.TestCase):
             content = completed_file.read()
 
         self.assertEqual(content, "pre-order analysis\n")
-
-    def test_append_failed_order_attempt_writes_attempt_log(self):
-        market = SimpleNamespace(
-            slug="btc-updown-5m-1999999998",
-            title="Bitcoin Up or Down",
-            settlement_threshold=77763.01,
-        )
-        decision = SimpleNamespace(
-            side="DOWN",
-            confidence=0.91,
-            max_price_to_pay=0.88,
-            reason="budget test",
-        )
-        result = SimpleNamespace(
-            price=0.71,
-            size=2.8169,
-            token_id="down-token",
-            reason="Order budget cannot satisfy live minimum order size",
-        )
-        features = SimpleNamespace(
-            price_usd=77750.0,
-            delta_from_previous_tick=-3.0,
-            momentum_1m=-7.0,
-            momentum_5m=-12.0,
-            velocity_15s=-3.0,
-            velocity_30s=-2.0,
-            momentum_acceleration=-1.0,
-            volatility_5m=18.0,
-            consecutive_flat_ticks=0,
-            consecutive_directional_ticks=5,
-            rsi_9=22.0,
-            rsi_14=29.0,
-            rsi_speed_divergence=-7.0,
-            ema_9=77745.0,
-            ema_21=77760.0,
-            ema_alignment="bearish",
-            ema_cross_direction="down",
-            adx_14=31.0,
-            atr_14=15.0,
-        )
-
-        with patch("custom.btc_agent.main.os.getcwd", return_value="/appl/agents"):
-            append_failed_order_attempt(
-                market,
-                decision,
-                result,
-                features=features,
-            )
-
         with open(
-            "/appl/agents/completed_orders/completed_order_attempt_1999999998.txt",
+            "/appl/agents/completed_orders/pending_period_1999999998.txt",
             encoding="utf-8",
-        ) as order_file:
-            content = order_file.read()
+        ) as pending_file:
+            self.assertEqual(pending_file.read(), "pre-order analysis\n")
 
-        self.assertIn("phase=ATTEMPT_FAILED", content)
-        self.assertIn("attempt_side=DOWN", content)
-        self.assertIn("attempted_price=0.710", content)
-        self.assertIn("attempted_size=2.817", content)
-        self.assertIn("attempt_reason=Order budget cannot satisfy live minimum order size", content)
-
-    def test_delete_pending_period_log_removes_unexecuted_period_analysis(self):
+    def test_finalize_pending_period_log_renames_unexecuted_period_analysis(self):
         with open(
             "/appl/agents/completed_orders/pending_period_1999999997.txt",
             "w",
@@ -433,11 +511,53 @@ class TestBtcMain(unittest.TestCase):
             pending_file.write("pre-order analysis\n")
 
         with patch("custom.btc_agent.main.os.getcwd", return_value="/appl/agents"):
-            delete_pending_period_log("btc-updown-5m-1999999997")
+            finalize_pending_period_log("btc-updown-5m-1999999997")
 
-        self.assertFalse(
-            os.path.exists("/appl/agents/completed_orders/pending_period_1999999997.txt")
-        )
+        self.assertFalse(os.path.exists("/appl/agents/completed_orders/pending_period_1999999997.txt"))
+        with open(
+            "/appl/agents/completed_orders/completed_period_1999999997.txt",
+            encoding="utf-8",
+        ) as completed_file:
+            self.assertEqual(completed_file.read(), "pre-order analysis\n")
+
+    def test_finalize_pending_period_log_uses_period_direction_suffix_when_final_price_known(self):
+        with open(
+            "/appl/agents/completed_orders/pending_period_1999999997.txt",
+            "w",
+            encoding="utf-8",
+        ) as pending_file:
+            pending_file.write("period_open_price_to_beat=77763.01\npre-order analysis\n")
+
+        with patch("custom.btc_agent.main.os.getcwd", return_value="/appl/agents"):
+            finalize_pending_period_log("btc-updown-5m-1999999997", final_btc_price=77780.0)
+
+        self.assertFalse(os.path.exists("/appl/agents/completed_orders/pending_period_1999999997.txt"))
+        with open(
+            "/appl/agents/completed_orders/completed_period_up_1999999997.txt",
+            encoding="utf-8",
+        ) as completed_file:
+            self.assertIn("pre-order analysis", completed_file.read())
+
+    def test_finalize_current_period_logs_on_exit_renames_active_pending_period(self):
+        with open(
+            "/appl/agents/completed_orders/pending_period_1999999999.txt",
+            "w",
+            encoding="utf-8",
+        ) as pending_file:
+            pending_file.write("pre-order analysis\n")
+
+        with patch(
+            "custom.btc_agent.main.get_state",
+            return_value=SimpleNamespace(market_slug="btc-updown-5m-1999999999"),
+        ), patch("custom.btc_agent.main.os.getcwd", return_value="/appl/agents"):
+            finalize_current_period_logs_on_exit()
+
+        self.assertFalse(os.path.exists("/appl/agents/completed_orders/pending_period_1999999999.txt"))
+        with open(
+            "/appl/agents/completed_orders/completed_period_1999999999.txt",
+            encoding="utf-8",
+        ) as completed_file:
+            self.assertEqual(completed_file.read(), "pre-order analysis\n")
 
     def test_write_price_to_beat_debug_file_writes_report(self):
         with patch(
@@ -632,6 +752,66 @@ class TestBtcMain(unittest.TestCase):
             run_once()
 
         mock_clear_debug.assert_called_once_with()
+
+    def test_run_once_finalizes_no_trade_previous_period_with_directional_price(self):
+        market = SimpleNamespace(
+            slug="btc-updown-5m-1777056300",
+            title="Bitcoin Up or Down",
+            settlement_threshold=77560.75,
+            up_token_id="up-token",
+            down_token_id="down-token",
+        )
+        previous_state = SimpleNamespace(
+            active_orders=[],
+            market_slug="btc-updown-5m-1777056000",
+            trades_executed=1,
+        )
+
+        with patch(
+            "custom.btc_agent.main.get_trading_config",
+            return_value=SimpleNamespace(
+                debug=False,
+                debug_price_to_beat=False,
+                max_trades_per_period=1,
+                minimum_wallet_balance=0.0,
+                llm_connection_debug=False,
+            ),
+        ), patch(
+            "custom.btc_agent.main.find_current_btc_updown_market",
+            return_value=market,
+        ), patch(
+            "custom.btc_agent.main.sync_period_state",
+            return_value=True,
+        ), patch(
+            "custom.btc_agent.main.get_state",
+            side_effect=[previous_state, previous_state],
+        ), patch(
+            "custom.btc_agent.main.resolve_price_to_beat_with_retries",
+            return_value=market,
+        ), patch(
+            "custom.btc_agent.main.finalize_pending_period_log",
+        ) as mock_finalize_period, patch(
+            "custom.btc_agent.main.get_account_balance_snapshot",
+            return_value=SimpleNamespace(cash_balance=100.0),
+        ), patch(
+            "custom.btc_agent.main.print_account_snapshot_from_snapshot",
+        ), patch(
+            "custom.btc_agent.main.enforce_minimum_wallet_balance",
+        ), patch(
+            "custom.btc_agent.main.get_feature_readiness",
+            return_value=(False, "not ready"),
+        ), patch(
+            "custom.btc_agent.main.clear_price_to_beat_debug_files",
+        ), patch(
+            "custom.btc_agent.main.fetch_btc_spot_price",
+            return_value=77560.75,
+        ):
+            run_once()
+
+        mock_finalize_period.assert_called_once_with(
+            "btc-updown-5m-1777056000",
+            77560.75,
+        )
 
     def test_run_once_does_not_exit_after_executed_trade_when_no_loss_is_recorded_yet(self):
         market = SimpleNamespace(

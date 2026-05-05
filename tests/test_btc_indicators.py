@@ -24,6 +24,9 @@ class TestBtcIndicators(unittest.TestCase):
 
     def test_fetch_btc_spot_price_uses_secondary_provider_after_primary_failure(self):
         with patch(
+            "custom.btc_agent.indicators._fetch_btc_price_from_poly_reference",
+            side_effect=requests.HTTPError("503 Service Unavailable"),
+        ), patch(
             "custom.btc_agent.indicators._fetch_spot_price_from_polymarket_rtds",
             side_effect=requests.HTTPError("429 Too Many Requests"),
         ), patch(
@@ -37,12 +40,32 @@ class TestBtcIndicators(unittest.TestCase):
 
         self.assertEqual(price, 75123.0)
         self.assertEqual(indicators.get_latest_cached_price(), 75123.0)
-        self.assertEqual(indicators._LAST_SUCCESSFUL_PROVIDER_INDEX, 1)
+        self.assertEqual(indicators._LAST_SUCCESSFUL_PROVIDER_INDEX, 2)
+
+    def test_fetch_btc_spot_price_prefers_poly_reference_provider(self):
+        with patch(
+            "custom.btc_agent.indicators._fetch_btc_price_from_poly_reference",
+            return_value=80382.12345,
+        ), patch(
+            "custom.btc_agent.indicators._fetch_spot_price_from_binance_websocket",
+            return_value=75123.0,
+        ), patch(
+            "custom.btc_agent.indicators._fetch_spot_price_from_coinbase",
+            return_value=75200.0,
+        ):
+            price = indicators.fetch_btc_spot_price()
+
+        self.assertAlmostEqual(price, 80382.12345, places=5)
+        self.assertAlmostEqual(indicators.get_latest_cached_price(), 80382.12345, places=5)
+        self.assertEqual(indicators._LAST_SUCCESSFUL_PROVIDER_INDEX, 0)
 
     def test_fetch_btc_spot_price_uses_cached_value_when_all_providers_fail(self):
         indicators._record_price_sample(75000.0)
 
         with patch(
+            "custom.btc_agent.indicators._fetch_btc_price_from_poly_reference",
+            side_effect=requests.HTTPError("429 Too Many Requests"),
+        ), patch(
             "custom.btc_agent.indicators._fetch_spot_price_from_polymarket_rtds",
             side_effect=requests.HTTPError("429 Too Many Requests"),
         ), patch(
@@ -61,6 +84,9 @@ class TestBtcIndicators(unittest.TestCase):
 
     def test_fetch_btc_spot_price_raises_without_cache_when_all_providers_fail(self):
         with patch(
+            "custom.btc_agent.indicators._fetch_btc_price_from_poly_reference",
+            side_effect=requests.HTTPError("429 Too Many Requests"),
+        ), patch(
             "custom.btc_agent.indicators._fetch_spot_price_from_polymarket_rtds",
             side_effect=requests.HTTPError("429 Too Many Requests"),
         ), patch(
@@ -75,6 +101,27 @@ class TestBtcIndicators(unittest.TestCase):
         ):
             with self.assertRaises(requests.HTTPError):
                 indicators.fetch_btc_spot_price()
+
+    def test_fetch_btc_price_from_poly_reference_parses_reference_payload(self):
+        fake_response = MagicMock()
+        fake_response.json.return_value = {
+            "parsed": [
+                {
+                    "price": {
+                        "price": "8038212345",
+                        "expo": -5,
+                    }
+                }
+            ]
+        }
+
+        with patch(
+            "custom.btc_agent.indicators.http_get",
+            return_value=fake_response,
+        ):
+            price = indicators._fetch_btc_price_from_poly_reference()
+
+        self.assertAlmostEqual(price, 80382.12345, places=5)
 
     def test_fetch_spot_price_from_binance_websocket_parses_ticker_message(self):
         fake_socket = MagicMock()
@@ -282,6 +329,57 @@ class TestBtcIndicators(unittest.TestCase):
         self.assertEqual(features.consecutive_flat_ticks, 0)
         self.assertEqual(features.consecutive_directional_ticks, 3)
 
+    def test_build_btc_features_directional_streak_ignores_small_counter_move_noise(self):
+        seeded_samples = [
+            (datetime.fromtimestamp(1_776_968_675, tz=timezone.utc), 78000.0),
+            (datetime.fromtimestamp(1_776_968_690, tz=timezone.utc), 78008.0),
+            (datetime.fromtimestamp(1_776_968_700, tz=timezone.utc), 78016.0),
+            (datetime.fromtimestamp(1_776_968_705, tz=timezone.utc), 78014.5),
+            (datetime.fromtimestamp(1_776_968_708, tz=timezone.utc), 78022.0),
+        ]
+        for sample_time, sample_price in seeded_samples:
+            indicators._record_price_sample(sample_price, as_of=sample_time)
+
+        with patch(
+            "custom.btc_agent.indicators.fetch_btc_spot_price",
+            side_effect=self._recorded_price_return(78030.0),
+        ), patch(
+            "custom.btc_agent.indicators.datetime",
+        ) as mock_datetime:
+            mock_datetime.now.return_value = datetime.fromtimestamp(1_776_968_720, tz=timezone.utc)
+            mock_datetime.fromtimestamp.side_effect = datetime.fromtimestamp
+            mock_datetime.timezone = timezone
+            features = indicators.build_btc_features(window_start_ts=1_776_968_700)
+
+        self.assertGreaterEqual(features.consecutive_directional_ticks, 4)
+
+    def test_build_btc_features_last_10_ticks_direction_omits_flat_and_tiny_noise(self):
+        seeded_samples = [
+            (datetime.fromtimestamp(1_776_968_675, tz=timezone.utc), 80300.0),
+            (datetime.fromtimestamp(1_776_968_680, tz=timezone.utc), 80300.1),
+            (datetime.fromtimestamp(1_776_968_685, tz=timezone.utc), 80301.5),
+            (datetime.fromtimestamp(1_776_968_690, tz=timezone.utc), 80301.5),
+            (datetime.fromtimestamp(1_776_968_695, tz=timezone.utc), 80300.9),
+            (datetime.fromtimestamp(1_776_968_700, tz=timezone.utc), 80303.0),
+            (datetime.fromtimestamp(1_776_968_705, tz=timezone.utc), 80303.2),
+            (datetime.fromtimestamp(1_776_968_708, tz=timezone.utc), 80305.5),
+        ]
+        for sample_time, sample_price in seeded_samples:
+            indicators._record_price_sample(sample_price, as_of=sample_time)
+
+        with patch(
+            "custom.btc_agent.indicators.fetch_btc_spot_price",
+            side_effect=self._recorded_price_return(80306.2),
+        ), patch(
+            "custom.btc_agent.indicators.datetime",
+        ) as mock_datetime:
+            mock_datetime.now.return_value = datetime.fromtimestamp(1_776_968_720, tz=timezone.utc)
+            mock_datetime.fromtimestamp.side_effect = datetime.fromtimestamp
+            mock_datetime.timezone = timezone
+            features = indicators.build_btc_features(window_start_ts=1_776_968_700)
+
+        self.assertEqual(features.last_10_ticks_direction, "UDUUU")
+
     def test_build_btc_features_populates_phase2_indicator_fields(self):
         base_ts = 1_776_968_300
         for idx in range(24):
@@ -310,6 +408,53 @@ class TestBtcIndicators(unittest.TestCase):
         self.assertEqual(features.ema_cross_direction, "bullish")
         self.assertIsNotNone(features.adx_14)
         self.assertIsNotNone(features.atr_14)
+
+    def test_build_btc_features_rsi_9_and_rsi_14_are_computed_independently(self):
+        prices = [
+            100.0,
+            101.0,
+            100.5,
+            101.5,
+            101.0,
+            102.0,
+            101.2,
+            102.5,
+            101.7,
+            103.0,
+            102.2,
+            103.3,
+            102.7,
+            103.8,
+            102.9,
+            104.0,
+            103.4,
+            104.6,
+            103.9,
+            105.2,
+            104.7,
+            105.9,
+        ]
+        base_ts = 1_776_968_300
+        for idx, price in enumerate(prices):
+            indicators._record_price_sample(
+                price,
+                as_of=datetime.fromtimestamp(base_ts + (idx * 20), tz=timezone.utc),
+            )
+
+        with patch(
+            "custom.btc_agent.indicators.fetch_btc_spot_price",
+            side_effect=self._recorded_price_return(105.4),
+        ), patch(
+            "custom.btc_agent.indicators.datetime",
+        ) as mock_datetime:
+            mock_datetime.now.return_value = datetime.fromtimestamp(base_ts + (len(prices) * 20), tz=timezone.utc)
+            mock_datetime.fromtimestamp.side_effect = datetime.fromtimestamp
+            mock_datetime.timezone = timezone
+            features = indicators.build_btc_features(window_start_ts=1_776_968_700)
+
+        self.assertIsNotNone(features.rsi_9)
+        self.assertIsNotNone(features.rsi_14)
+        self.assertNotEqual(features.rsi_9, features.rsi_14)
 
     def test_estimate_market_window_reference_price_prefers_boundary_sample_before_start(self):
         indicators._record_price_sample(
@@ -367,6 +512,7 @@ class TestBtcIndicators(unittest.TestCase):
             volatility_5m=None,
             consecutive_flat_ticks=0,
             consecutive_directional_ticks=0,
+            last_10_ticks_direction="",
             retained_sample_count=3,
             window_sample_count=1,
             trailing_5m_sample_count=1,
@@ -405,6 +551,7 @@ class TestBtcIndicators(unittest.TestCase):
             volatility_5m=6.0,
             consecutive_flat_ticks=1,
             consecutive_directional_ticks=3,
+            last_10_ticks_direction="UUUDUUUUUU",
             retained_sample_count=21,
             window_sample_count=3,
             trailing_5m_sample_count=3,

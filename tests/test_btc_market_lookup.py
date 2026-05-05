@@ -34,6 +34,29 @@ from custom.btc_agent.market_lookup import (
 
 
 class TestBtcMarketLookup(unittest.TestCase):
+    def test_extract_market_from_event_parses_gamma_outcome_probabilities(self):
+        event = {
+            "id": "event-1",
+            "title": "Bitcoin Up or Down",
+            "markets": [
+                {
+                    "id": "market-1",
+                    "question": "Bitcoin Up or Down",
+                    "clobTokenIds": '["up-token","down-token"]',
+                    "outcomes": '["Up","Down"]',
+                    "outcomePrices": '["0.495","0.505"]',
+                    "startDate": "2026-05-04T00:00:00Z",
+                    "endDate": "2026-05-04T00:05:00Z",
+                }
+            ],
+        }
+
+        market = _extract_market_from_event(event, "btc-updown-5m-1777853100")
+
+        self.assertIsNotNone(market)
+        self.assertEqual(market.up_market_probability, 0.495)
+        self.assertEqual(market.down_market_probability, 0.505)
+
     def test_get_btc_updown_market_by_slug_returns_cached_market_without_refetch(self):
         cached_market = BtcUpDownMarket(
             event_id="1",

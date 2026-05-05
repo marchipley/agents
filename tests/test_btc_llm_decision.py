@@ -2,11 +2,17 @@ import unittest
 from datetime import datetime, timezone
 from unittest.mock import Mock, patch
 import types
+import sys
 
 import requests
 
+sys.modules.setdefault("dotenv", types.SimpleNamespace(load_dotenv=lambda *args, **kwargs: None))
+sys.modules.setdefault("websocket", types.SimpleNamespace(WebSocketApp=object, create_connection=object))
+
 from custom.btc_agent.llm_decision import (
+    _build_minimal_user_prompt,
     _build_user_prompt,
+    _extract_json_payload,
     _get_openai_realtime_client,
     _stream_openai_chat_completion,
     decide_trade,
@@ -37,6 +43,7 @@ class DummyFeatures:
     volatility_5m = 22.0
     consecutive_flat_ticks = 0
     consecutive_directional_ticks = 3
+    last_10_ticks_direction = "UUUDUUUUUU"
     as_of = datetime.fromtimestamp(1777513792, tz=timezone.utc)
 
 
@@ -45,9 +52,22 @@ class DummyMarket:
     slug = "btc-updown-test"
     settlement_threshold = 74982.25
     end_ts = 1777513800
+    start_ts = 1777513500
+    up_market_probability = 0.495
+    down_market_probability = 0.505
 
 
 class TestBtcLlmDecision(unittest.TestCase):
+    def test_extract_json_payload_accepts_key_value_response_format(self):
+        payload = _extract_json_payload(
+            "decision: NO_TRADE, confidence: 0.45, max_price_to_pay: 1.0, reason: Time remaining is sufficient, RSI not extreme, and side quote low, so prefer no trade."
+        )
+
+        self.assertEqual(payload["decision"], "NO_TRADE")
+        self.assertEqual(payload["confidence"], 0.45)
+        self.assertEqual(payload["max_price_to_pay"], 1.0)
+        self.assertIn("prefer no trade", payload["reason"].lower())
+
     def test_get_openai_realtime_client_reuses_existing_client(self):
         fake_client = Mock()
         fake_client.api_key = "test-key"
@@ -118,14 +138,78 @@ class TestBtcLlmDecision(unittest.TestCase):
         self.assertIn("UP wins only if BTC finishes above 74982.25", prompt)
         self.assertIn("DOWN wins only if BTC finishes below 74982.25", prompt)
         self.assertIn("Time remaining seconds: 8", prompt)
+        self.assertIn("DISTANCE_FROM_STRIKE_PCT:", prompt)
+        self.assertIn("Current BTC price USD (raw feed): 75000.00", prompt)
+        self.assertIn("Effective BTC price USD (drift-adjusted):", prompt)
         self.assertIn("UP Polymarket ask/buy quote: 0.84", prompt)
         self.assertIn("DOWN Polymarket ask/buy quote: 0.17", prompt)
         self.assertIn("RSI(9): 61.0", prompt)
         self.assertIn("ADX(14): 31.0", prompt)
+        self.assertIn("Trend intensity (ADX): 31.0", prompt)
         self.assertIn("EMA alignment (Price > EMA9 > EMA21): True", prompt)
         self.assertIn("Momentum acceleration: -2.0", prompt)
+        self.assertIn("Oracle gap ratio:", prompt)
+        self.assertIn("time_remaining_seconds is authoritative", prompt)
+        self.assertIn("Discovery Phase", prompt)
+        self.assertIn("Do not confuse it with DISTANCE_FROM_STRIKE_PCT, DISTANCE_FROM_STRIKE_USD, MARKET_WIN_CHANCE_UP, MARKET_WIN_CHANCE_DOWN, or Oracle gap ratio", prompt)
+        self.assertIn("DISTANCE_FROM_STRIKE_PCT is the source of truth", prompt)
+        self.assertIn("Use the drift-adjusted Effective BTC price as the true current price", prompt)
+        self.assertIn("velocity_30s is micro-momentum for entry timing only", prompt)
+        self.assertIn("If the chosen side MARKET_WIN_CHANCE is below 0.10", prompt)
+        self.assertIn("If DISTANCE_FROM_STRIKE_PCT is positive and you choose DOWN", prompt)
+        self.assertIn("If required velocity to win exceeds volatility_5m / 10", prompt)
+        self.assertIn("If RSI(9) is below 30, do not choose DOWN.", prompt)
         self.assertIn("Focus on regime detection and direction, not limit pricing.", prompt)
         self.assertIn("execution layer will apply regime-aware EV, deadline, liquidity, and FOK rules", prompt)
+
+    def test_user_prompt_uses_canonical_window_time_when_end_ts_is_stale(self):
+        class StaleEndMarket(DummyMarket):
+            end_ts = 1777513505
+            start_ts = 1777513500
+
+        up_snapshot = Mock(buy_quote=0.84)
+        down_snapshot = Mock(buy_quote=0.17)
+        prompt = _build_user_prompt(
+            DummyFeatures(),
+            StaleEndMarket(),
+            up_snapshot=up_snapshot,
+            down_snapshot=down_snapshot,
+        )
+
+        self.assertIn("Time remaining seconds: 8", prompt)
+
+    def test_user_prompt_prefers_slug_timestamp_when_start_and_end_are_stale(self):
+        class StaleTimingMarket(DummyMarket):
+            slug = "btc-updown-5m-1777513500"
+            start_ts = 1777513200
+            end_ts = 1777513210
+
+        up_snapshot = Mock(buy_quote=0.84)
+        down_snapshot = Mock(buy_quote=0.17)
+        prompt = _build_user_prompt(
+            DummyFeatures(),
+            StaleTimingMarket(),
+            up_snapshot=up_snapshot,
+            down_snapshot=down_snapshot,
+        )
+
+        self.assertIn("Time remaining seconds: 8", prompt)
+
+    def test_minimal_prompt_uses_gamma_probabilities_and_strike_delta_not_window_delta(self):
+        up_snapshot = Mock(buy_quote=0.84)
+        down_snapshot = Mock(buy_quote=0.17)
+        prompt = _build_minimal_user_prompt(
+            DummyFeatures(),
+            DummyMarket(),
+            up_snapshot=up_snapshot,
+            down_snapshot=down_snapshot,
+        )
+
+        self.assertIn("DISTANCE_FROM_STRIKE_USD=", prompt)
+        self.assertIn("MARKET_WIN_CHANCE_UP=0.495", prompt)
+        self.assertIn("MARKET_WIN_CHANCE_DOWN=0.505", prompt)
+        self.assertIn("Do not confuse DISTANCE_FROM_STRIKE values with MARKET_WIN_CHANCE values.", prompt)
+        self.assertNotIn("\ndelta_pct=", prompt)
 
     def test_gemini_503_returns_no_trade(self):
         error_response = requests.Response()

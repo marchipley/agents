@@ -11,7 +11,7 @@ from typing import Literal, Optional
 
 import requests
 import websocket
-from .config import get_llm_config
+from .config import get_llm_config, get_trading_config
 from .indicators import BtcFeatures
 from .market_lookup import BtcUpDownMarket
 from .network import (
@@ -32,10 +32,58 @@ class LlmDecision:
     confidence: float
     max_price_to_pay: float
     reason: str
+    prompt_text: Optional[str] = None
 
 
 _OPENAI_REALTIME_CLIENT = None
 _OPENAI_REALTIME_CLIENT_LOCK = threading.Lock()
+
+
+def _slug_start_ts(slug: Optional[str]) -> Optional[int]:
+    if not slug:
+        return None
+    match = re.search(r"btc-updown-5m-(\d+)$", str(slug))
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except ValueError:
+        return None
+
+
+def _get_time_remaining_seconds(market: BtcUpDownMarket, as_of_ts: int) -> int:
+    slug_start_ts = _slug_start_ts(getattr(market, "slug", None))
+    canonical_start_ts = slug_start_ts or getattr(market, "start_ts", None)
+    canonical_end_ts = canonical_start_ts + 300 if canonical_start_ts else None
+    effective_end_ts = getattr(market, "end_ts", None)
+    if canonical_end_ts is not None:
+        if effective_end_ts is None or canonical_end_ts > effective_end_ts:
+            effective_end_ts = canonical_end_ts
+    if effective_end_ts is None:
+        return 0
+    return max(int(effective_end_ts) - as_of_ts, 0)
+
+
+def _compute_implied_oracle_price(
+    features: BtcFeatures,
+    market: BtcUpDownMarket,
+    up_snapshot=None,
+    down_snapshot=None,
+) -> Optional[float]:
+    atr_14 = getattr(features, "atr_14", None)
+    if (
+        atr_14 in (None, 0)
+        or market.settlement_threshold in (None, 0)
+        or up_snapshot is None
+        or down_snapshot is None
+        or getattr(up_snapshot, "buy_quote", None) is None
+        or getattr(down_snapshot, "buy_quote", None) is None
+    ):
+        return None
+    return (
+        float(market.settlement_threshold)
+        + (float(up_snapshot.buy_quote) - float(down_snapshot.buy_quote)) * float(atr_14)
+    )
 
 
 def _build_system_prompt() -> str:
@@ -54,11 +102,20 @@ def _build_system_prompt() -> str:
         'Be conservative and prefer "NO_TRADE" when signals are weak.\n'
         "Your job is regime detection and directional confidence, not price-capping.\n"
         "Interpret confidence as the mathematical probability that your chosen side wins.\n"
-        "Treat Window Delta as the primary confidence signal in the final 10 seconds.\n"
+        "time_remaining_seconds is authoritative. Do not infer time from any other number.\n"
+        "Final 10 seconds means time_remaining_seconds < 15.\n"
+        "If time_remaining_seconds > 240, you are in the Discovery Phase. Avoid high-confidence trades unless trend intensity is extreme.\n"
+        "Use DISTANCE_FROM_STRIKE_PCT to determine whether UP or DOWN is currently winning versus the price to beat. A positive value means BTC is above the strike; a negative value means BTC is below the strike.\n"
+        "Do not confuse DISTANCE_FROM_STRIKE_USD or DISTANCE_FROM_STRIKE_PCT with MARKET_WIN_CHANCE_UP / MARKET_WIN_CHANCE_DOWN. Distance fields are price gaps; market win chance fields are market-implied probabilities.\n"
+        "Treat Window Delta as a recent-drift confidence signal only in the final 10 seconds.\n"
+        "Window Delta means the percent change from the market window open price only. Do not confuse it with DISTANCE_FROM_STRIKE_PCT, DISTANCE_FROM_STRIKE_USD, oracle_gap_ratio, or any ATR-normalized value.\n"
+        "window_delta_pct is not the settlement baseline. velocity_30s is micro-momentum for entry timing only, not side selection.\n"
         "If Window Delta is below 0.005% near T-10, ignore TA noise and prefer NO_TRADE.\n"
         "If Window Delta is above 0.15% near T-10, confidence should usually be 0.95 or higher.\n"
         "If confidence is above 0.90, treat it as a directive to get in rather than demanding extra edge buffer.\n"
         "If time remaining is under 5 seconds and confidence is above 0.70, avoid NO_TRADE unless the signal is clearly invalid.\n"
+        "Respect market consensus. If the chosen side market win chance is below 0.10 and time_remaining_seconds is greater than 180, prefer NO_TRADE. If the chosen side market win chance is below 0.15 and 15 <= time_remaining_seconds < 120, prefer NO_TRADE. Under 15 seconds, only fade consensus on a clear reversal.\n"
+        "If DISTANCE_FROM_STRIKE_PCT is positive and you choose DOWN, confidence must be below 0.50 unless trend exhaustion is clear. If DISTANCE_FROM_STRIKE_PCT is negative and you choose UP, confidence must be below 0.50 unless trend exhaustion is clear.\n"
         "`max_price_to_pay` is informational only and is not used by execution.\n"
         "For directional trades, set `max_price_to_pay` to 1.0 unless you have a strong reason not to.\n"
         "If Window Delta is above 0.15% near T-10, you may set `max_price_to_pay` as high as 0.97."
@@ -67,27 +124,51 @@ def _build_system_prompt() -> str:
 
 def _build_openai_realtime_system_prompt() -> str:
     return (
-        "Return one JSON object only with keys decision, confidence, max_price_to_pay, reason. "
-        "decision must be UP, DOWN, or NO_TRADE. "
-        "confidence is win probability 0..1. "
-        "Use Window Delta as the strongest late signal. "
-        "If abs(Window Delta) < 0.005 near T-10, prefer NO_TRADE. "
-        "If abs(Window Delta) > 0.15 near T-10, confidence should usually be very high. "
-        "max_price_to_pay is informational only; use 1.0 for directional trades."
+        "Return one JSON object only: decision, confidence, max_price_to_pay, reason. "
+        "decision=UP|DOWN|NO_TRADE. confidence is win probability 0..1. "
+        "Use DISTANCE_FROM_STRIKE_USD and DISTANCE_FROM_STRIKE_PCT as the settlement baseline: positive means above strike, negative means below strike. "
+        "Use MARKET_WIN_CHANCE_UP and MARKET_WIN_CHANCE_DOWN as crowd consensus and velocity_30s only for entry timing, not side selection. "
+        "Do not confuse strike-distance fields with market-win-chance fields. "
+        "If time_remaining_seconds>240, avoid high-confidence trades unless trend is extreme. "
+        "If chosen market win chance<0.10 and time_remaining_seconds>180, prefer NO_TRADE. "
+        "If chosen market win chance<0.15 and 15<=time_remaining_seconds<120, prefer NO_TRADE. "
+        "If reqv>vol5m/10, prefer NO_TRADE. "
+        "If confidence differs from market implied probability by more than 0.50, prefer NO_TRADE. "
+        "If rsi9<30, do not choose DOWN. If rsi9>70, do not choose UP. "
+        "If DISTANCE_FROM_STRIKE_PCT>0 and choosing DOWN, confidence must stay below 0.50 unless exhaustion is clear; symmetric for UP when DISTANCE_FROM_STRIKE_PCT<0. "
+        "Use 1.0 for max_price_to_pay on directional trades."
     )
 
 
 def _build_user_prompt(features: BtcFeatures, market: BtcUpDownMarket, up_snapshot=None, down_snapshot=None) -> str:
-    time_remaining_seconds = max(market.end_ts - int(features.as_of.timestamp()), 0)
+    time_remaining_seconds = _get_time_remaining_seconds(market, int(features.as_of.timestamp()))
+    implied_oracle_price = _compute_implied_oracle_price(features, market, up_snapshot, down_snapshot)
+    effective_current_price = (
+        implied_oracle_price if implied_oracle_price is not None else features.price_usd
+    )
     gap_to_target = (
         None
         if market.settlement_threshold in (None, 0)
-        else features.price_usd - market.settlement_threshold
+        else effective_current_price - market.settlement_threshold
     )
     required_velocity_to_win = (
         None
         if gap_to_target is None or time_remaining_seconds <= 0
         else abs(gap_to_target) / time_remaining_seconds
+    )
+    strike_delta_pct = (
+        None
+        if gap_to_target is None or features.price_usd in (None, 0)
+        else gap_to_target / features.price_usd
+    )
+    strike_delta_pct_display = (
+        "None" if strike_delta_pct is None else f"{strike_delta_pct * 100:.4f}%"
+    )
+    trend_intensity = features.adx_14
+    oracle_gap_ratio = (
+        None
+        if gap_to_target is None or features.atr_14 in (None, 0)
+        else gap_to_target / features.atr_14
     )
     return (
         f"Market title: {market.title}\n"
@@ -97,6 +178,7 @@ def _build_user_prompt(features: BtcFeatures, market: BtcUpDownMarket, up_snapsh
         f"- Settlement rule: UP wins only if BTC finishes above {market.settlement_threshold}; "
         f"DOWN wins only if BTC finishes below {market.settlement_threshold}.\n"
         f"- Time remaining seconds: {time_remaining_seconds}\n"
+        f"- DISTANCE_FROM_STRIKE_PCT: {strike_delta_pct_display}\n"
         f"- Window Delta pct: {features.delta_pct_from_window_open * 100:.4f}%\n"
         f"- UP Polymarket ask/buy quote: {getattr(up_snapshot, 'buy_quote', None)}\n"
         f"- DOWN Polymarket ask/buy quote: {getattr(down_snapshot, 'buy_quote', None)}\n"
@@ -106,7 +188,9 @@ def _build_user_prompt(features: BtcFeatures, market: BtcUpDownMarket, up_snapsh
         f"- DOWN imbalance pressure: {getattr(down_snapshot, 'imbalance_pressure', None)}\n"
         f"- Required velocity to win USD/sec: {required_velocity_to_win}\n\n"
         "BTC features:\n"
-        f"- Current BTC price USD: {features.price_usd:.2f}\n"
+        f"- Current BTC price USD (raw feed): {features.price_usd:.2f}\n"
+        f"- Effective BTC price USD (drift-adjusted): {effective_current_price:.2f}\n"
+        f"- DISTANCE_FROM_STRIKE_PCT (BTC vs price to beat): {strike_delta_pct_display}\n"
         f"- Market window open price USD: {features.window_open_price:.2f}\n"
         f"- Percent change from market window open: {features.delta_pct_from_window_open * 100:.4f}%\n"
         f"- Trailing 5-minute open price USD: {features.trailing_5m_open_price:.2f}\n"
@@ -125,17 +209,36 @@ def _build_user_prompt(features: BtcFeatures, market: BtcUpDownMarket, up_snapsh
         f"- EMA alignment (Price > EMA9 > EMA21): {features.ema_alignment}\n"
         f"- EMA cross direction: {features.ema_cross_direction}\n"
         f"- ADX(14): {features.adx_14}\n"
+        f"- Trend intensity (ADX): {trend_intensity}\n"
         f"- ATR(14): {features.atr_14}\n"
+        f"- Oracle gap ratio: {oracle_gap_ratio}\n"
         f"- Trailing 5-minute volatility: {features.volatility_5m}\n"
         f"- Consecutive flat ticks: {features.consecutive_flat_ticks}\n"
-        f"- Consecutive directional ticks: {features.consecutive_directional_ticks}\n\n"
+        f"- Consecutive directional ticks: {features.consecutive_directional_ticks}\n"
+        f"- Last 10 ticks direction: {features.last_10_ticks_direction}\n\n"
         "Decision policy:\n"
         "- Focus on regime detection and direction, not limit pricing.\n"
         "- Confidence should represent your estimated win probability for the chosen side.\n"
-        "- Window Delta is the master confidence signal near T-10.\n"
+        "- time_remaining_seconds is authoritative. Final 10 seconds means time_remaining_seconds < 15.\n"
+        "- If time_remaining_seconds > 240, you are in the Discovery Phase. Avoid high-confidence trades unless trend intensity is extreme.\n"
+        "- DISTANCE_FROM_STRIKE_PCT is the source of truth for whether UP or DOWN is currently winning against the price to beat.\n"
+        "- A positive DISTANCE_FROM_STRIKE_PCT means BTC is above the strike and UP is currently winning. A negative DISTANCE_FROM_STRIKE_PCT means BTC is below the strike and DOWN is currently winning.\n"
+        "- Use the drift-adjusted Effective BTC price as the true current price when reasoning about distance to the strike.\n"
+        "- Window Delta is a recent-drift confidence signal near T-10 only.\n"
+        "- Window Delta means percent change from market window open only. Do not confuse it with DISTANCE_FROM_STRIKE_PCT, DISTANCE_FROM_STRIKE_USD, MARKET_WIN_CHANCE_UP, MARKET_WIN_CHANCE_DOWN, or Oracle gap ratio.\n"
+        "- velocity_30s is micro-momentum for entry timing only; do not use velocity_30s alone to choose UP or DOWN.\n"
         "- Treat order-book imbalance and imbalance pressure as leading indicators.\n"
         "- Do not fade PARABOLIC_UP or PARABOLIC_DOWN regimes just because RSI is extreme.\n"
-        "- If required velocity to win exceeds trailing volatility, prefer NO_TRADE.\n"
+        "- If the chosen side MARKET_WIN_CHANCE is below 0.10 and time_remaining_seconds is greater than 180, prefer NO_TRADE.\n"
+        "- If the chosen side MARKET_WIN_CHANCE is below 0.15 and 15 <= time_remaining_seconds < 120, prefer NO_TRADE.\n"
+        "- Under 15 seconds, only bet against a sub-0.15 side quote when velocity_30s and momentum_acceleration show a clear reversal. Apply this symmetrically for UP and DOWN.\n"
+        "- If time_remaining_seconds is greater than 60 and abs(gap_to_target_usd) is less than 0.2 * volatility_5m, the market is too close to call and you should prefer NO_TRADE.\n"
+        "- If you want UP while the UP buy quote is below 0.45, prefer NO_TRADE because the market is not confirming the breakout.\n"
+        "- If RSI(9) is above 85 and BTC is already above the strike, do not choose UP unless time_remaining_seconds is under 15 and continuation is exceptionally clear.\n"
+        "- If DISTANCE_FROM_STRIKE_PCT is positive and you choose DOWN, confidence must be below 0.50 unless trend exhaustion is clear. Apply the same rule symmetrically for UP when DISTANCE_FROM_STRIKE_PCT is negative.\n"
+        "- If required velocity to win exceeds volatility_5m / 10, prefer NO_TRADE.\n"
+        "- If RSI(9) is below 30, do not choose DOWN.\n"
+        "- If RSI(9) is above 70, do not choose UP.\n"
         "- If consecutive directional ticks are 8 or more, do not chase further in that same direction.\n"
         "- If ADX(14) is above 35, do not trade against the trend.\n"
         "- If ADX(14) is above 45, assume the trend may be exhausted and prefer reversal setups over late trend-chasing.\n"
@@ -156,22 +259,41 @@ def _build_user_prompt(features: BtcFeatures, market: BtcUpDownMarket, up_snapsh
 
 
 def _build_compact_user_prompt(features: BtcFeatures, market: BtcUpDownMarket, up_snapshot=None, down_snapshot=None) -> str:
-    time_remaining_seconds = max(market.end_ts - int(features.as_of.timestamp()), 0)
+    time_remaining_seconds = _get_time_remaining_seconds(market, int(features.as_of.timestamp()))
+    implied_oracle_price = _compute_implied_oracle_price(features, market, up_snapshot, down_snapshot)
+    effective_current_price = (
+        implied_oracle_price if implied_oracle_price is not None else features.price_usd
+    )
     gap_to_target = (
         None
         if market.settlement_threshold in (None, 0)
-        else features.price_usd - market.settlement_threshold
+        else effective_current_price - market.settlement_threshold
     )
     required_velocity_to_win = (
         None
         if gap_to_target is None or time_remaining_seconds <= 0
         else abs(gap_to_target) / time_remaining_seconds
     )
+    strike_delta_pct = (
+        None
+        if gap_to_target is None or features.price_usd in (None, 0)
+        else gap_to_target / features.price_usd
+    )
+    strike_delta_pct_display = (
+        "None" if strike_delta_pct is None else f"{strike_delta_pct * 100:.4f}%"
+    )
+    oracle_gap_ratio = (
+        None
+        if gap_to_target is None or features.atr_14 in (None, 0)
+        else gap_to_target / features.atr_14
+    )
     return (
         f"BTC 5m market slug: {market.slug}\n"
         f"Price to beat USD: {market.settlement_threshold}\n"
         f"Time remaining seconds: {time_remaining_seconds}\n"
-        f"Current BTC price USD: {features.price_usd:.2f}\n"
+        f"Current BTC price USD (raw): {features.price_usd:.2f}\n"
+        f"Effective BTC price USD: {effective_current_price:.2f}\n"
+        f"DISTANCE_FROM_STRIKE_PCT: {strike_delta_pct_display}\n"
         f"Window Delta pct: {features.delta_pct_from_window_open * 100:.4f}%\n"
         f"UP ask price: {getattr(up_snapshot, 'buy_quote', None)}\n"
         f"DOWN ask price: {getattr(down_snapshot, 'buy_quote', None)}\n"
@@ -195,57 +317,94 @@ def _build_compact_user_prompt(features: BtcFeatures, market: BtcUpDownMarket, u
         f"EMA alignment: {features.ema_alignment}\n"
         f"EMA cross: {features.ema_cross_direction}\n"
         f"ADX14: {features.adx_14}\n"
+        f"Trend intensity: {features.adx_14}\n"
         f"ATR14: {features.atr_14}\n"
+        f"Oracle gap ratio: {oracle_gap_ratio}\n"
         f"Trailing 5-minute volatility: {features.volatility_5m}\n"
         f"Directional ticks: {features.consecutive_directional_ticks}\n"
+        f"Last 10 ticks direction: {features.last_10_ticks_direction}\n"
         "Settlement: UP wins only above the price to beat; DOWN wins only below it.\n"
+        "time_remaining_seconds is authoritative; final 10 seconds means <15, and >240 is Discovery Phase.\n"
+        "DISTANCE_FROM_STRIKE_PCT is the source of truth for whether UP or DOWN is currently winning versus the strike.\n"
+        "Use Effective BTC price as the true current price when reasoning about the strike gap.\n"
+        "Window Delta only means change from market window open, never DISTANCE_FROM_STRIKE_PCT, DISTANCE_FROM_STRIKE_USD, MARKET_WIN_CHANCE fields, or Oracle gap ratio.\n"
+        "velocity_30s is for entry timing only.\n"
         "Do not fade parabolic trend and do not chase if directional ticks are >= 8.\n"
+        "Do not confuse DISTANCE_FROM_STRIKE fields with MARKET_WIN_CHANCE fields.\n"
+        "If chosen MARKET_WIN_CHANCE is below 0.10 and time_remaining_seconds is greater than 180, prefer NO_TRADE.\n"
+        "If chosen MARKET_WIN_CHANCE is below 0.15 and 15 <= time_remaining_seconds < 120, prefer NO_TRADE.\n"
+        "If time_remaining_seconds > 60 and abs(gap_to_target_usd) < 0.2 * volatility_5m, prefer NO_TRADE.\n"
+        "If choosing UP while UP quote < 0.45, prefer NO_TRADE.\n"
+        "If RSI(9) > 85 and BTC is already above the strike, do not choose UP unless time_remaining_seconds < 15 and continuation is exceptionally clear.\n"
+        "If RSI(9) < 30, do not choose DOWN. If RSI(9) > 70, do not choose UP.\n"
+        "If DISTANCE_FROM_STRIKE_PCT is positive and you choose DOWN, confidence must be below 0.50 unless exhaustion is clear; same symmetrically for UP when DISTANCE_FROM_STRIKE_PCT is negative.\n"
         "If ADX14 > 35, do not fight the trend. If ADX14 > 45, avoid late trend-chasing and look for exhaustion/reversal logic.\n"
-        "If required velocity to win exceeds volatility, prefer NO_TRADE.\n"
+        "If required velocity to win exceeds volatility_5m / 10, prefer NO_TRADE.\n"
         "Provide direction plus confidence as win probability. Execution handles EV and timing.\n"
         'Return one JSON object with keys: decision, confidence, max_price_to_pay, reason.'
     )
 
 
 def _build_minimal_user_prompt(features: BtcFeatures, market: BtcUpDownMarket, up_snapshot=None, down_snapshot=None) -> str:
-    time_remaining_seconds = max(market.end_ts - int(features.as_of.timestamp()), 0)
+    time_remaining_seconds = _get_time_remaining_seconds(market, int(features.as_of.timestamp()))
+    implied_oracle_price = _compute_implied_oracle_price(features, market, up_snapshot, down_snapshot)
+    effective_current_price = (
+        implied_oracle_price if implied_oracle_price is not None else features.price_usd
+    )
     gap_to_target = (
         None
         if market.settlement_threshold in (None, 0)
-        else features.price_usd - market.settlement_threshold
+        else effective_current_price - market.settlement_threshold
     )
     required_velocity_to_win = (
         None
         if gap_to_target is None or time_remaining_seconds <= 0
         else abs(gap_to_target) / time_remaining_seconds
     )
+    strike_delta_pct = (
+        None
+        if gap_to_target is None or features.price_usd in (None, 0)
+        else gap_to_target / features.price_usd
+    )
+    strike_delta_usd = gap_to_target
+    strike_delta_pct_display = (
+        "None" if strike_delta_pct is None else f"{strike_delta_pct * 100:.4f}"
+    )
     return (
         f"beat={market.settlement_threshold}\n"
         f"t={time_remaining_seconds}\n"
-        f"btc={features.price_usd:.2f}\n"
-        f"delta_pct={features.delta_pct_from_window_open * 100:.4f}\n"
+        f"btc_raw={features.price_usd:.2f}\n"
+        f"btc_eff={effective_current_price:.2f}\n"
+        f"DISTANCE_FROM_STRIKE_USD={strike_delta_usd}\n"
+        f"DISTANCE_FROM_STRIKE_PCT={strike_delta_pct_display}\n"
+        f"MARKET_WIN_CHANCE_UP={market.up_market_probability}\n"
+        f"MARKET_WIN_CHANCE_DOWN={market.down_market_probability}\n"
         f"up_ask={getattr(up_snapshot, 'buy_quote', None)}\n"
         f"down_ask={getattr(down_snapshot, 'buy_quote', None)}\n"
-        f"up_imb={getattr(up_snapshot, 'top_level_book_imbalance', None)}\n"
-        f"dn_imb={getattr(down_snapshot, 'top_level_book_imbalance', None)}\n"
         f"rsi9={features.rsi_9}\n"
-        f"rsi14={features.rsi_14}\n"
-        f"rsi_div={features.rsi_speed_divergence}\n"
         f"mom1m={features.momentum_1m}\n"
-        f"mom5m={features.momentum_5m}\n"
-        f"v15={features.velocity_15s}\n"
         f"v30={features.velocity_30s}\n"
         f"acc={features.momentum_acceleration}\n"
-        f"ema9={features.ema_9}\n"
-        f"ema21={features.ema_21}\n"
-        f"ema_ok={features.ema_alignment}\n"
         f"adx14={features.adx_14}\n"
-        f"atr14={features.atr_14}\n"
         f"vol5m={features.volatility_5m}\n"
         f"reqv={required_velocity_to_win}\n"
         f"dir_ticks={features.consecutive_directional_ticks}\n"
         "UP above beat. DOWN below beat.\n"
-        "No fade of parabolic trend; no chase if dir_ticks>=8; if adx14>35 follow trend; if adx14>45 expect exhaustion; if reqv>vol5m prefer NO_TRADE.\n"
+        "t is authoritative; final 10 seconds means t<15; if t>240 you are in Discovery Phase.\n"
+        "DISTANCE_FROM_STRIKE_USD and DISTANCE_FROM_STRIKE_PCT are the settlement baseline; positive means above strike, negative means below strike.\n"
+        "MARKET_WIN_CHANCE_UP and MARKET_WIN_CHANCE_DOWN are market-implied probabilities, not price distances.\n"
+        "Do not confuse DISTANCE_FROM_STRIKE values with MARKET_WIN_CHANCE values.\n"
+        "Use btc_eff as the true current price for strike-gap reasoning.\n"
+        "Ignore window-open drift. v30 is entry timing only.\n"
+        "MARKET_WIN_CHANCE_UP and MARKET_WIN_CHANCE_DOWN come from Gamma. Do not bet against them lightly.\n"
+        "No fade of parabolic trend; no chase if dir_ticks>=8; if adx14>35 follow trend; if adx14>45 expect exhaustion; if reqv>(vol5m/10) prefer NO_TRADE.\n"
+        "If chosen side MARKET_WIN_CHANCE <0.10 and t>180, prefer NO_TRADE.\n"
+        "If chosen side MARKET_WIN_CHANCE <0.15 and 15<=t<120, prefer NO_TRADE.\n"
+        "If t>60 and abs(btc-beat) < 0.2*vol5m, prefer NO_TRADE.\n"
+        "If choosing UP and up_ask<0.45, prefer NO_TRADE.\n"
+        "If rsi9>85 and btc>beat, do not choose UP unless t<15 and continuation is exceptionally clear.\n"
+        "If rsi9<30, do not choose DOWN. If rsi9>70, do not choose UP.\n"
+        "If DISTANCE_FROM_STRIKE_PCT>0 and choosing DOWN, confidence must stay below 0.50 unless exhaustion is clear; same symmetrically for UP when DISTANCE_FROM_STRIKE_PCT<0.\n"
         "Return direction + confidence as win probability.\n"
         'Return one JSON object with keys: decision, confidence, max_price_to_pay, reason.'
     )
@@ -257,42 +416,64 @@ def _build_openai_realtime_user_prompt(
     up_snapshot=None,
     down_snapshot=None,
 ) -> str:
-    time_remaining_seconds = max(market.end_ts - int(features.as_of.timestamp()), 0)
+    time_remaining_seconds = _get_time_remaining_seconds(market, int(features.as_of.timestamp()))
+    implied_oracle_price = _compute_implied_oracle_price(features, market, up_snapshot, down_snapshot)
+    effective_current_price = (
+        implied_oracle_price if implied_oracle_price is not None else features.price_usd
+    )
     gap_to_target = (
         None
         if market.settlement_threshold in (None, 0)
-        else features.price_usd - market.settlement_threshold
+        else effective_current_price - market.settlement_threshold
     )
     required_velocity_to_win = (
         None
         if gap_to_target is None or time_remaining_seconds <= 0
         else abs(gap_to_target) / time_remaining_seconds
     )
+    strike_delta_pct = (
+        None
+        if gap_to_target is None or features.price_usd in (None, 0)
+        else gap_to_target / features.price_usd
+    )
+    strike_delta_usd = gap_to_target
+    strike_delta_pct_display = (
+        "None" if strike_delta_pct is None else f"{strike_delta_pct * 100:.4f}"
+    )
     return (
         f"beat={market.settlement_threshold};"
         f"t={time_remaining_seconds};"
-        f"btc={features.price_usd:.2f};"
-        f"d={features.delta_pct_from_window_open * 100:.4f};"
+        f"btc_eff={effective_current_price:.2f};"
+        f"DISTANCE_FROM_STRIKE_USD={strike_delta_usd};"
+        f"DISTANCE_FROM_STRIKE_PCT={strike_delta_pct_display};"
+        f"MARKET_WIN_CHANCE_UP={market.up_market_probability};"
+        f"MARKET_WIN_CHANCE_DOWN={market.down_market_probability};"
         f"u={getattr(up_snapshot, 'buy_quote', None)};"
         f"dn={getattr(down_snapshot, 'buy_quote', None)};"
-        f"ui={getattr(up_snapshot, 'top_level_book_imbalance', None)};"
-        f"di={getattr(down_snapshot, 'top_level_book_imbalance', None)};"
         f"r9={features.rsi_9};"
-        f"rsi={features.rsi_14};"
-        f"rd={features.rsi_speed_divergence};"
         f"m1={features.momentum_1m};"
-        f"m5={features.momentum_5m};"
-        f"v15={features.velocity_15s};"
         f"v30={features.velocity_30s};"
         f"acc={features.momentum_acceleration};"
-        f"e9={features.ema_9};"
-        f"e21={features.ema_21};"
-        f"ea={features.ema_alignment};"
         f"adx={features.adx_14};"
-        f"atr={features.atr_14};"
         f"v5={features.volatility_5m};"
         f"reqv={required_velocity_to_win};"
         f"dt={features.consecutive_directional_ticks};"
+        "t_is_authoritative;"
+        "if_t_gt_240_discovery_phase;"
+        "DISTANCE_FROM_STRIKE_fields_are_settlement_baseline_positive_means_above_strike_negative_means_below_strike;"
+        "MARKET_WIN_CHANCE_fields_are_market_probabilities_not_price_distance;"
+        "do_not_confuse_distance_from_strike_with_market_win_chance;"
+        "btc_eff_is_true_current_price_for_strike_gap;"
+        "ignore_window_open_drift_v30_is_entry_timing_only;"
+        "MARKET_WIN_CHANCE_UP_and_MARKET_WIN_CHANCE_DOWN_are_gamma_market_probabilities;"
+        "if_chosen_market_win_chance_lt_0.10_and_t_gt_180_prefer_no_trade;"
+        "if_chosen_market_win_chance_lt_0.15_and_15_lte_t_lt_120_prefer_no_trade;"
+        "if_reqv_gt_vol5m_div_10_prefer_no_trade;"
+        "if_t_gt_60_and_abs_btc_minus_beat_lt_0.2_vol5m_prefer_no_trade;"
+        "if_choose_up_and_u_lt_0.45_prefer_no_trade;"
+        "if_r9_gt_85_and_btc_gt_beat_no_up_unless_t_lt_15;"
+        "if_r9_lt_30_no_down_if_r9_gt_70_no_up;"
+        "if_DISTANCE_FROM_STRIKE_PCT_positive_and_choose_down_confidence_lt_0.50_unless_exhaustion;"
         "json only"
     )
 
@@ -332,6 +513,22 @@ def _extract_json_payload(raw_text: str) -> dict:
     end = cleaned.rfind("}")
     if start != -1 and end != -1 and end > start:
         return json.loads(cleaned[start : end + 1])
+
+    key_value_match = re.search(
+        r"decision\s*:\s*(?P<decision>UP|DOWN|NO_TRADE)\s*,\s*"
+        r"confidence\s*:\s*(?P<confidence>-?\d+(?:\.\d+)?)\s*,\s*"
+        r"max_price_to_pay\s*:\s*(?P<max_price>-?\d+(?:\.\d+)?)\s*,\s*"
+        r"reason\s*:\s*(?P<reason>.+)$",
+        cleaned,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if key_value_match:
+        return {
+            "decision": key_value_match.group("decision").upper(),
+            "confidence": float(key_value_match.group("confidence")),
+            "max_price_to_pay": float(key_value_match.group("max_price")),
+            "reason": key_value_match.group("reason").strip(),
+        }
 
     raise ValueError(f"Could not find JSON object in LLM response: {cleaned[:220]}")
 
@@ -481,7 +678,7 @@ class OpenAIRealtimeClient:
                             "type": "response.create",
                             "response": {
                                 "modalities": ["text"],
-                                "max_output_tokens": 160,
+                                "max_output_tokens": 120,
                                 "metadata": {"request_id": request_id},
                             },
                         }
@@ -744,7 +941,7 @@ def _request_gemini_decision(
         ],
         "generationConfig": {
             "temperature": 0.2,
-            "maxOutputTokens": 512,
+            "maxOutputTokens": 192,
             "responseMimeType": "application/json",
             "responseSchema": {
                 "type": "OBJECT",
@@ -872,6 +1069,16 @@ def _coerce_config_value(raw_value: object, caster, default):
         return default
 
 
+def _build_debug_prompt_text(system_prompt: str, user_prompt: str) -> Optional[str]:
+    try:
+        cfg = get_trading_config()
+    except Exception:
+        return None
+    if not getattr(cfg, "debug", False):
+        return None
+    return f"SYSTEM PROMPT:\n{system_prompt}\n\nUSER PROMPT:\n{user_prompt}"
+
+
 def test_llm_connection() -> tuple[bool, str]:
     cfg = get_llm_config()
     system_prompt = (
@@ -929,9 +1136,7 @@ def test_llm_connection() -> tuple[bool, str]:
 
 def decide_trade(features: BtcFeatures, market: BtcUpDownMarket, up_snapshot=None, down_snapshot=None) -> LlmDecision:
     cfg = get_llm_config()
-    system_prompt = _build_system_prompt()
-    user_prompt = _build_user_prompt(features, market, up_snapshot=up_snapshot, down_snapshot=down_snapshot)
-    compact_user_prompt = _build_compact_user_prompt(features, market, up_snapshot=up_snapshot, down_snapshot=down_snapshot)
+    system_prompt = _build_openai_realtime_system_prompt()
     minimal_user_prompt = _build_minimal_user_prompt(features, market, up_snapshot=up_snapshot, down_snapshot=down_snapshot)
     openai_system_prompt = _build_openai_realtime_system_prompt()
     openai_user_prompt = _build_openai_realtime_user_prompt(
@@ -955,6 +1160,11 @@ def decide_trade(features: BtcFeatures, market: BtcUpDownMarket, up_snapshot=Non
         1,
     )
     api_connection_retry_timer_seconds = max(api_connection_retry_timer_seconds, 0.0)
+    debug_prompt_text = (
+        _build_debug_prompt_text(openai_system_prompt, openai_user_prompt)
+        if cfg.engine == "openai"
+        else _build_debug_prompt_text(system_prompt, minimal_user_prompt)
+    )
 
     try:
         if cfg.engine == "openai":
@@ -974,7 +1184,7 @@ def decide_trade(features: BtcFeatures, market: BtcUpDownMarket, up_snapshot=Non
                 model=cfg.model,
                 api_key=cfg.api_key,
                 system_prompt=system_prompt,
-                user_prompt=user_prompt,
+                user_prompt=minimal_user_prompt,
                 timeout_seconds=api_connection_timeout_seconds,
                 retry_attempts=api_connection_retry_attempts,
                 retry_timer_seconds=api_connection_retry_timer_seconds,
@@ -987,6 +1197,7 @@ def decide_trade(features: BtcFeatures, market: BtcUpDownMarket, up_snapshot=Non
             confidence=0.0,
             max_price_to_pay=0.0,
             reason=f"LLM request failed ({cfg.engine}/{cfg.model}): {str(exc)[:220]}",
+            prompt_text=debug_prompt_text,
         )
 
     side = str(data.get("decision", "NO_TRADE")).upper()
@@ -1010,4 +1221,5 @@ def decide_trade(features: BtcFeatures, market: BtcUpDownMarket, up_snapshot=Non
         confidence=confidence,
         max_price_to_pay=max_price_to_pay,
         reason=reason,
+        prompt_text=debug_prompt_text,
     )
