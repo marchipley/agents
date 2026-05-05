@@ -32,3 +32,4 @@ local_db*
 data_files/current_period.json
 /logs
 /logs
+/chrome_extension
