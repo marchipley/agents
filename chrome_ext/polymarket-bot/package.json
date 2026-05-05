@@ -1,21 +1,19 @@
 {
   "private": true,
   "name": "polymarket-bot",
-  "description": "JavaScript-based extension with a sidebar panel. Adds a sidebar with a simple page.",
+  "description": "Personal-use Polymarket Chrome extension for BTC agent monitoring and future LLM-assisted trade execution.",
   "version": "3.0.0",
   "license": "MIT",
   "type": "module",
   "author": {
-    "name": "Your Name",
-    "email": "your@email.com",
-    "url": "https://yourwebsite.com"
+    "name": "Personal Use"
   },
   "scripts": {
     "dev": "extension dev",
     "start": "extension start",
-    "build": "extension build",
+    "build": "extension build && node tools/copy-build.mjs",
     "preview": "extension preview",
-    "build:chrome": "extension build --browser chrome",
+    "build:chrome": "extension build --browser chrome && node tools/copy-build.mjs",
     "build:firefox": "extension build --browser firefox",
     "build:edge": "extension build --browser edge"
   },

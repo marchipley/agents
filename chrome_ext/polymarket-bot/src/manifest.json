@@ -3,8 +3,8 @@
   "chromium:manifest_version": 3,
   "firefox:manifest_version": 2,
   "version": "1.0.0",
-  "name": "polymarket-bot",
-  "description": "JavaScript-based extension with a sidebar panel. Adds a sidebar with a simple page.",
+  "name": "Polymarket BTC Agent",
+  "description": "Personal-use Polymarket assistant with an in-page output panel and configurable agent settings.",
   "icons": {
     "16": "images/icon.png",
     "32": "images/icon.png",
@@ -20,7 +20,7 @@
       "64": "images/icon.png",
       "128": "images/icon.png"
     },
-    "default_title": "Open Side Panel"
+    "default_title": "Polymarket BTC Agent"
   },
   "firefox:browser_action": {
     "default_icon": {
@@ -30,18 +30,16 @@
       "64": "images/icon.png",
       "128": "images/icon.png"
     },
-    "default_title": "Open Side Panel"
-  },
-  "chromium:side_panel": {
-    "default_path": "sidebar/index.html",
-    "default_title": "Side Panel Content"
+    "default_title": "Polymarket BTC Agent"
   },
   "firefox:sidebar_action": {
     "default_panel": "sidebar/index.html",
-    "default_title": "Side Panel Content"
+    "default_title": "Polymarket BTC Agent"
   },
   "chromium:permissions": [
-    "sidePanel"
+    "sidePanel",
+    "activeTab",
+    "tabs"
   ],
   "background": {
     "chromium:service_worker": "background.js",
@@ -52,12 +50,13 @@
   "content_scripts": [
     {
       "matches": [
-        "<all_urls>"
+        "https://polymarket.com/*",
+        "https://www.polymarket.com/*"
       ],
       "js": [
         "content/scripts.js"
       ]
     }
   ],
-  "author": "Your Name"
+  "author": "Personal Use"
 }

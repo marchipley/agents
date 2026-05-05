@@ -1,25 +1,36 @@
 import createContentApp from './ContentApp.js'
 import './styles.css'
+import {isAllowedHost} from '../shared/config.js'
 
 export default function initial() {
+  if (!isAllowedHost()) {
+    return () => {}
+  }
+
+  const existingRoot = document.querySelector('[data-extension-root="true"]')
+  if (existingRoot) {
+    return () => {}
+  }
+
   const rootDiv = document.createElement('div')
   rootDiv.setAttribute('data-extension-root', 'true')
   document.body.appendChild(rootDiv)
 
-  // Injecting content_scripts inside a shadow dom
-  // prevents conflicts with the host page's styles.
-  // This way, styles from the extension won't leak into the host page.
   const shadowRoot = rootDiv.attachShadow({mode: 'open'})
-
   const styleElement = document.createElement('style')
   shadowRoot.appendChild(styleElement)
-  fetchCSS().then((response) => (styleElement.textContent = response))
 
-  // Render ContentApp inside shadow root
+  fetchCSS().then((response) => {
+    styleElement.textContent = response
+  })
+
   const container = createContentApp()
   shadowRoot.appendChild(container)
 
   return () => {
+    if (typeof container.cleanup === 'function') {
+      container.cleanup()
+    }
     rootDiv.remove()
   }
 }
