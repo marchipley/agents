@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json.schemastore.org/chrome-manifest.json",
+  "chromium:manifest_version": 3,
+  "firefox:manifest_version": 2,
+  "version": "1.0.0",
+  "name": "Polymarket BTC Agent",
+  "description": "Personal-use Polymarket assistant with an in-page output panel and configurable agent settings.",
+  "icons": {
+    "16": "images/icon.png",
+    "32": "images/icon.png",
+    "48": "images/icon.png",
+    "64": "images/icon.png",
+    "128": "images/icon.png"
+  },
+  "chromium:action": {
+    "default_icon": {
+      "16": "images/icon.png",
+      "32": "images/icon.png",
+      "48": "images/icon.png",
+      "64": "images/icon.png",
+      "128": "images/icon.png"
+    },
+    "default_title": "Polymarket BTC Agent"
+  },
+  "firefox:browser_action": {
+    "default_icon": {
+      "16": "images/icon.png",
+      "32": "images/icon.png",
+      "48": "images/icon.png",
+      "64": "images/icon.png",
+      "128": "images/icon.png"
+    },
+    "default_title": "Polymarket BTC Agent"
+  },
+  "firefox:sidebar_action": {
+    "default_panel": "sidebar/index.html",
+    "default_title": "Polymarket BTC Agent"
+  },
+  "chromium:permissions": [
+    "sidePanel",
+    "activeTab",
+    "tabs"
+  ],
+  "background": {
+    "chromium:service_worker": "background.js",
+    "firefox:scripts": [
+      "background.js"
+    ]
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://polymarket.com/*",
+        "https://www.polymarket.com/*"
+      ],
+      "js": [
+        "content/scripts.js"
+      ]
+    }
+  ],
+  "author": "Personal Use"
+}
