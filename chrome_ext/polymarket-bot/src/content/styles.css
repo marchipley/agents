@@ -58,6 +58,39 @@
   font-size: 11px;
 }
 
+.pm_agent_panel_controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0 16px 12px;
+  padding: 10px 12px;
+  border: 1px solid rgba(123, 224, 255, 0.12);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.pm_agent_panel_controls_label {
+  color: rgba(232, 246, 255, 0.82);
+  font-size: 12px;
+}
+
+.pm_agent_panel_toggle {
+  appearance: none;
+  border: 1px solid rgba(123, 224, 255, 0.2);
+  background: rgba(255, 255, 255, 0.06);
+  color: #e8f6ff;
+  padding: 6px 10px;
+  border-radius: 9999px;
+  cursor: pointer;
+  font: inherit;
+  line-height: 1;
+}
+
+.pm_agent_panel_toggle:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+
 .pm_agent_panel_snapshot {
   margin: 0 16px 12px;
   padding: 12px 14px;

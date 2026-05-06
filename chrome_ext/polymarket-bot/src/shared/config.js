@@ -6,7 +6,8 @@ export const extensionConfig = {
     snapshotIntervalMs: 5000,
     maxSnapshots: 25,
     panelTitle: 'Polymarket BTC Agent',
-    autoNavigateToLiveSlug: true
+    autoNavigateToLiveSlug: true,
+    snapshotsEnabledByDefault: true
   },
   llm: {
     provider: 'OPENAI',

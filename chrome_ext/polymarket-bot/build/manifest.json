@@ -19,8 +19,7 @@
         "https://www.polymarket.com/*"
       ],
       "js": [
-        "content_scripts/content-0.js",
-        "content_scripts/refresh-toggle.js"
+        "content_scripts/content-0.js"
       ],
       "css": []
     }

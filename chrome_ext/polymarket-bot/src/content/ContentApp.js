@@ -6,6 +6,8 @@ import {
 } from './domData.js'
 import {buildSlugSnapshot} from './slug.js'
 
+const AUTO_REFRESH_STORAGE_KEY = 'pm-agent-auto-refresh-enabled'
+
 export default function createContentApp() {
   const container = document.createElement('section')
   container.className = 'pm_agent_panel'
@@ -29,6 +31,18 @@ export default function createContentApp() {
   meta.className = 'pm_agent_panel_meta'
   meta.textContent = `Interval ${extensionConfig.runtime.snapshotIntervalMs}ms`
 
+  const controls = document.createElement('div')
+  controls.className = 'pm_agent_panel_controls'
+
+  const controlsLabel = document.createElement('span')
+  controlsLabel.className = 'pm_agent_panel_controls_label'
+  controlsLabel.textContent = 'Auto-refresh'
+
+  const refreshToggle = document.createElement('button')
+  refreshToggle.type = 'button'
+  refreshToggle.className = 'pm_agent_panel_toggle'
+  refreshToggle.setAttribute('aria-label', 'Toggle auto-refresh')
+
   const snapshotOutput = document.createElement('pre')
   snapshotOutput.className = 'pm_agent_panel_snapshot'
 
@@ -39,8 +53,9 @@ export default function createContentApp() {
   const logList = document.createElement('div')
   logList.className = 'pm_agent_panel_log'
 
+  controls.append(controlsLabel, refreshToggle)
   header.append(title, closeButton)
-  container.append(header, meta, snapshotOutput, logHeading, logList)
+  container.append(header, meta, controls, snapshotOutput, logHeading, logList)
 
   const snapshots = []
   const marketCache = new Map()
@@ -49,6 +64,7 @@ export default function createContentApp() {
   let isClosed = false
   let dragState = null
   let lastNavigationPath = null
+  let autoRefreshEnabled = readAutoRefreshSetting()
 
   const formatSnapshotText = (snapshot) => {
     const periodOpenPriceToBeat = snapshot.periodOpenPriceToBeat || 'pending'
@@ -74,7 +90,8 @@ export default function createContentApp() {
       snapshotOutput.textContent = formatSnapshotText(latestSnapshot)
       meta.textContent =
         `Interval ${extensionConfig.runtime.snapshotIntervalMs}ms` +
-        ` | Next period in ${latestSnapshot.secondsUntilNextPeriod}s`
+        ` | Next period in ${latestSnapshot.secondsUntilNextPeriod}s` +
+        (autoRefreshEnabled ? '' : ' | Refresh paused')
     }
 
     logList.replaceChildren(
@@ -86,6 +103,17 @@ export default function createContentApp() {
         return item
       })
     )
+  }
+
+  const renderPausedMeta = (snapshot) => {
+    meta.textContent =
+      `Interval ${extensionConfig.runtime.snapshotIntervalMs}ms` +
+      ` | Next period in ${snapshot.secondsUntilNextPeriod}s | Refresh paused`
+  }
+
+  const updateRefreshToggle = () => {
+    refreshToggle.textContent = autoRefreshEnabled ? 'On' : 'Off'
+    refreshToggle.setAttribute('aria-pressed', String(autoRefreshEnabled))
   }
 
   const navigateToLiveMarketIfNeeded = (snapshot) => {
@@ -136,6 +164,11 @@ export default function createContentApp() {
     if (snapshot.pathname !== activePathname) {
       activePathname = snapshot.pathname
       snapshots.length = 0
+    }
+
+    if (!autoRefreshEnabled) {
+      renderPausedMeta(snapshot)
+      return
     }
 
     snapshot = hydrateMarketSnapshot(snapshot)
@@ -199,7 +232,19 @@ export default function createContentApp() {
   })
 
   closeButton.addEventListener('click', closePanel)
+  refreshToggle.addEventListener('click', () => {
+    autoRefreshEnabled = !autoRefreshEnabled
+    writeAutoRefreshSetting(autoRefreshEnabled)
+    updateRefreshToggle()
 
+    if (autoRefreshEnabled) {
+      captureSnapshot()
+    } else {
+      renderPausedMeta(buildSlugSnapshot())
+    }
+  })
+
+  updateRefreshToggle()
   captureSnapshot()
   intervalId = window.setInterval(
     captureSnapshot,
@@ -212,4 +257,23 @@ export default function createContentApp() {
   }
 
   return container
+}
+
+function readAutoRefreshSetting() {
+  try {
+    const stored = window.localStorage.getItem(AUTO_REFRESH_STORAGE_KEY)
+    if (stored === 'true') return true
+    if (stored === 'false') return false
+  } catch (error) {}
+
+  return extensionConfig.runtime.snapshotsEnabledByDefault
+}
+
+function writeAutoRefreshSetting(enabled) {
+  try {
+    window.localStorage.setItem(
+      AUTO_REFRESH_STORAGE_KEY,
+      enabled ? 'true' : 'false'
+    )
+  } catch (error) {}
 }
