@@ -171,6 +171,8 @@ class TestBtcMain(unittest.TestCase):
             side="UP",
             confidence=0.8,
             max_price_to_pay=1.0,
+            prompt_text="SYSTEM PROMPT:\nfoo\n\nUSER PROMPT:\nbar",
+            raw_response_text='{"decision":"UP","confidence":0.8,"max_price_to_pay":1.0,"reason":"test"}',
         )
         result = SimpleNamespace(
             executed=False,
@@ -206,6 +208,16 @@ class TestBtcMain(unittest.TestCase):
         self.assertIn("attempt_class=paper_validation_rejection", content)
         self.assertIn("paper_trading=True", content)
         self.assertIn("order_submission_attempted=false", content)
+        self.assertIn("min_confidence=", content)
+        self.assertIn("veto_threshold_delta=", content)
+        self.assertIn("llm_raw_reasoning=", content)
+        self.assertIn("market_impact_ratio=", content)
+        self.assertIn("llm_prompt_start", content)
+        self.assertIn("SYSTEM PROMPT:", content)
+        self.assertIn("llm_prompt_end", content)
+        self.assertIn("llm_raw_response_start", content)
+        self.assertIn('"decision":"UP"', content)
+        self.assertIn("llm_raw_response_end", content)
         self.assertIn("quoted_price_at_entry=0.610", content)
         self.assertIn("book_depth_at_fill=4.500", content)
         self.assertIn("shares_requested=3.000", content)
@@ -307,6 +319,8 @@ class TestBtcMain(unittest.TestCase):
             order_latency_ms=342,
             book_depth_at_fill=12.5,
             shares_requested=5.0,
+            llm_prompt_text="SYSTEM PROMPT:\nfoo\n\nUSER PROMPT:\nbar",
+            llm_raw_response_text='{"decision":"UP","confidence":0.8,"max_price_to_pay":1.0,"reason":"test"}',
         )
 
         with patch(
@@ -334,6 +348,12 @@ class TestBtcMain(unittest.TestCase):
         self.assertIn("order_latency_ms=342", content)
         self.assertIn("book_depth_at_fill=12.500", content)
         self.assertIn("shares_requested=5.000", content)
+        self.assertIn("llm_prompt_start", content)
+        self.assertIn("SYSTEM PROMPT:", content)
+        self.assertIn("llm_prompt_end", content)
+        self.assertIn("llm_raw_response_start", content)
+        self.assertIn('"decision":"UP"', content)
+        self.assertIn("llm_raw_response_end", content)
 
     def test_append_pending_period_tick_analysis_writes_llm_prompt_when_present(self):
         market = SimpleNamespace(
@@ -588,7 +608,11 @@ class TestBtcMain(unittest.TestCase):
         self.assertIn("up_buy_quote=0.450", content)
         self.assertIn("down_submit_reason=blocked", content)
         self.assertIn("decision_side=UP", content)
+        self.assertIn("min_confidence=", content)
+        self.assertIn("veto_threshold_delta=", content)
+        self.assertIn("llm_raw_reasoning=", content)
         self.assertIn("velocity_15s=3.0", content)
+        self.assertIn("momentum_alignment=", content)
         self.assertIn("consecutive_flat_ticks=0", content)
         self.assertIn("last_10_ticks_direction=", content)
         self.assertIn("market_time_remaining_mmss=", content)

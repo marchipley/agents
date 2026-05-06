@@ -914,22 +914,28 @@ def get_effective_decision_confidence(
     features: Optional[BtcFeatures] = None,
 ) -> float:
     confidence = float(getattr(decision, "confidence", 0.0) or 0.0)
-    strike_delta_pct = _get_strike_delta_pct(features, market)
+    gap_to_target_usd = None
+    if (
+        features is not None
+        and getattr(features, "price_usd", None) is not None
+        and market.settlement_threshold not in (None, 0)
+    ):
+        gap_to_target_usd = float(features.price_usd) - float(market.settlement_threshold)
     up_probability = getattr(market, "up_market_probability", None)
     down_probability = getattr(market, "down_market_probability", None)
 
     if (
         decision.side == "UP"
-        and strike_delta_pct is not None
-        and strike_delta_pct > 0.0002
+        and gap_to_target_usd is not None
+        and gap_to_target_usd > 20.0
         and up_probability is not None
         and float(up_probability) > 0.60
     ):
         confidence = min(confidence + 0.10, 1.0)
     elif (
         decision.side == "DOWN"
-        and strike_delta_pct is not None
-        and strike_delta_pct < -0.0002
+        and gap_to_target_usd is not None
+        and gap_to_target_usd < -20.0
         and down_probability is not None
         and float(down_probability) > 0.60
     ):
@@ -950,7 +956,7 @@ def get_effective_min_confidence(
 
     if time_remaining_seconds < 60:
         return max(base_confidence, 0.75)
-    if adx_14 is not None and adx_14 > 35:
+    if time_remaining_seconds > 120 and adx_14 is not None and adx_14 > 30:
         return min(base_confidence, 0.62)
     return base_confidence
 
@@ -1105,19 +1111,6 @@ def _validate_trade_candidate(
             (
                 "RSI directional veto blocked UP trade in overbought conditions "
                 f"(rsi_9={rsi_9:.3f})"
-            ),
-        )
-
-    if (
-        chosen_side_market_win_chance is not None
-        and chosen_side_market_win_chance < 0.10
-        and time_remaining_seconds > 180
-    ):
-        return _reject(
-            submission_limit_price,
-            (
-                "Discovery-phase quote-floor veto blocked extremely low-probability trade "
-                f"(market_win_chance={chosen_side_market_win_chance:.3f}; time_remaining={time_remaining_seconds}s)"
             ),
         )
 

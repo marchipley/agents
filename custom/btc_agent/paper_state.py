@@ -22,6 +22,8 @@ class ActivePaperOrder:
     order_latency_ms: Optional[int] = None
     book_depth_at_fill: Optional[float] = None
     shares_requested: Optional[float] = None
+    llm_prompt_text: Optional[str] = None
+    llm_raw_response_text: Optional[str] = None
     trade_number_in_period: int = 1
     target_is_approximate: bool = False
     placed_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))

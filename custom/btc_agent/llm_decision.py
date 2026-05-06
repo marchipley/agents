@@ -87,6 +87,25 @@ def _compute_implied_oracle_price(
     )
 
 
+def _momentum_alignment_text(features: BtcFeatures) -> str:
+    values = [
+        getattr(features, "velocity_15s", None),
+        getattr(features, "velocity_30s", None),
+        getattr(features, "momentum_1m", None),
+    ]
+    if any(value is None for value in values):
+        return "None"
+    signs = []
+    for value in values:
+        if value > 0:
+            signs.append(1)
+        elif value < 0:
+            signs.append(-1)
+        else:
+            return "False"
+    return "True" if signs[0] == signs[1] == signs[2] else "False"
+
+
 def _build_system_prompt() -> str:
     return (
         "You are an automated trading decision assistant for a 5-minute Bitcoin "
@@ -105,7 +124,7 @@ def _build_system_prompt() -> str:
         "Interpret confidence as the mathematical probability that your chosen side wins.\n"
         "time_remaining_seconds is authoritative. Do not infer time from any other number.\n"
         "Final 10 seconds means time_remaining_seconds < 15.\n"
-        "If time_remaining_seconds > 240, you are in the Discovery Phase. Avoid high-confidence trades unless trend intensity is extreme.\n"
+        "If time_remaining_seconds > 240, you are in the Discovery Phase. If ADX < 20, stay cautious. If ADX > 30, prioritize the trend over the time elapsed.\n"
         "Use DISTANCE_FROM_STRIKE_PCT to determine whether UP or DOWN is currently winning versus the price to beat. A positive value means BTC is above the strike; a negative value means BTC is below the strike.\n"
         "Do not confuse DISTANCE_FROM_STRIKE_USD or DISTANCE_FROM_STRIKE_PCT with MARKET_WIN_CHANCE_UP / MARKET_WIN_CHANCE_DOWN. Distance fields are price gaps; market win chance fields are market-implied probabilities.\n"
         "Treat Window Delta as a recent-drift confidence signal only in the final 10 seconds.\n"
@@ -115,7 +134,9 @@ def _build_system_prompt() -> str:
         "If Window Delta is above 0.15% near T-10, confidence should usually be 0.95 or higher.\n"
         "If confidence is above 0.90, treat it as a directive to get in rather than demanding extra edge buffer.\n"
         "If time remaining is under 5 seconds and confidence is above 0.70, avoid NO_TRADE unless the signal is clearly invalid.\n"
-        "Respect market consensus. If the chosen side market win chance is below 0.10 and time_remaining_seconds is greater than 180, prefer NO_TRADE. If the chosen side market win chance is below 0.15 and 15 <= time_remaining_seconds < 120, prefer NO_TRADE. Under 15 seconds, only fade consensus on a clear reversal.\n"
+        "Respect market consensus. If the chosen side market win chance is below 0.15 and 15 <= time_remaining_seconds < 120, prefer NO_TRADE. Under 15 seconds, only fade consensus on a clear reversal.\n"
+        "If momentum_alignment is TRUE, clarity is HIGH and you are encouraged to trade with the trend.\n"
+        "If DISTANCE_FROM_STRIKE_USD is greater than 20 for UP or less than -20 for DOWN, and chosen MARKET_WIN_CHANCE is above 0.60, you may raise confidence by 0.10.\n"
         "If DISTANCE_FROM_STRIKE_PCT is positive and you choose DOWN, confidence must be below 0.50 unless trend exhaustion is clear. If DISTANCE_FROM_STRIKE_PCT is negative and you choose UP, confidence must be below 0.50 unless trend exhaustion is clear.\n"
         "`max_price_to_pay` is informational only and is not used by execution.\n"
         "For directional trades, set `max_price_to_pay` to 1.0 unless you have a strong reason not to.\n"
@@ -130,9 +151,10 @@ def _build_openai_realtime_system_prompt() -> str:
         "Use DISTANCE_FROM_STRIKE_USD and DISTANCE_FROM_STRIKE_PCT as the settlement baseline: positive means above strike, negative means below strike. "
         "Use MARKET_WIN_CHANCE_UP and MARKET_WIN_CHANCE_DOWN as crowd consensus and velocity_30s only for entry timing, not side selection. "
         "Do not confuse strike-distance fields with market-win-chance fields. "
-        "If time_remaining_seconds>240, avoid high-confidence trades unless trend is extreme. "
-        "If chosen market win chance<0.10 and time_remaining_seconds>180, prefer NO_TRADE. "
+        "If time_remaining_seconds>240 and adx<20, stay cautious; if adx>30, prioritize the trend over elapsed time. "
         "If chosen market win chance<0.15 and 15<=time_remaining_seconds<120, prefer NO_TRADE. "
+        "If momentum_alignment is TRUE, clarity is HIGH and you are encouraged to trade with the trend. "
+        "If DISTANCE_FROM_STRIKE_USD is beyond +/-20 in the chosen direction and chosen market win chance>0.60, you may raise confidence by 0.10. "
         "If reqv>vol5m/10, prefer NO_TRADE. "
         "If confidence differs from market implied probability by more than 0.50, prefer NO_TRADE. "
         "If rsi9<30, do not choose DOWN. If rsi9>70, do not choose UP. "
@@ -211,6 +233,7 @@ def _build_user_prompt(features: BtcFeatures, market: BtcUpDownMarket, up_snapsh
         f"- EMA cross direction: {features.ema_cross_direction}\n"
         f"- ADX(14): {features.adx_14}\n"
         f"- Trend intensity (ADX): {trend_intensity}\n"
+        f"- Momentum alignment: {_momentum_alignment_text(features)}\n"
         f"- ATR(14): {features.atr_14}\n"
         f"- Oracle gap ratio: {oracle_gap_ratio}\n"
         f"- Trailing 5-minute volatility: {features.volatility_5m}\n"
@@ -221,7 +244,7 @@ def _build_user_prompt(features: BtcFeatures, market: BtcUpDownMarket, up_snapsh
         "- Focus on regime detection and direction, not limit pricing.\n"
         "- Confidence should represent your estimated win probability for the chosen side.\n"
         "- time_remaining_seconds is authoritative. Final 10 seconds means time_remaining_seconds < 15.\n"
-        "- If time_remaining_seconds > 240, you are in the Discovery Phase. Avoid high-confidence trades unless trend intensity is extreme.\n"
+        "- If time_remaining_seconds > 240, you are in the Discovery Phase. If ADX < 20, stay cautious. If ADX > 30, prioritize the trend over time elapsed.\n"
         "- DISTANCE_FROM_STRIKE_PCT is the source of truth for whether UP or DOWN is currently winning against the price to beat.\n"
         "- A positive DISTANCE_FROM_STRIKE_PCT means BTC is above the strike and UP is currently winning. A negative DISTANCE_FROM_STRIKE_PCT means BTC is below the strike and DOWN is currently winning.\n"
         "- Use the drift-adjusted Effective BTC price as the true current price when reasoning about distance to the strike.\n"
@@ -230,8 +253,9 @@ def _build_user_prompt(features: BtcFeatures, market: BtcUpDownMarket, up_snapsh
         "- velocity_30s is micro-momentum for entry timing only; do not use velocity_30s alone to choose UP or DOWN.\n"
         "- Treat order-book imbalance and imbalance pressure as leading indicators.\n"
         "- Do not fade PARABOLIC_UP or PARABOLIC_DOWN regimes just because RSI is extreme.\n"
-        "- If the chosen side MARKET_WIN_CHANCE is below 0.10 and time_remaining_seconds is greater than 180, prefer NO_TRADE.\n"
         "- If the chosen side MARKET_WIN_CHANCE is below 0.15 and 15 <= time_remaining_seconds < 120, prefer NO_TRADE.\n"
+        "- If momentum alignment is TRUE, clarity is HIGH and you are encouraged to trade with the trend.\n"
+        "- If DISTANCE_FROM_STRIKE_USD is greater than 20 for UP or less than -20 for DOWN, and chosen MARKET_WIN_CHANCE is above 0.60, you may raise confidence by 0.10.\n"
         "- Under 15 seconds, only bet against a sub-0.15 side quote when velocity_30s and momentum_acceleration show a clear reversal. Apply this symmetrically for UP and DOWN.\n"
         "- If time_remaining_seconds is greater than 60 and abs(gap_to_target_usd) is less than 0.2 * volatility_5m, the market is too close to call and you should prefer NO_TRADE.\n"
         "- If you want UP while the UP buy quote is below 0.45, prefer NO_TRADE because the market is not confirming the breakout.\n"
@@ -319,21 +343,23 @@ def _build_compact_user_prompt(features: BtcFeatures, market: BtcUpDownMarket, u
         f"EMA cross: {features.ema_cross_direction}\n"
         f"ADX14: {features.adx_14}\n"
         f"Trend intensity: {features.adx_14}\n"
+        f"Momentum alignment: {_momentum_alignment_text(features)}\n"
         f"ATR14: {features.atr_14}\n"
         f"Oracle gap ratio: {oracle_gap_ratio}\n"
         f"Trailing 5-minute volatility: {features.volatility_5m}\n"
         f"Directional ticks: {features.consecutive_directional_ticks}\n"
         f"Last 10 ticks direction: {features.last_10_ticks_direction}\n"
         "Settlement: UP wins only above the price to beat; DOWN wins only below it.\n"
-        "time_remaining_seconds is authoritative; final 10 seconds means <15, and >240 is Discovery Phase.\n"
+        "time_remaining_seconds is authoritative; final 10 seconds means <15; if ADX < 20 stay cautious in Discovery Phase, if ADX > 30 prioritize trend over elapsed time.\n"
         "DISTANCE_FROM_STRIKE_PCT is the source of truth for whether UP or DOWN is currently winning versus the strike.\n"
         "Use Effective BTC price as the true current price when reasoning about the strike gap.\n"
         "Window Delta only means change from market window open, never DISTANCE_FROM_STRIKE_PCT, DISTANCE_FROM_STRIKE_USD, MARKET_WIN_CHANCE fields, or Oracle gap ratio.\n"
         "velocity_30s is for entry timing only.\n"
         "Do not fade parabolic trend and do not chase if directional ticks are >= 8.\n"
         "Do not confuse DISTANCE_FROM_STRIKE fields with MARKET_WIN_CHANCE fields.\n"
-        "If chosen MARKET_WIN_CHANCE is below 0.10 and time_remaining_seconds is greater than 180, prefer NO_TRADE.\n"
         "If chosen MARKET_WIN_CHANCE is below 0.15 and 15 <= time_remaining_seconds < 120, prefer NO_TRADE.\n"
+        "If momentum alignment is TRUE, clarity is HIGH and you are encouraged to trade with the trend.\n"
+        "If DISTANCE_FROM_STRIKE_USD is greater than 20 for UP or less than -20 for DOWN, and chosen MARKET_WIN_CHANCE is above 0.60, you may raise confidence by 0.10.\n"
         "If time_remaining_seconds > 60 and abs(gap_to_target_usd) < 0.2 * volatility_5m, prefer NO_TRADE.\n"
         "If choosing UP while UP quote < 0.45, prefer NO_TRADE.\n"
         "If RSI(9) > 85 and BTC is already above the strike, do not choose UP unless time_remaining_seconds < 15 and continuation is exceptionally clear.\n"
@@ -390,8 +416,9 @@ def _build_minimal_user_prompt(features: BtcFeatures, market: BtcUpDownMarket, u
         f"vol5m={features.volatility_5m}\n"
         f"reqv={required_velocity_to_win}\n"
         f"dir_ticks={features.consecutive_directional_ticks}\n"
+        f"momentum_alignment={_momentum_alignment_text(features)}\n"
         "UP above beat. DOWN below beat.\n"
-        "t is authoritative; final 10 seconds means t<15; if t>240 you are in Discovery Phase.\n"
+        "t is authoritative; final 10 seconds means t<15; if t>240 and adx14<20 stay cautious, if adx14>30 prioritize trend over elapsed time.\n"
         "DISTANCE_FROM_STRIKE_USD and DISTANCE_FROM_STRIKE_PCT are the settlement baseline; positive means above strike, negative means below strike.\n"
         "MARKET_WIN_CHANCE_UP and MARKET_WIN_CHANCE_DOWN are market-implied probabilities, not price distances.\n"
         "Do not confuse DISTANCE_FROM_STRIKE values with MARKET_WIN_CHANCE values.\n"
@@ -399,8 +426,9 @@ def _build_minimal_user_prompt(features: BtcFeatures, market: BtcUpDownMarket, u
         "Ignore window-open drift. v30 is entry timing only.\n"
         "MARKET_WIN_CHANCE_UP and MARKET_WIN_CHANCE_DOWN come from Gamma. Do not bet against them lightly.\n"
         "No fade of parabolic trend; no chase if dir_ticks>=8; if adx14>35 follow trend; if adx14>45 expect exhaustion; if reqv>(vol5m/10) prefer NO_TRADE.\n"
-        "If chosen side MARKET_WIN_CHANCE <0.10 and t>180, prefer NO_TRADE.\n"
         "If chosen side MARKET_WIN_CHANCE <0.15 and 15<=t<120, prefer NO_TRADE.\n"
+        "If momentum_alignment is TRUE, clarity is HIGH and you are encouraged to trade with the trend.\n"
+        "If DISTANCE_FROM_STRIKE_USD is beyond +/-20 in the chosen direction and chosen MARKET_WIN_CHANCE >0.60, you may raise confidence by 0.10.\n"
         "If t>60 and abs(btc-beat) < 0.2*vol5m, prefer NO_TRADE.\n"
         "If choosing UP and up_ask<0.45, prefer NO_TRADE.\n"
         "If rsi9>85 and btc>beat, do not choose UP unless t<15 and continuation is exceptionally clear.\n"
@@ -459,16 +487,18 @@ def _build_openai_realtime_user_prompt(
         f"v5={features.volatility_5m};"
         f"reqv={required_velocity_to_win};"
         f"dt={features.consecutive_directional_ticks};"
+        f"ma={_momentum_alignment_text(features)};"
         "t_is_authoritative;"
-        "if_t_gt_240_discovery_phase;"
+        "if_t_gt_240_and_adx_lt_20_discovery_caution_if_adx_gt_30_prioritize_trend;"
         "DISTANCE_FROM_STRIKE_fields_are_settlement_baseline_positive_means_above_strike_negative_means_below_strike;"
         "MARKET_WIN_CHANCE_fields_are_market_probabilities_not_price_distance;"
         "do_not_confuse_distance_from_strike_with_market_win_chance;"
         "btc_eff_is_true_current_price_for_strike_gap;"
         "ignore_window_open_drift_v30_is_entry_timing_only;"
         "MARKET_WIN_CHANCE_UP_and_MARKET_WIN_CHANCE_DOWN_are_gamma_market_probabilities;"
-        "if_chosen_market_win_chance_lt_0.10_and_t_gt_180_prefer_no_trade;"
         "if_chosen_market_win_chance_lt_0.15_and_15_lte_t_lt_120_prefer_no_trade;"
+        "if_ma_true_clarity_high_trade_with_trend;"
+        "if_DISTANCE_FROM_STRIKE_USD_beyond_20_in_chosen_direction_and_MARKET_WIN_CHANCE_gt_0.60_may_add_0.10_confidence;"
         "if_reqv_gt_vol5m_div_10_prefer_no_trade;"
         "if_t_gt_60_and_abs_btc_minus_beat_lt_0.2_vol5m_prefer_no_trade;"
         "if_choose_up_and_u_lt_0.45_prefer_no_trade;"

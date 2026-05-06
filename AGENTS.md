@@ -176,9 +176,13 @@ What the BTC agent does today:
 - The LLM prompt now also passes a drift-adjusted effective BTC price, derived from the implied Polymarket oracle price when available, and tells the model to use that effective price instead of the raw feed price when reasoning about strike distance.
 - The LLM prompt uses `velocity_30s` only as a micro-momentum entry-timing signal, which is intended to prevent baseline-confusion reversals where the model mistakes a short dip for being below the strike.
 - The LLM prompt now uses a regime-aware market-win-chance sanity rule instead of the older flat quote veto:
-  - if the chosen side `MARKET_WIN_CHANCE` is below `0.10` and `time_remaining_seconds > 180`, prefer `NO_TRADE`
   - if the chosen side `MARKET_WIN_CHANCE` is below `0.15` and `15 <= time_remaining_seconds < 120`, prefer `NO_TRADE`
   - under the final 15 seconds, only fade that consensus on a clear reversal
+- The LLM prompt now also treats early-window caution as ADX-aware rather than flat:
+  - if `time_remaining_seconds > 240` and `ADX < 20`, stay cautious
+  - if `time_remaining_seconds > 240` and `ADX > 30`, prioritize the trend over elapsed time
+- The LLM prompt now includes `momentum_alignment`, which is `True` when `velocity_15s`, `velocity_30s`, and `momentum_1m` all point the same direction; when it is `True`, the model is encouraged to treat clarity as high and trade with the trend.
+- The LLM prompt now includes an in-the-money confidence boost rule: if `DISTANCE_FROM_STRIKE_USD` is beyond `+20` for `UP` or `-20` for `DOWN` and the chosen `MARKET_WIN_CHANCE` is above `0.60`, the model may raise confidence by `0.10`.
 - The LLM prompt includes a sign-consistency rule: if `DISTANCE_FROM_STRIKE_PCT` is positive and the model chooses `DOWN`, or negative and it chooses `UP`, confidence should stay below `0.50` unless trend exhaustion is genuinely clear.
 - The LLM prompt now also includes an RSI directional sanity rule: if `RSI(9) < 30`, it should not choose `DOWN`; if `RSI(9) > 70`, it should not choose `UP`.
 - The Phase 2.7 prompt layer now also instructs the model to prefer `NO_TRADE` when:
@@ -194,16 +198,15 @@ What the BTC agent does today:
 - Before live BUY submission, the agent quantizes share size to a Polymarket-compatible precision so the quote-side amount stays within the exchange’s 2-decimal maker-amount constraint while still respecting the 4-decimal taker-size limit.
 - Rejects live submissions cleanly when the configured budget cannot satisfy the venue minimum order size instead of silently scaling above the configured budget.
 - Applies a regime-aware execution-side market-win-chance veto before submission, using Gamma probability first and falling back to CLOB quote only if Gamma is unavailable:
-  - if the chosen side `MARKET_WIN_CHANCE < 0.10` and there are more than 180 seconds remaining, the trade is rejected as a discovery-phase low-probability reversal attempt
   - if the chosen side `MARKET_WIN_CHANCE < 0.15` and `15 <= time_remaining_seconds < 120`, the trade is rejected as a low-probability reversal attempt
 - Applies a velocity/volatility sanity veto before submission: if `required_velocity_to_win > volatility_5m / 10`, the trade is rejected as a mathematically implausible late-window move.
 - Applies a Gamma/CLOB consensus-gap veto before submission: if `abs(effective_confidence - market_implied_probability) > 0.50`, the trade is rejected as a hallucinated edge against market consensus.
 - Applies a regime-aware minimum-confidence veto before submission:
   - base floor remains `CONFIDENCE` / `BTC_AGENT_MIN_CONFIDENCE`
-  - in strong-trend regimes with `ADX(14) > 35`, the operational floor is relaxed to `0.62`
+  - in early strong-trend regimes with more than 120 seconds remaining and `ADX(14) > 30`, the operational floor is relaxed to `0.62`
   - in the final 60 seconds, the operational floor is tightened to `0.75`
 - The execution layer now computes an `effective_confidence` before gating:
-  - if the chosen side is already winning against the strike by more than `0.02%`
+  - if the chosen side is already winning against the strike by more than `$20`
   - and Gamma market consensus on that same side is above `60%`
   - the confidence is boosted by `+0.10` before floor / edge / consensus-gap checks
 - Execution timing now also prefers the canonical slug timestamp plus 300 seconds over stale upstream `start_ts` / `end_ts`, so late-window vetoes and FOK logic use the same boundary the logs print in `mm:ss`.
@@ -236,6 +239,11 @@ What the BTC agent does today:
   - `last_10_ticks_direction`
 - Completed-period logs now also preserve `up_market_probability` and `down_market_probability` from the active Gamma market so post-trade analysis can compare the model’s confidence with the market’s implied odds.
 - Pre-order decision logging now also records `effective_confidence`, which is the regime-adjusted operational confidence after the winning-advantage boost and the dynamic minimum-confidence floor are applied.
+- Pre-order and attempt logs now also record:
+  - `min_confidence`
+  - `veto_threshold_delta`
+  - `llm_raw_reasoning`
+  - `market_impact_ratio` when size and top-of-book depth are both known
 - `last_10_ticks_direction` is now a filtered string of meaningful recent `U` / `D` moves only; flat ticks and sub-threshold micro-jitter are omitted so it better reflects genuine short-term direction instead of noisy tape artifacts.
 - On period rollover, the pending period log now uses the next market’s resolved `price_to_beat` even when no trade was executed in the previous period, so no-trade period files also finalize to an `_up_` or `_down_` filename much more consistently.
 - On graceful exit (`q` or `KeyboardInterrupt`), the current slug’s `pending_period_<timestamp>.txt` is finalized into `completed_period_<timestamp>.txt` so pending analysis files are not stranded.
@@ -409,8 +417,9 @@ Current status:
   - regime-aware market-win-chance gating for discovery / mid-window periods
 - Phase 2.82 also changed the operational gating logic:
   - `effective_confidence` now includes a winning-advantage boost when the chosen side is already in the money and the Gamma market agrees
-  - the confidence floor is now regime-aware instead of always flat
-  - the old static quote veto was replaced with a Gamma-first market-win-chance veto tuned for higher order rate earlier in the window
+- the confidence floor is now regime-aware instead of always flat
+- the old static quote veto was replaced with a Gamma-first market-win-chance veto tuned for higher order rate earlier in the window
+- Phase 3.2 refined that further by removing the old discovery-phase `<0.10` veto, relaxing the trend floor to `ADX > 30` during the first 180 seconds, and adding `momentum_alignment` plus `veto_threshold_delta` / `market_impact_ratio` logging for order-rate analysis
 
 Implemented additions:
 

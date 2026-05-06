@@ -346,7 +346,7 @@ class TestBtcExecutor(unittest.TestCase):
             down_market_probability=0.35,
         )
         decision = types.SimpleNamespace(side="UP", confidence=0.66)
-        features = types.SimpleNamespace(price_usd=100.5)
+        features = types.SimpleNamespace(price_usd=121.0)
 
         effective_confidence = get_effective_decision_confidence(
             decision,
@@ -399,7 +399,7 @@ class TestBtcExecutor(unittest.TestCase):
 
         self.assertIsNone(validated_snapshot)
         self.assertIsNotNone(rejection)
-        self.assertIn("Discovery-phase quote-floor veto", rejection.reason)
+        self.assertIn("Consensus-gap veto", rejection.reason)
 
     def test_validate_trade_candidate_allows_high_confidence_trade_with_zero_edge_buffer(self):
         market = types.SimpleNamespace(
@@ -473,11 +473,13 @@ class TestBtcExecutor(unittest.TestCase):
         self.assertIsNotNone(rejection)
         self.assertIn("Quote-floor veto", rejection.reason)
 
-    def test_validate_trade_candidate_rejects_sub_010_quote_in_discovery_phase(self):
+    def test_validate_trade_candidate_allows_sub_010_quote_in_discovery_phase(self):
         market = types.SimpleNamespace(
             slug="btc-updown-5m-1000000000",
             up_token_id="up-token",
             down_token_id="down-token",
+            up_market_probability=0.20,
+            down_market_probability=0.80,
             end_ts=1_000_000_300,
             volume=5000.0,
         )
@@ -508,9 +510,8 @@ class TestBtcExecutor(unittest.TestCase):
             mock_datetime.now.return_value = fake_now
             validated_snapshot, rejection = _validate_trade_candidate(market, decision, snapshot=snapshot)
 
-        self.assertIsNone(validated_snapshot)
-        self.assertIsNotNone(rejection)
-        self.assertIn("Discovery-phase quote-floor veto", rejection.reason)
+        self.assertIs(validated_snapshot, snapshot)
+        self.assertIsNone(rejection)
 
     def test_validate_trade_candidate_allows_sub_015_quote_in_mid_window_band(self):
         market = types.SimpleNamespace(

@@ -348,6 +348,18 @@ def _execution_microstructure_lines(
     ]
 
 
+def _market_impact_ratio(side: Optional[str], snapshot: Optional[TokenQuoteSnapshot], shares_requested) -> Optional[float]:
+    if side not in ("UP", "DOWN") or snapshot is None or shares_requested in (None, 0):
+        return None
+    depth = getattr(snapshot, "best_ask_size", None)
+    if depth in (None, 0):
+        return None
+    try:
+        return float(shares_requested) / float(depth)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
+
+
 def _slug_start_ts(market_slug: str) -> Optional[int]:
     try:
         return int(_extract_slug_timestamp(market_slug))
@@ -406,6 +418,27 @@ def _trend_regime(features, period_open_price_to_beat: Optional[float] = None) -
     if delta_pct < 0:
         return "weak_down"
     return "mixed"
+
+
+def _momentum_alignment(features) -> Optional[bool]:
+    if features is None:
+        return None
+    values = [
+        getattr(features, "velocity_15s", None),
+        getattr(features, "velocity_30s", None),
+        getattr(features, "momentum_1m", None),
+    ]
+    if any(value is None for value in values):
+        return None
+    signs = []
+    for value in values:
+        if value > 0:
+            signs.append(1)
+        elif value < 0:
+            signs.append(-1)
+        else:
+            return False
+    return signs[0] == signs[1] == signs[2]
 
 
 def _liquidity_regime(snapshot: TokenQuoteSnapshot) -> str:
@@ -557,6 +590,7 @@ def _build_regime_fingerprint(
         "next_slug_proximity": time_remaining_seconds,
         "volatility_regime": _volatility_regime(getattr(features, "volatility_5m", None)) if features is not None else "unknown",
         "trend_regime": _trend_regime(features, period_open_price_to_beat=period_open_price_to_beat) if features is not None else "unknown",
+        "momentum_alignment": _momentum_alignment(features),
         "rsi_regime": _rsi_regime(features) if features is not None else "unknown",
         "liquidity_regime": _liquidity_regime(selected_snapshot) if selected_snapshot is not None else "unknown",
         "threshold_gap_usd": None if gap_to_target is None else round(gap_to_target, 4),
@@ -664,6 +698,7 @@ def append_pending_period_tick_analysis(
                     f"velocity_15s={getattr(features, 'velocity_15s', None)}",
                     f"velocity_30s={getattr(features, 'velocity_30s', None)}",
                     f"momentum_acceleration={getattr(features, 'momentum_acceleration', None)}",
+                    f"momentum_alignment={_momentum_alignment(features)}",
                     f"volatility_5m={getattr(features, 'volatility_5m', None)}",
                     f"consecutive_flat_ticks={getattr(features, 'consecutive_flat_ticks', None)}",
                     f"consecutive_directional_ticks={getattr(features, 'consecutive_directional_ticks', None)}",
@@ -700,13 +735,23 @@ def append_pending_period_tick_analysis(
             )
 
         if decision is not None:
+            effective_conf = _effective_confidence(decision, market=market, features=features)
+            min_conf = get_effective_min_confidence(market, features=features)
+            veto_threshold_delta = None
+            try:
+                veto_threshold_delta = float(getattr(decision, "confidence", 0.0) or 0.0) - float(min_conf)
+            except (TypeError, ValueError):
+                veto_threshold_delta = None
             lines.extend(
                 [
                     f"decision_side={decision.side}",
                     f"decision_confidence={decision.confidence:.3f}",
-                    f"effective_confidence={_effective_confidence(decision, market=market, features=features):.3f}",
+                    f"effective_confidence={effective_conf:.3f}",
+                    f"min_confidence={min_conf:.3f}",
+                    f"veto_threshold_delta={_fmt(veto_threshold_delta)}",
                     f"decision_max_price_to_pay={decision.max_price_to_pay:.3f}",
                     f"decision_reason={decision.reason}",
+                    f"llm_raw_reasoning={decision.reason}",
                 ]
             )
             prompt_text = getattr(decision, "prompt_text", None)
@@ -798,6 +843,12 @@ def append_completed_order_tick(
     btc_gap_to_target = current_btc_price - order.target_btc_price
     outcome_label = _classify_outcome_label(status)
     outcome_reason = _position_outcome_reason(order, current_btc_price, status)
+    selected_snapshot = up_snapshot if order.side == "UP" else down_snapshot if order.side == "DOWN" else None
+    market_impact_ratio = _market_impact_ratio(
+        order.side,
+        selected_snapshot,
+        getattr(order, "shares_requested", None),
+    )
     regime_fingerprint = _build_regime_fingerprint(
         market_slug=order.market_slug,
         observed_at=observed_at,
@@ -839,6 +890,7 @@ def append_completed_order_tick(
                     f"target_description={describe_target(order)}",
                     f"outcome_label={outcome_label}",
                     f"outcome_reason={outcome_reason}",
+                    f"market_impact_ratio={_fmt(market_impact_ratio)}",
                     *_execution_microstructure_lines(
                         quoted_price_at_entry=getattr(order, "quoted_price_at_entry", None),
                         actual_fill_price=getattr(order, "actual_fill_price", None),
@@ -851,6 +903,21 @@ def append_completed_order_tick(
                 ]
             )
         )
+        prompt_text = getattr(order, "llm_prompt_text", None)
+        if prompt_text:
+            log_file.write("\n".join(["llm_prompt_start", prompt_text, "llm_prompt_end", ""]))
+        raw_response_text = getattr(order, "llm_raw_response_text", None)
+        if raw_response_text:
+            log_file.write(
+                "\n".join(
+                    [
+                        "llm_raw_response_start",
+                        raw_response_text,
+                        "llm_raw_response_end",
+                        "",
+                    ]
+                )
+            )
         if features is not None:
             log_file.write(
                 "\n".join(
@@ -971,6 +1038,22 @@ def append_failed_order_attempt(
     phase_label = "PAPER_REJECTED_BEFORE_EXECUTION" if paper_trading else "LIVE_ATTEMPT_FAILED"
     attempt_class = "paper_validation_rejection" if paper_trading else "live_submission_failure"
     order_submission_attempted = not paper_trading
+    min_conf = get_effective_min_confidence(market, features=features)
+    veto_threshold_delta = None
+    try:
+        veto_threshold_delta = float(getattr(decision, "confidence", 0.0) or 0.0) - float(min_conf)
+    except (TypeError, ValueError):
+        veto_threshold_delta = None
+    selected_snapshot = (
+        up_snapshot if getattr(decision, "side", None) == "UP"
+        else down_snapshot if getattr(decision, "side", None) == "DOWN"
+        else None
+    )
+    market_impact_ratio = _market_impact_ratio(
+        getattr(decision, "side", None),
+        selected_snapshot,
+        getattr(result, "shares_requested", None),
+    )
     with open(log_path, "a", encoding="utf-8") as log_file:
         if log_file.tell() == 0:
             log_file.write(
@@ -992,11 +1075,16 @@ def append_failed_order_attempt(
             f"period_open_price_to_beat={_fmt(market.settlement_threshold)}",
             f"attempt_side={getattr(decision, 'side', None)}",
             f"attempt_confidence={_fmt(getattr(decision, 'confidence', None))}",
+            f"effective_confidence={_fmt(_effective_confidence(decision, market=market, features=features))}",
+            f"min_confidence={_fmt(min_conf)}",
+            f"veto_threshold_delta={_fmt(veto_threshold_delta)}",
             f"attempt_max_price_to_pay={_fmt(getattr(decision, 'max_price_to_pay', None))}",
+            f"llm_raw_reasoning={getattr(decision, 'reason', '')}",
             f"attempted_price={_fmt(getattr(result, 'price', None))}",
             f"attempted_size={_fmt(getattr(result, 'size', None))}",
             f"attempt_token_id={getattr(result, 'token_id', None)}",
             f"attempt_reason={getattr(result, 'reason', '')}",
+            f"market_impact_ratio={_fmt(market_impact_ratio)}",
             *_execution_microstructure_lines(
                 quoted_price_at_entry=getattr(result, "quoted_price_at_entry", None),
                 actual_fill_price=getattr(result, "actual_fill_price", None),
@@ -1006,6 +1094,24 @@ def append_failed_order_attempt(
                 shares_requested=getattr(result, "shares_requested", None),
             ),
         ]
+        prompt_text = getattr(decision, "prompt_text", None)
+        if prompt_text:
+            lines.extend(
+                [
+                    "llm_prompt_start",
+                    prompt_text,
+                    "llm_prompt_end",
+                ]
+            )
+        raw_response_text = getattr(decision, "raw_response_text", None)
+        if raw_response_text:
+            lines.extend(
+                [
+                    "llm_raw_response_start",
+                    raw_response_text,
+                    "llm_raw_response_end",
+                ]
+            )
         if up_snapshot is not None:
             lines.extend(_snapshot_summary("up", up_snapshot))
         if down_snapshot is not None:
@@ -1020,6 +1126,7 @@ def append_failed_order_attempt(
                     f"velocity_15s={getattr(features, 'velocity_15s', None)}",
                     f"velocity_30s={getattr(features, 'velocity_30s', None)}",
                     f"momentum_acceleration={getattr(features, 'momentum_acceleration', None)}",
+                    f"momentum_alignment={_momentum_alignment(features)}",
                     f"volatility_5m={getattr(features, 'volatility_5m', None)}",
                     f"consecutive_flat_ticks={getattr(features, 'consecutive_flat_ticks', None)}",
                     f"consecutive_directional_ticks={getattr(features, 'consecutive_directional_ticks', None)}",
@@ -1736,6 +1843,8 @@ def run_once() -> None:
             order_latency_ms=getattr(result, "order_latency_ms", None),
             book_depth_at_fill=getattr(result, "book_depth_at_fill", None),
             shares_requested=getattr(result, "shares_requested", None),
+            llm_prompt_text=getattr(decision, "prompt_text", None),
+            llm_raw_response_text=getattr(decision, "raw_response_text", None),
             target_is_approximate=target_is_approximate,
         )
         promote_pending_period_log_to_completed(
