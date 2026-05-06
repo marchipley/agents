@@ -17,6 +17,7 @@ from custom.btc_agent.executor import (
     _get_order_notional,
     _quantize_live_buy_size_for_amount_precision,
     _scale_live_size_for_min_notional,
+    _execute_paper_trade,
     _execute_live_trade,
     _validate_trade_candidate,
     evaluate_ok_to_submit,
@@ -113,6 +114,44 @@ class TestBtcExecutor(unittest.TestCase):
     def test_quantize_live_buy_size_for_amount_precision_rounds_down_to_valid_quantum(self):
         self.assertEqual(_quantize_live_buy_size_for_amount_precision(0.83, 2.4096), 2.0)
         self.assertEqual(_quantize_live_buy_size_for_amount_precision(0.25, 2.4096), 2.4)
+
+    def test_execute_paper_trade_populates_phase3_execution_metrics(self):
+        decision = types.SimpleNamespace(side="UP", confidence=0.8)
+        snapshot = TokenQuoteSnapshot(
+            token_id="up-token",
+            buy_quote=0.50,
+            midpoint=0.51,
+            last_trade_price=0.52,
+            reference_price=0.51,
+            target_limit_price=0.51,
+            recommended_limit_price=0.51,
+            ok_to_submit=True,
+            submit_reason="ok",
+            best_bid=0.50,
+            best_ask=0.51,
+            tick_size=0.01,
+            spread=0.01,
+            best_bid_size=20.0,
+            best_ask_size=12.5,
+        )
+        with patch(
+            "custom.btc_agent.executor.get_trading_config",
+            return_value=types.SimpleNamespace(
+                use_recommended_limit=False,
+                max_order_price_usd=2.0,
+                max_size_high_confidence_threshold=1.1,
+                max_size_high_confidence_shares=0.0,
+            ),
+        ):
+            result = _execute_paper_trade(decision, snapshot, effective_confidence=0.8)
+
+        self.assertTrue(result.executed)
+        self.assertEqual(result.quoted_price_at_entry, 0.50)
+        self.assertEqual(result.actual_fill_price, 0.51)
+        self.assertAlmostEqual(result.realized_slippage_bps, 200.0, places=6)
+        self.assertEqual(result.order_latency_ms, 0)
+        self.assertEqual(result.book_depth_at_fill, 12.5)
+        self.assertEqual(result.shares_requested, result.size)
 
     def test_account_balance_snapshot_uses_pusd_as_cash_balance(self):
         with patch(

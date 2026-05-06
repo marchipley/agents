@@ -215,6 +215,10 @@ What the BTC agent does today:
   - if `RSI(9) > 70`, `UP` is rejected as top-chasing
 - Tracks in-memory active orders for the current 5-minute market window and prints each order’s target BTC level plus whether the position is currently winning, losing, or tied.
 - Writes a per-slug order-tracking file under `completed_orders/` for each executed order, appending one status snapshot per tick plus the pre-order tick history that led into the trade.
+- Writes `completed_order_attempt_<slug_timestamp>.txt` when a directional trade is rejected before execution or live submission fails:
+  - in paper mode, these files represent pre-execution validation rejections and explicitly mark `order_submission_attempted=false`
+  - in live mode, they represent actual submission failures or final live-attempt rejections and explicitly mark `order_submission_attempted=true`
+  - in both modes, the file preserves the exact `attempt_reason` so trade review can see why the bot tried and why it did not execute
 - Finalized executed-order filenames now encode both trade outcome and actual period result direction:
   - `completed_order_win_up_<slug_timestamp>.txt`
   - `completed_order_loss_down_<slug_timestamp>.txt`
@@ -241,6 +245,14 @@ What the BTC agent does today:
 - Enforces `MAX_AUTOMATED_LOSS_TRADES` across the full process session as a completed-loss stop; once that many trades have actually settled as losses, the agent exits.
 - When `BTC_AGENT_DEBUG=false`, suppresses most verbose diagnostics and only prints a compact subset of geolocation, balances, quote snapshots, BTC features, LLM decision fields, and final paper execution fields.
 - When `BTC_AGENT_DEBUG=true`, the agent also prints the exact LLM prompt text to terminal output and writes that same prompt into the pending-period / completed-order logs for post-trade review.
+- Phase 3 execution/microstructure metrics are now captured on executed orders and written into completed-order logs:
+  - `quoted_price_at_entry`
+  - `actual_fill_price`
+  - `realized_slippage_bps`
+  - `order_latency_ms`
+  - `book_depth_at_fill`
+  - `shares_requested`
+- In paper mode, those same Phase 3 metrics are also carried into `completed_order_attempt_*` files for pre-execution rejections when they can be derived from the simulated quote snapshot, so paper-mode analysis can still distinguish signal rejection from thin-book conditions.
 - In non-debug mode, account balances print only on the first loop iteration and again at the start of each new 5-minute market period.
 - Stops the process before live order submission when the account does not have enough `cash_balance_pusd` to cover the configured live trade size at the recommended limit price plus the estimated fee buffer.
 - Stops the process when `cash_balance_pusd` falls below `MINIMUM_WALLET_BALANCE`, so no further execution occurs once the configured wallet floor is breached.
@@ -430,12 +442,19 @@ Goal:
 
 - Improve trade-quality filtering with execution-aware data rather than price-only context.
 
-Planned additions:
+Current status:
 
-- richer order book imbalance metrics
-- realized slippage logging for executed live orders
-- distance between quoted and executed price
-- optional book-depth proxy if a practical low-cost implementation is available
+- Started, first execution-metrics pass implemented.
+- Executed orders now capture and log:
+  - `quoted_price_at_entry`
+  - `actual_fill_price`
+  - `realized_slippage_bps`
+  - `order_latency_ms`
+  - `book_depth_at_fill`
+  - `shares_requested`
+- Paper trades use the chosen submission limit as the simulated fill price and record zero submission latency.
+- Live trades now measure round-trip submit latency around the actual Polymarket order call and attempt to resolve average fill price from the live response first, then from the Polymarket trades endpoint when an order id is available.
+- Completed-order logs now preserve those fields across `PLACED`, `ACTIVE`, and `COMPLETED` lifecycle entries so later analysis can compare prediction quality against execution quality.
 
 Data required:
 
@@ -443,11 +462,15 @@ Data required:
 - execution snapshot
 - final fill price
 - tick-by-tick spread and imbalance history while an order is active
+- quoted vs actual fill delta
+- order-submit round-trip latency
+- top-of-book depth available at the time of the order
 
 Completion criteria:
 
 - Loss analysis can separate bad prediction from bad execution.
 - The logs clearly show whether a loss came from signal quality, spread expansion, or thin liquidity.
+- After enough real trades accumulate, wins/losses can be compared directly against `realized_slippage_bps`, `order_latency_ms`, and `book_depth_at_fill` to decide whether a future depth filter or network-speed mitigation is warranted.
 
 ### Phase 4: Prompt And Decision Structure
 

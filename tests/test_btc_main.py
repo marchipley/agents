@@ -49,6 +49,7 @@ class TestBtcMain(unittest.TestCase):
         "1777513500",
         "1777513800",
         "1777513811",
+        "1777513999",
         "1777675200",
         "1999999997",
         "1999999998",
@@ -178,6 +179,12 @@ class TestBtcMain(unittest.TestCase):
             price=0.62,
             token_id="up-token",
             reason="Quote-floor veto blocked low-probability reversal trade",
+            quoted_price_at_entry=0.61,
+            actual_fill_price=None,
+            realized_slippage_bps=None,
+            order_latency_ms=0,
+            book_depth_at_fill=4.5,
+            shares_requested=3.0,
         )
 
         with patch("custom.btc_agent.main.os.getcwd", return_value="/appl/agents"):
@@ -199,6 +206,9 @@ class TestBtcMain(unittest.TestCase):
         self.assertIn("attempt_class=paper_validation_rejection", content)
         self.assertIn("paper_trading=True", content)
         self.assertIn("order_submission_attempted=false", content)
+        self.assertIn("quoted_price_at_entry=0.610", content)
+        self.assertIn("book_depth_at_fill=4.500", content)
+        self.assertIn("shares_requested=3.000", content)
 
     def test_wait_for_next_tick_or_quit_returns_true_when_q_requested(self):
         quit_monitor = SimpleNamespace(poll_quit_requested=lambda: True)
@@ -288,6 +298,12 @@ class TestBtcMain(unittest.TestCase):
             token_id="up-token",
             target_btc_price=77763.01,
             entry_btc_price=77760.00,
+            quoted_price_at_entry=0.44,
+            actual_fill_price=0.45,
+            realized_slippage_bps=227.27,
+            order_latency_ms=342,
+            book_depth_at_fill=12.5,
+            shares_requested=5.0,
         )
 
         with patch(
@@ -309,6 +325,12 @@ class TestBtcMain(unittest.TestCase):
         self.assertIn("btc_gap_to_target=6.99", content)
         self.assertIn("market_time_remaining_mmss=", content)
         self.assertIn("outcome_label=win", content)
+        self.assertIn("quoted_price_at_entry=0.440", content)
+        self.assertIn("actual_fill_price=0.450", content)
+        self.assertIn("realized_slippage_bps=227.270", content)
+        self.assertIn("order_latency_ms=342", content)
+        self.assertIn("book_depth_at_fill=12.500", content)
+        self.assertIn("shares_requested=5.000", content)
 
     def test_append_pending_period_tick_analysis_writes_llm_prompt_when_present(self):
         market = SimpleNamespace(

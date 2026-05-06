@@ -16,6 +16,12 @@ class ActivePaperOrder:
     token_id: str
     target_btc_price: float
     entry_btc_price: float
+    quoted_price_at_entry: Optional[float] = None
+    actual_fill_price: Optional[float] = None
+    realized_slippage_bps: Optional[float] = None
+    order_latency_ms: Optional[int] = None
+    book_depth_at_fill: Optional[float] = None
+    shares_requested: Optional[float] = None
     trade_number_in_period: int = 1
     target_is_approximate: bool = False
     placed_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))

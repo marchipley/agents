@@ -329,6 +329,25 @@ def _snapshot_summary(prefix: str, snapshot: TokenQuoteSnapshot) -> list[str]:
     ]
 
 
+def _execution_microstructure_lines(
+    *,
+    quoted_price_at_entry=None,
+    actual_fill_price=None,
+    realized_slippage_bps=None,
+    order_latency_ms=None,
+    book_depth_at_fill=None,
+    shares_requested=None,
+) -> list[str]:
+    return [
+        f"quoted_price_at_entry={_fmt(quoted_price_at_entry)}",
+        f"actual_fill_price={_fmt(actual_fill_price)}",
+        f"realized_slippage_bps={_fmt(realized_slippage_bps)}",
+        f"order_latency_ms={_fmt(order_latency_ms)}",
+        f"book_depth_at_fill={_fmt(book_depth_at_fill)}",
+        f"shares_requested={_fmt(shares_requested)}",
+    ]
+
+
 def _slug_start_ts(market_slug: str) -> Optional[int]:
     try:
         return int(_extract_slug_timestamp(market_slug))
@@ -811,6 +830,14 @@ def append_completed_order_tick(
                     f"target_description={describe_target(order)}",
                     f"outcome_label={outcome_label}",
                     f"outcome_reason={outcome_reason}",
+                    *_execution_microstructure_lines(
+                        quoted_price_at_entry=getattr(order, "quoted_price_at_entry", None),
+                        actual_fill_price=getattr(order, "actual_fill_price", None),
+                        realized_slippage_bps=getattr(order, "realized_slippage_bps", None),
+                        order_latency_ms=getattr(order, "order_latency_ms", None),
+                        book_depth_at_fill=getattr(order, "book_depth_at_fill", None),
+                        shares_requested=getattr(order, "shares_requested", None),
+                    ),
                     "",
                 ]
             )
@@ -961,6 +988,14 @@ def append_failed_order_attempt(
             f"attempted_size={_fmt(getattr(result, 'size', None))}",
             f"attempt_token_id={getattr(result, 'token_id', None)}",
             f"attempt_reason={getattr(result, 'reason', '')}",
+            *_execution_microstructure_lines(
+                quoted_price_at_entry=getattr(result, "quoted_price_at_entry", None),
+                actual_fill_price=getattr(result, "actual_fill_price", None),
+                realized_slippage_bps=getattr(result, "realized_slippage_bps", None),
+                order_latency_ms=getattr(result, "order_latency_ms", None),
+                book_depth_at_fill=getattr(result, "book_depth_at_fill", None),
+                shares_requested=getattr(result, "shares_requested", None),
+            ),
         ]
         if up_snapshot is not None:
             lines.extend(_snapshot_summary("up", up_snapshot))
@@ -1683,6 +1718,12 @@ def run_once() -> None:
             token_id=result.token_id,
             target_btc_price=target_btc_price,
             entry_btc_price=features.price_usd,
+            quoted_price_at_entry=getattr(result, "quoted_price_at_entry", None),
+            actual_fill_price=getattr(result, "actual_fill_price", None),
+            realized_slippage_bps=getattr(result, "realized_slippage_bps", None),
+            order_latency_ms=getattr(result, "order_latency_ms", None),
+            book_depth_at_fill=getattr(result, "book_depth_at_fill", None),
+            shares_requested=getattr(result, "shares_requested", None),
             target_is_approximate=target_is_approximate,
         )
         promote_pending_period_log_to_completed(

@@ -3,6 +3,7 @@
 import math
 import requests
 import re
+import time
 from decimal import Decimal, ROUND_DOWN
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -26,6 +27,12 @@ class TradeExecutionResult:
     reason: str
     live_order_response: Optional[Any] = None
     execution_snapshot: Optional["TokenQuoteSnapshot"] = None
+    quoted_price_at_entry: Optional[float] = None
+    actual_fill_price: Optional[float] = None
+    realized_slippage_bps: Optional[float] = None
+    order_latency_ms: Optional[int] = None
+    book_depth_at_fill: Optional[float] = None
+    shares_requested: Optional[float] = None
 
 
 @dataclass
@@ -69,6 +76,15 @@ def _coerce_price(value: Any) -> Optional[float]:
         return float(value)
     except (ValueError, TypeError):
         return None
+
+
+def _fmt_price_debug(value: Optional[float]) -> str:
+    if value is None:
+        return "None"
+    try:
+        return f"{float(value):.3f}"
+    except (TypeError, ValueError):
+        return "None"
 
 
 def _extract_single_price(obj: Dict[str, Any]) -> Optional[float]:
@@ -622,6 +638,176 @@ def _build_rejected_trade_result(
     )
 
 
+def _get_book_depth_at_fill(snapshot: Optional[TokenQuoteSnapshot]) -> Optional[float]:
+    if snapshot is None:
+        return None
+    for value in (
+        getattr(snapshot, "best_ask_size", None),
+        getattr(snapshot, "best_bid_size", None),
+    ):
+        if value is None:
+            continue
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _compute_realized_slippage_bps(
+    quoted_price_at_entry: Optional[float],
+    actual_fill_price: Optional[float],
+) -> Optional[float]:
+    if quoted_price_at_entry in (None, 0) or actual_fill_price is None:
+        return None
+    try:
+        quoted_price = float(quoted_price_at_entry)
+        fill_price = float(actual_fill_price)
+    except (TypeError, ValueError):
+        return None
+    if quoted_price == 0:
+        return None
+    return ((fill_price - quoted_price) / quoted_price) * 10_000
+
+
+def _extract_order_id_from_live_response(response: Any) -> Optional[str]:
+    if response is None:
+        return None
+    if isinstance(response, dict):
+        for key in ("orderID", "orderId", "id"):
+            value = response.get(key)
+            if value:
+                return str(value)
+        for key in ("data", "order", "result"):
+            nested = response.get(key)
+            order_id = _extract_order_id_from_live_response(nested)
+            if order_id:
+                return order_id
+        return None
+    if isinstance(response, (list, tuple)):
+        for item in response:
+            order_id = _extract_order_id_from_live_response(item)
+            if order_id:
+                return order_id
+        return None
+    return None
+
+
+def _extract_average_fill_price_from_live_response(response: Any) -> Optional[float]:
+    if response is None:
+        return None
+    if isinstance(response, dict):
+        for key in (
+            "avgPrice",
+            "averagePrice",
+            "average_price",
+            "avg_fill_price",
+            "avg_fill",
+            "fillPrice",
+            "filledPrice",
+            "price",
+        ):
+            value = _coerce_price(response.get(key))
+            if value is not None:
+                return value
+        for key in ("data", "order", "result"):
+            nested = response.get(key)
+            average_price = _extract_average_fill_price_from_live_response(nested)
+            if average_price is not None:
+                return average_price
+        return None
+    if isinstance(response, (list, tuple)):
+        prices = [
+            _extract_average_fill_price_from_live_response(item)
+            for item in response
+        ]
+        prices = [price for price in prices if price is not None]
+        return prices[0] if prices else None
+    return None
+
+
+def _weighted_average_fill_price(trades: List[Dict[str, Any]]) -> Optional[float]:
+    total_notional = 0.0
+    total_size = 0.0
+    for trade in trades:
+        if not isinstance(trade, dict):
+            continue
+        price = None
+        size = None
+        for key in ("price", "tradePrice", "fillPrice"):
+            price = _coerce_price(trade.get(key))
+            if price is not None:
+                break
+        for key in ("size", "amount", "asset_size", "shares", "filledSize"):
+            size = _coerce_price(trade.get(key))
+            if size is not None:
+                break
+        if price is None or size is None or size <= 0:
+            continue
+        total_notional += price * size
+        total_size += size
+    if total_size <= 0:
+        return None
+    return total_notional / total_size
+
+
+def _fetch_actual_fill_price_from_trades(
+    order_id: str,
+    token_id: Optional[str],
+) -> Optional[float]:
+    cfg = get_polymarket_config()
+    candidate_params = [
+        {"orderID": order_id},
+        {"orderId": order_id},
+        {"order_id": order_id},
+    ]
+    if token_id:
+        candidate_params.extend(
+            [
+                {"maker_order_id": order_id, "asset_id": token_id},
+                {"taker_order_id": order_id, "asset_id": token_id},
+            ]
+        )
+
+    for params in candidate_params:
+        try:
+            resp = http_get(f"{cfg.data_api}/trades", params=params, timeout=10)
+            if resp.status_code == 404:
+                continue
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception:
+            continue
+
+        trades: List[Dict[str, Any]]
+        if isinstance(data, list):
+            trades = [item for item in data if isinstance(item, dict)]
+        elif isinstance(data, dict):
+            if isinstance(data.get("data"), list):
+                trades = [item for item in data["data"] if isinstance(item, dict)]
+            elif isinstance(data.get("trades"), list):
+                trades = [item for item in data["trades"] if isinstance(item, dict)]
+            else:
+                trades = [data]
+        else:
+            trades = []
+
+        average_fill = _weighted_average_fill_price(trades)
+        if average_fill is not None:
+            return average_fill
+    return None
+
+
+def _resolve_actual_fill_price(response: Any, token_id: Optional[str]) -> Optional[float]:
+    average_fill = _extract_average_fill_price_from_live_response(response)
+    if average_fill is not None:
+        return average_fill
+    order_id = _extract_order_id_from_live_response(response)
+    if not order_id:
+        return None
+    return _fetch_actual_fill_price_from_trades(order_id, token_id)
+
+
 def _slug_start_ts(slug: Optional[str]) -> Optional[int]:
     if not slug:
         return None
@@ -1149,6 +1335,13 @@ def _execute_paper_trade(
         cfg,
         submission_limit_price,
     )
+    quoted_price_at_entry = snapshot.buy_quote
+    actual_fill_price = submission_limit_price
+    realized_slippage_bps = _compute_realized_slippage_bps(
+        quoted_price_at_entry,
+        actual_fill_price,
+    )
+    book_depth_at_fill = _get_book_depth_at_fill(snapshot)
     order_notional = _get_order_notional(size, submission_limit_price)
     if size <= 0 or order_notional <= 0:
         return TradeExecutionResult(
@@ -1163,6 +1356,12 @@ def _execute_paper_trade(
             ),
             live_order_response=None,
             execution_snapshot=snapshot,
+            quoted_price_at_entry=quoted_price_at_entry,
+            actual_fill_price=actual_fill_price,
+            realized_slippage_bps=realized_slippage_bps,
+            order_latency_ms=0,
+            book_depth_at_fill=book_depth_at_fill,
+            shares_requested=size,
         )
 
     return TradeExecutionResult(
@@ -1175,12 +1374,22 @@ def _execute_paper_trade(
             f"Paper trade approved at {submission_limit_label} {submission_limit_price:.3f} "
             f"for {size:.4f} shares "
             f"(reference={live_price:.3f}; order_notional={order_notional:.3f}; "
+            f"quoted_price_at_entry={_fmt_price_debug(quoted_price_at_entry)}; "
+            f"actual_fill_price={_fmt_price_debug(actual_fill_price)}; "
+            f"realized_slippage_bps={_fmt_price_debug(realized_slippage_bps)}; "
+            f"book_depth_at_fill={_fmt_price_debug(book_depth_at_fill)}; "
             f"max_order_price_usd={max_order_budget_usd:.3f}; "
             f"high_confidence_size_override={used_high_confidence_override}; "
             f"{snapshot.submit_reason})"
         ),
         live_order_response=None,
         execution_snapshot=snapshot,
+        quoted_price_at_entry=quoted_price_at_entry,
+        actual_fill_price=actual_fill_price,
+        realized_slippage_bps=realized_slippage_bps,
+        order_latency_ms=0,
+        book_depth_at_fill=book_depth_at_fill,
+        shares_requested=size,
     )
 
 
@@ -1334,6 +1543,8 @@ def _execute_live_trade(
         submission_limit_price,
     )
     size = _quantize_live_buy_size_for_amount_precision(submission_limit_price, size)
+    quoted_price_at_entry = snapshot.buy_quote
+    book_depth_at_fill = _get_book_depth_at_fill(snapshot)
     min_order_size = _scale_live_size_for_min_notional(
         0.0,
         submission_limit_price,
@@ -1352,6 +1563,10 @@ def _execute_live_trade(
             ),
             live_order_response=None,
             execution_snapshot=snapshot,
+            quoted_price_at_entry=quoted_price_at_entry,
+            order_latency_ms=0,
+            book_depth_at_fill=book_depth_at_fill,
+            shares_requested=size,
         )
     if size < min_order_size and not used_high_confidence_override:
         return TradeExecutionResult(
@@ -1368,6 +1583,10 @@ def _execute_live_trade(
             ),
             live_order_response=None,
             execution_snapshot=snapshot,
+            quoted_price_at_entry=quoted_price_at_entry,
+            order_latency_ms=0,
+            book_depth_at_fill=book_depth_at_fill,
+            shares_requested=size,
         )
     client = Polymarket()
 
@@ -1380,6 +1599,7 @@ def _execute_live_trade(
             cfg.live_fee_rate_bps,
         )
         ensure_live_trade_cash_available(required_cash_local)
+        submit_started = time.monotonic()
         response_local = client.execute_order(
             price=submission_limit_price,
             size=order_size,
@@ -1389,10 +1609,12 @@ def _execute_live_trade(
             tick_size=snapshot.tick_size,
             use_fok=fok_enabled,
         )
-        return response_local, order_notional_local, estimated_fee_local, required_cash_local
+        latency_ms_local = int(round((time.monotonic() - submit_started) * 1000))
+        return response_local, order_notional_local, estimated_fee_local, required_cash_local, latency_ms_local
 
+    order_latency_ms = 0
     try:
-        response, order_notional, estimated_fee, required_cash = _submit_order(size, use_fok)
+        response, order_notional, estimated_fee, required_cash, order_latency_ms = _submit_order(size, use_fok)
     except Exception as exc:
         minimum_size = _extract_minimum_size_from_error(exc)
         if minimum_size is not None and minimum_size > size:
@@ -1410,11 +1632,15 @@ def _execute_live_trade(
                 ),
                 live_order_response=None,
                 execution_snapshot=snapshot,
+                quoted_price_at_entry=quoted_price_at_entry,
+                order_latency_ms=0,
+                book_depth_at_fill=book_depth_at_fill,
+                shares_requested=size,
             )
         elif use_fok and _is_fok_full_fill_error(exc):
             if time_remaining_seconds > 5:
                 try:
-                    response, order_notional, estimated_fee, required_cash = _submit_order(size, False)
+                    response, order_notional, estimated_fee, required_cash, order_latency_ms = _submit_order(size, False)
                     order_type_label = "GTC (after FOK retry)"
                 except Exception as retry_exc:
                     raise RuntimeError(
@@ -1434,9 +1660,19 @@ def _execute_live_trade(
                     ),
                     live_order_response=None,
                     execution_snapshot=snapshot,
+                    quoted_price_at_entry=quoted_price_at_entry,
+                    order_latency_ms=0,
+                    book_depth_at_fill=book_depth_at_fill,
+                    shares_requested=size,
                 )
         else:
             raise RuntimeError(f"Live order submission failed: {exc}") from exc
+
+    actual_fill_price = _resolve_actual_fill_price(response, snapshot.token_id)
+    realized_slippage_bps = _compute_realized_slippage_bps(
+        quoted_price_at_entry,
+        actual_fill_price,
+    )
 
     return TradeExecutionResult(
         executed=True,
@@ -1452,6 +1688,11 @@ def _execute_live_trade(
             f"edge={edge:.3f}; "
             f"time_remaining={time_remaining_seconds}s; "
             f"order_type={order_type_label}; "
+            f"quoted_price_at_entry={_fmt_price_debug(quoted_price_at_entry)}; "
+            f"actual_fill_price={_fmt_price_debug(actual_fill_price)}; "
+            f"realized_slippage_bps={_fmt_price_debug(realized_slippage_bps)}; "
+            f"order_latency_ms={order_latency_ms}; "
+            f"book_depth_at_fill={_fmt_price_debug(book_depth_at_fill)}; "
             f"high_confidence_size_override={used_high_confidence_override}; "
             f"required_cash={required_cash:.3f}; "
             f"estimated_fee={estimated_fee:.3f}; fee_rate_bps={cfg.live_fee_rate_bps}; "
@@ -1459,6 +1700,12 @@ def _execute_live_trade(
         ),
         live_order_response=response,
         execution_snapshot=snapshot,
+        quoted_price_at_entry=quoted_price_at_entry,
+        actual_fill_price=actual_fill_price,
+        realized_slippage_bps=realized_slippage_bps,
+        order_latency_ms=order_latency_ms,
+        book_depth_at_fill=book_depth_at_fill,
+        shares_requested=size,
     )
 
 
