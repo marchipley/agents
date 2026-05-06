@@ -61,6 +61,7 @@ class TradingConfig:
     max_size_high_confidence_threshold: float = 1.1
     max_size_high_confidence_shares: float = 0.0
     max_trades_per_period: int = 1
+    max_periods_per_run: int = 0
     max_automated_loss_trades: int = 0
     min_confidence: float = 0.7
     max_entry_price: float = 0.62
@@ -165,6 +166,7 @@ def get_trading_config() -> TradingConfig:
             0.0,
         ),
         max_trades_per_period=max(int(os.getenv("BTC_AGENT_MAX_TRADES_PER_PERIOD", "1")), 1),
+        max_periods_per_run=max(int(os.getenv("MAX_PERIODS_PER_RUN", "0")), 0),
         max_automated_loss_trades=max(int(os.getenv("MAX_AUTOMATED_LOSS_TRADES", "0")), 0),
         min_confidence=float(
             os.getenv("CONFIDENCE", os.getenv("BTC_AGENT_MIN_CONFIDENCE", "0.7"))

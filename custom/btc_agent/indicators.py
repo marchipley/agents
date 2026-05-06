@@ -34,6 +34,12 @@ _POLYMARKET_RTDS_MAX_MESSAGES = 8
 _POLYMARKET_RTDS_MAX_SNAPSHOT_AGE_SECONDS = 3.0
 _POLY_HERMES_URL = "https://hermes.pyth.network/v2/updates/price/latest"
 _POLY_BTC_PRICE_ID = "0xe62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43"
+_POLY_HERMES_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36"
+    )
+}
 
 
 @dataclass
@@ -96,6 +102,7 @@ def _fetch_btc_price_from_poly_reference() -> float:
             "ids[]": _POLY_BTC_PRICE_ID,
             "parsed": "true",
         },
+        headers=_POLY_HERMES_HEADERS,
         timeout=5,
     )
     resp.raise_for_status()
@@ -108,7 +115,7 @@ def _fetch_btc_price_from_poly_reference() -> float:
     expo = price_payload.get("expo")
     if raw_price is None or expo is None:
         raise requests.RequestException("Poly reference price payload did not include price/expo")
-    return float(raw_price) * (10 ** int(expo))
+    return int(raw_price) * (10 ** int(expo))
 
 
 def _create_polymarket_rtds_connection():

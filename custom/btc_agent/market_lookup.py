@@ -9,6 +9,8 @@ from datetime import datetime, timezone
 from html import unescape
 from typing import Optional
 
+import requests
+
 from .config import get_polymarket_config, get_trading_config
 from .network import http_get
 
@@ -1246,10 +1248,41 @@ def _cache_settlement_threshold(market: Optional[BtcUpDownMarket]) -> Optional[B
     return market
 
 
+def _refresh_market_probabilities(
+    cached_market: BtcUpDownMarket,
+) -> Optional[BtcUpDownMarket]:
+    try:
+        event = _fetch_event_by_slug(cached_market.slug)
+    except Exception:
+        return replace(cached_market)
+
+    fresh_market = _extract_market_from_event(event, cached_market.slug)
+    if fresh_market is None:
+        return replace(cached_market)
+
+    settlement_threshold = (
+        cached_market.settlement_threshold
+        if _coerce_btc_threshold(cached_market.settlement_threshold) is not None
+        else fresh_market.settlement_threshold
+    )
+
+    refreshed_market = replace(
+        cached_market,
+        start_ts=fresh_market.start_ts or cached_market.start_ts,
+        end_ts=fresh_market.end_ts or cached_market.end_ts,
+        volume=fresh_market.volume,
+        up_market_probability=fresh_market.up_market_probability,
+        down_market_probability=fresh_market.down_market_probability,
+        settlement_threshold=settlement_threshold,
+    )
+    _MARKET_CACHE[cached_market.slug] = replace(refreshed_market)
+    return refreshed_market
+
+
 def get_btc_updown_market_by_slug(slug: str) -> Optional[BtcUpDownMarket]:
     cached_market = _MARKET_CACHE.get(slug)
     if cached_market is not None:
-        return replace(cached_market)
+        return _refresh_market_probabilities(cached_market)
 
     event = _fetch_event_by_slug(slug)
     market = _extract_market_from_event(event, slug)

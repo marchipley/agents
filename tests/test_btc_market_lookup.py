@@ -57,7 +57,7 @@ class TestBtcMarketLookup(unittest.TestCase):
         self.assertEqual(market.up_market_probability, 0.495)
         self.assertEqual(market.down_market_probability, 0.505)
 
-    def test_get_btc_updown_market_by_slug_returns_cached_market_without_refetch(self):
+    def test_get_btc_updown_market_by_slug_refreshes_cached_market_probabilities(self):
         cached_market = BtcUpDownMarket(
             event_id="1",
             market_id="2",
@@ -69,19 +69,39 @@ class TestBtcMarketLookup(unittest.TestCase):
             start_ts=1777056000,
             end_ts=1777056300,
             settlement_threshold=77560.75,
+            up_market_probability=0.50,
+            down_market_probability=0.50,
         )
+        refreshed_event = {
+            "id": "1",
+            "title": "Bitcoin Up or Down",
+            "markets": [
+                {
+                    "id": "2",
+                    "question": "Bitcoin Up or Down",
+                    "clobTokenIds": '["up-token","down-token"]',
+                    "outcomes": '["Up","Down"]',
+                    "outcomePrices": '["0.61","0.39"]',
+                    "startDate": "2026-05-04T00:00:00Z",
+                    "endDate": "2026-05-04T00:05:00Z",
+                }
+            ],
+        }
 
         with patch(
             "custom.btc_agent.market_lookup._MARKET_CACHE",
             {"btc-updown-5m-1777056000": cached_market},
         ), patch(
             "custom.btc_agent.market_lookup._fetch_event_by_slug",
+            return_value=refreshed_event,
         ) as mock_fetch_event:
             market = get_btc_updown_market_by_slug("btc-updown-5m-1777056000")
 
         self.assertEqual(market.settlement_threshold, 77560.75)
         self.assertEqual(market.slug, "btc-updown-5m-1777056000")
-        mock_fetch_event.assert_not_called()
+        self.assertEqual(market.up_market_probability, 0.61)
+        self.assertEqual(market.down_market_probability, 0.39)
+        mock_fetch_event.assert_called_once_with("btc-updown-5m-1777056000")
 
     def test_extract_market_ignores_structured_thresholds_for_btc_updown_markets(self):
         event = {

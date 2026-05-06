@@ -61,6 +61,7 @@ from scripts.python.check_public_ip_indonesia import (
 _FIRST_LOOP = True
 _DEBUG_WRITTEN_SLUGS = set()
 _SESSION_LOSS_TRADES = 0
+_SESSION_SLUGS_SEEN = set()
 
 
 class QuitKeyMonitor:
@@ -910,6 +911,7 @@ def append_failed_order_attempt(
     decision,
     result,
     *,
+    paper_trading: bool,
     features=None,
     up_snapshot: TokenQuoteSnapshot = None,
     down_snapshot: TokenQuoteSnapshot = None,
@@ -930,6 +932,9 @@ def append_failed_order_attempt(
         current_btc_price=None if features is None else getattr(features, "price_usd", None),
         period_open_price_to_beat=market.settlement_threshold,
     )
+    phase_label = "PAPER_REJECTED_BEFORE_EXECUTION" if paper_trading else "LIVE_ATTEMPT_FAILED"
+    attempt_class = "paper_validation_rejection" if paper_trading else "live_submission_failure"
+    order_submission_attempted = not paper_trading
     with open(log_path, "a", encoding="utf-8") as log_file:
         if log_file.tell() == 0:
             log_file.write(
@@ -944,7 +949,10 @@ def append_failed_order_attempt(
             )
         lines = [
             f"observed_at={observed_at.isoformat()}",
-            "phase=ATTEMPT_FAILED",
+            f"phase={phase_label}",
+            f"attempt_class={attempt_class}",
+            f"paper_trading={paper_trading}",
+            f"order_submission_attempted={str(order_submission_attempted).lower()}",
             f"period_open_price_to_beat={_fmt(market.settlement_threshold)}",
             f"attempt_side={getattr(decision, 'side', None)}",
             f"attempt_confidence={_fmt(getattr(decision, 'confidence', None))}",
@@ -987,6 +995,16 @@ def append_failed_order_attempt(
         log_file.write("\n".join(lines))
 
 
+def _should_log_failed_order_attempt(cfg, decision, result) -> bool:
+    if getattr(decision, "side", None) not in ("UP", "DOWN"):
+        return False
+    if getattr(result, "executed", False):
+        return False
+    if not getattr(result, "token_id", None):
+        return False
+    return True
+
+
 def enforce_session_loss_trade_limit(cfg) -> None:
     if getattr(cfg, "max_automated_loss_trades", 0) <= 0:
         return
@@ -998,6 +1016,25 @@ def enforce_session_loss_trade_limit(cfg) -> None:
         "Exiting BTC agent."
     )
     sys.exit(0)
+
+
+def enforce_session_period_limit(cfg, current_slug: str) -> None:
+    if getattr(cfg, "max_periods_per_run", 0) <= 0:
+        _SESSION_SLUGS_SEEN.add(current_slug)
+        return
+
+    if current_slug in _SESSION_SLUGS_SEEN:
+        return
+
+    if len(_SESSION_SLUGS_SEEN) >= cfg.max_periods_per_run:
+        print(
+            "Max periods per run has been reached "
+            f"({len(_SESSION_SLUGS_SEEN)}/{cfg.max_periods_per_run}). "
+            "Exiting BTC agent."
+        )
+        sys.exit(0)
+
+    _SESSION_SLUGS_SEEN.add(current_slug)
 
 
 def _get_losing_active_orders(current_btc_price: float) -> list[ActivePaperOrder]:
@@ -1365,6 +1402,8 @@ def run_once() -> None:
             print("No BTC Up/Down market found.")
         return
 
+    enforce_session_period_limit(cfg, market.slug)
+
     previous_state = get_state()
     previous_orders = list(getattr(previous_state, "active_orders", []))
     previous_market_slug = getattr(previous_state, "market_slug", None)
@@ -1605,15 +1644,12 @@ def run_once() -> None:
         print_quote_snapshot_from_snapshot("Execution", result.execution_snapshot, debug=True)
     print_trade_execution_result(result, debug=cfg.debug)
 
-    if (
-        not result.executed
-        and decision.side in ("UP", "DOWN")
-        and result.token_id
-    ):
+    if _should_log_failed_order_attempt(cfg, decision, result):
         append_failed_order_attempt(
             market,
             decision,
             result,
+            paper_trading=getattr(cfg, "paper_trading", True),
             features=features,
             up_snapshot=up_snapshot,
             down_snapshot=down_snapshot,

@@ -106,6 +106,7 @@ Optional / supported:
 - `BTC_AGENT_MAX_SIZE_HIGH_CONFIDENCE_THRESHOLD` default: disabled above `1.0`; when confidence is at or above this threshold, the normal price-budget cap is ignored
 - `BTC_AGENT_MAX_SIZE_HIGH_CONFIDENCE_SHARES` default: `0`; fixed share size to use when the high-confidence threshold override is active
 - `BTC_AGENT_MAX_TRADES_PER_PERIOD` default: `1`
+- `MAX_PERIODS_PER_RUN` default: `0` meaning disabled; when set above zero, the agent counts unique BTC 5-minute slugs seen since launch and exits before entering slug `N+1`
 - `MAX_AUTOMATED_LOSS_TRADES` default: `0` meaning disabled; when set above zero, the agent counts completed losing trades since launch and stops once that loss count reaches the configured threshold
 - `CONFIDENCE` optional alias for `BTC_AGENT_MIN_CONFIDENCE`
 - `BTC_AGENT_MIN_CONFIDENCE` default: `0.7`
@@ -124,6 +125,11 @@ Notes:
 What the BTC agent does today:
 
 - Pulls the current BTC/USD spot price from a fallback chain of live providers, now preferring the Hermes/Pyth BTC reference endpoint the user specified, then falling back through Polymarket RTDS, Binance, Coinbase, and CoinGecko.
+- The Hermes/Pyth BTC fetch path now mirrors the user-validated request shape more closely:
+  - requests `parsed=true`
+  - sends a browser-style `User-Agent`
+  - reads the integer `price` plus `expo` fields from `parsed[0].price`
+  - converts them to the human-readable BTC/USD price used by the agent
 - Maintains an in-memory rolling price history during process lifetime only.
 - Backfills enough recent BTC history on startup to support the Phase 2 indicator set, including the longer EMA(21) warmup.
 - Approximates market-window open price using the earliest retained BTC sample inside the current 5-minute market window, not a true historical open fetched from a historical BTC data source.
@@ -142,6 +148,7 @@ What the BTC agent does today:
 - Uses the configured AI engine with JSON output to decide `UP`, `DOWN`, or `NO_TRADE`.
 - Prints the current market `price_to_beat` in the BTC-agent output and includes that same period baseline in the LLM decision prompt, now preferring Vatic's BTC 5-minute timestamp target API and only falling back to Polymarket page / `_next/data` parsing when that external target lookup is unavailable.
 - Pulls Gamma `outcomePrices` from the active market payload and maps them to `up_market_probability` / `down_market_probability`, so the decision layer can see the market-implied odds directly instead of inferring everything from raw momentum and CLOB quotes.
+- Those Gamma market probabilities are now refreshed on every loop tick for the active slug instead of staying frozen from the first slug lookup, so terminal output, completed-period logs, completed-order logs, and prompt inputs reflect the current market-implied odds as price and time evolve within the 5-minute window.
 - Retries LLM API calls across configurable attempts using a single per-attempt timeout, logs each attempt result to stdout, and converts repeated failures into a `NO_TRADE` so the loop can move on to the next tick.
 - Computes a reference price from quote, midpoint, last trade, and order book data.
 - Reuses a single decision-time token quote snapshot for both the printed `UP/DOWN (with decision)` block and the paper execution gate so those logs cannot diverge within one loop tick.
@@ -230,6 +237,7 @@ What the BTC agent does today:
 - On graceful exit (`q` or `KeyboardInterrupt`), the current slug’s `pending_period_<timestamp>.txt` is finalized into `completed_period_<timestamp>.txt` so pending analysis files are not stranded.
 - Evaluates paper-order win/loss status against the market-period settlement reference, preferring Polymarket’s parsed threshold and otherwise falling back to the closest retained BTC sample at the start of the 5-minute period rather than the trade-entry BTC price.
 - Enforces `BTC_AGENT_MAX_TRADES_PER_PERIOD` per 5-minute market slug; current production usage assumes `1`, so once that limit is reached the remaining loop ticks in the slug skip new trade evaluation and only continue status/data tracking until the next market window begins.
+- Enforces `MAX_PERIODS_PER_RUN` across the full process session as a unique-slug cap; the starting slug counts as period `1`, and once the configured number of slugs has been processed, the agent exits before entering the next slug.
 - Enforces `MAX_AUTOMATED_LOSS_TRADES` across the full process session as a completed-loss stop; once that many trades have actually settled as losses, the agent exits.
 - When `BTC_AGENT_DEBUG=false`, suppresses most verbose diagnostics and only prints a compact subset of geolocation, balances, quote snapshots, BTC features, LLM decision fields, and final paper execution fields.
 - When `BTC_AGENT_DEBUG=true`, the agent also prints the exact LLM prompt text to terminal output and writes that same prompt into the pending-period / completed-order logs for post-trade review.

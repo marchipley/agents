@@ -118,10 +118,14 @@ class TestBtcIndicators(unittest.TestCase):
         with patch(
             "custom.btc_agent.indicators.http_get",
             return_value=fake_response,
-        ):
+        ) as mock_http_get:
             price = indicators._fetch_btc_price_from_poly_reference()
 
         self.assertAlmostEqual(price, 80382.12345, places=5)
+        self.assertEqual(
+            mock_http_get.call_args.kwargs["headers"],
+            indicators._POLY_HERMES_HEADERS,
+        )
 
     def test_fetch_spot_price_from_binance_websocket_parses_ticker_message(self):
         fake_socket = MagicMock()

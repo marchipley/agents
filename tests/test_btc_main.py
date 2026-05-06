@@ -19,7 +19,9 @@ sys.modules.setdefault(
 
 from custom.btc_agent.main import (
     _SESSION_LOSS_TRADES,
+    _SESSION_SLUGS_SEEN,
     _build_regime_fingerprint,
+    _should_log_failed_order_attempt,
     append_completed_order_tick,
     append_failed_order_attempt,
     append_pending_period_tick_analysis,
@@ -27,6 +29,7 @@ from custom.btc_agent.main import (
     finalize_current_period_logs_on_exit,
     finalize_pending_period_log,
     enforce_session_loss_trade_limit,
+    enforce_session_period_limit,
     has_valid_price_to_beat,
     promote_pending_period_log_to_completed,
     run_once,
@@ -55,6 +58,7 @@ class TestBtcMain(unittest.TestCase):
     def tearDown(self):
         from custom.btc_agent import main as main_module
         main_module._SESSION_PENDING_EXIT_AFTER_PERIOD = False
+        main_module._SESSION_SLUGS_SEEN = set()
         self._cleanup_test_artifacts()
 
     @classmethod
@@ -104,6 +108,97 @@ class TestBtcMain(unittest.TestCase):
             )
 
         mock_exit.assert_not_called()
+
+    def test_enforce_session_period_limit_tracks_first_seen_slug(self):
+        tracked_slugs = set()
+        with patch(
+            "custom.btc_agent.main._SESSION_SLUGS_SEEN",
+            tracked_slugs,
+        ):
+            enforce_session_period_limit(
+                SimpleNamespace(max_periods_per_run=2),
+                "btc-updown-5m-1777056000",
+            )
+
+        self.assertEqual(tracked_slugs, {"btc-updown-5m-1777056000"})
+
+    def test_enforce_session_period_limit_exits_before_slug_n_plus_one(self):
+        with patch(
+            "custom.btc_agent.main._SESSION_SLUGS_SEEN",
+            {"btc-updown-5m-1777056000"},
+        ), patch(
+            "custom.btc_agent.main.sys.exit",
+            side_effect=SystemExit(0),
+        ) as mock_exit:
+            with self.assertRaises(SystemExit):
+                enforce_session_period_limit(
+                    SimpleNamespace(max_periods_per_run=1),
+                    "btc-updown-5m-1777056300",
+                )
+
+        mock_exit.assert_called_once_with(0)
+
+    def test_should_not_log_failed_order_attempt_for_paper_trade_rejection(self):
+        cfg = SimpleNamespace(paper_trading=True)
+        decision = SimpleNamespace(side="UP")
+        result = SimpleNamespace(
+            executed=False,
+            token_id="up-token",
+            reason="Quote-floor veto blocked low-probability reversal trade",
+        )
+
+        self.assertTrue(_should_log_failed_order_attempt(cfg, decision, result))
+
+    def test_should_log_failed_order_attempt_for_live_submission_failure(self):
+        cfg = SimpleNamespace(paper_trading=False)
+        decision = SimpleNamespace(side="UP")
+        result = SimpleNamespace(
+            executed=False,
+            token_id="up-token",
+            reason="FOK order could not be fully filled in the final deadline window",
+        )
+
+        self.assertTrue(_should_log_failed_order_attempt(cfg, decision, result))
+
+    def test_append_failed_order_attempt_marks_paper_rejection_without_submission(self):
+        market = SimpleNamespace(
+            slug="btc-updown-5m-1999999998",
+            title="Bitcoin Up or Down",
+            settlement_threshold=77763.01,
+        )
+        decision = SimpleNamespace(
+            side="UP",
+            confidence=0.8,
+            max_price_to_pay=1.0,
+        )
+        result = SimpleNamespace(
+            executed=False,
+            side="UP",
+            size=0.0,
+            price=0.62,
+            token_id="up-token",
+            reason="Quote-floor veto blocked low-probability reversal trade",
+        )
+
+        with patch("custom.btc_agent.main.os.getcwd", return_value="/appl/agents"):
+            append_failed_order_attempt(
+                market,
+                decision,
+                result,
+                paper_trading=True,
+                observed_at=datetime.now(timezone.utc),
+            )
+
+        with open(
+            "/appl/agents/completed_orders/completed_order_attempt_1999999998.txt",
+            encoding="utf-8",
+        ) as attempt_file:
+            content = attempt_file.read()
+
+        self.assertIn("phase=PAPER_REJECTED_BEFORE_EXECUTION", content)
+        self.assertIn("attempt_class=paper_validation_rejection", content)
+        self.assertIn("paper_trading=True", content)
+        self.assertIn("order_submission_attempted=false", content)
 
     def test_wait_for_next_tick_or_quit_returns_true_when_q_requested(self):
         quit_monitor = SimpleNamespace(poll_quit_requested=lambda: True)
