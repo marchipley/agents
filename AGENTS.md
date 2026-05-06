@@ -245,6 +245,10 @@ What the BTC agent does today:
 - Enforces `MAX_AUTOMATED_LOSS_TRADES` across the full process session as a completed-loss stop; once that many trades have actually settled as losses, the agent exits.
 - When `BTC_AGENT_DEBUG=false`, suppresses most verbose diagnostics and only prints a compact subset of geolocation, balances, quote snapshots, BTC features, LLM decision fields, and final paper execution fields.
 - When `BTC_AGENT_DEBUG=true`, the agent also prints the exact LLM prompt text to terminal output and writes that same prompt into the pending-period / completed-order logs for post-trade review.
+- The raw LLM response text is preserved for successful decisions regardless of debug mode:
+  - it is printed to terminal output as `LLM raw response:`
+  - it is written into pending-period / completed-order logs between `llm_raw_response_start` / `llm_raw_response_end`
+  so prompt/parse discrepancies can be audited directly.
 - Phase 3 execution/microstructure metrics are now captured on executed orders and written into completed-order logs:
   - `quoted_price_at_entry`
   - `actual_fill_price`
@@ -253,6 +257,7 @@ What the BTC agent does today:
   - `book_depth_at_fill`
   - `shares_requested`
 - In paper mode, those same Phase 3 metrics are also carried into `completed_order_attempt_*` files for pre-execution rejections when they can be derived from the simulated quote snapshot, so paper-mode analysis can still distinguish signal rejection from thin-book conditions.
+- Phase 3.1 refinement: vetoed directional attempts now preserve the bot’s intent-time quote context too, so `completed_order_attempt_*` files capture the quote and top-of-book depth the bot wanted to trade against even when a pre-execution guardrail blocks the trade.
 - In non-debug mode, account balances print only on the first loop iteration and again at the start of each new 5-minute market period.
 - Stops the process before live order submission when the account does not have enough `cash_balance_pusd` to cover the configured live trade size at the recommended limit price plus the estimated fee buffer.
 - Stops the process when `cash_balance_pusd` falls below `MINIMUM_WALLET_BALANCE`, so no further execution occurs once the configured wallet floor is breached.
@@ -455,6 +460,7 @@ Current status:
 - Paper trades use the chosen submission limit as the simulated fill price and record zero submission latency.
 - Live trades now measure round-trip submit latency around the actual Polymarket order call and attempt to resolve average fill price from the live response first, then from the Polymarket trades endpoint when an order id is available.
 - Completed-order logs now preserve those fields across `PLACED`, `ACTIVE`, and `COMPLETED` lifecycle entries so later analysis can compare prediction quality against execution quality.
+- Rejected directional attempts now also preserve `quoted_price_at_entry`, `book_depth_at_fill`, and derived `shares_requested` before veto logic returns, so Phase 3 analysis can inspect trades the bot wanted to place but did not execute.
 
 Data required:
 

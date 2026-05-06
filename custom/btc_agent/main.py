@@ -718,6 +718,15 @@ def append_pending_period_tick_analysis(
                         "llm_prompt_end",
                     ]
                 )
+            raw_response_text = getattr(decision, "raw_response_text", None)
+            if raw_response_text:
+                lines.extend(
+                    [
+                        "llm_raw_response_start",
+                        raw_response_text,
+                        "llm_raw_response_end",
+                    ]
+                )
 
         if skip_reason:
             lines.append(f"skip_reason={skip_reason}")
@@ -1407,6 +1416,9 @@ def print_llm_decision(decision, market, features, debug: bool) -> None:
     if debug and getattr(decision, "prompt_text", None):
         print("LLM prompt:")
         print(decision.prompt_text)
+    if getattr(decision, "raw_response_text", None):
+        print("LLM raw response:")
+        print(decision.raw_response_text)
 
 
 def print_trade_execution_result(result, debug: bool) -> None:

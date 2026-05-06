@@ -268,6 +268,7 @@ class TestBtcMain(unittest.TestCase):
             max_price_to_pay=1.0,
             reason="test",
             prompt_text="SYSTEM PROMPT:\nfoo\n\nUSER PROMPT:\nbar",
+            raw_response_text='{"decision":"UP","confidence":0.8,"max_price_to_pay":1.0,"reason":"test"}',
         )
         market = SimpleNamespace(
             settlement_threshold=100.0,
@@ -287,6 +288,8 @@ class TestBtcMain(unittest.TestCase):
         self.assertIn("LLM prompt:", content)
         self.assertIn("SYSTEM PROMPT:", content)
         self.assertIn("USER PROMPT:", content)
+        self.assertIn("LLM raw response:", content)
+        self.assertIn('"decision":"UP"', content)
 
     def test_append_completed_order_tick_writes_completed_order_file(self):
         order = ActivePaperOrder(
@@ -346,6 +349,7 @@ class TestBtcMain(unittest.TestCase):
             max_price_to_pay=1.0,
             reason="test",
             prompt_text="SYSTEM PROMPT:\nfoo\n\nUSER PROMPT:\nbar",
+            raw_response_text='{"decision":"UP","confidence":0.8,"max_price_to_pay":1.0,"reason":"test"}',
         )
 
         with patch("custom.btc_agent.main.os.getcwd", return_value="/appl/agents"):
@@ -365,6 +369,9 @@ class TestBtcMain(unittest.TestCase):
         self.assertIn("SYSTEM PROMPT:", content)
         self.assertIn("USER PROMPT:", content)
         self.assertIn("llm_prompt_end", content)
+        self.assertIn("llm_raw_response_start", content)
+        self.assertIn('"decision":"UP"', content)
+        self.assertIn("llm_raw_response_end", content)
 
     def test_regime_fingerprint_uses_price_to_beat_to_avoid_false_weak_down_label(self):
         features = SimpleNamespace(

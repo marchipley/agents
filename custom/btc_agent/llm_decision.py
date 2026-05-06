@@ -33,6 +33,7 @@ class LlmDecision:
     max_price_to_pay: float
     reason: str
     prompt_text: Optional[str] = None
+    raw_response_text: Optional[str] = None
 
 
 _OPENAI_REALTIME_CLIENT = None
@@ -1021,7 +1022,7 @@ def _request_gemini_decision_with_parse_retry(
     timeout_seconds: float = 10.0,
     retry_attempts: int = 3,
     retry_timer_seconds: float = 2.0,
-) -> dict:
+) -> tuple[dict, str]:
     last_error = None
 
     for attempt in range(retry_attempts):
@@ -1036,7 +1037,7 @@ def _request_gemini_decision_with_parse_retry(
                 attempt_number=attempt_number,
                 total_attempts=retry_attempts,
             )
-            return _extract_json_payload(raw_text)
+            return _extract_json_payload(raw_text), raw_text
         except ValueError as exc:
             last_error = exc
             _print_llm_attempt_result(
@@ -1102,6 +1103,7 @@ def test_llm_connection() -> tuple[bool, str]:
     )
 
     try:
+        raw_response_text = None
         if cfg.engine == "openai":
             raw_text = _request_openai_decision(
                 model=cfg.model,
@@ -1178,9 +1180,10 @@ def decide_trade(features: BtcFeatures, market: BtcUpDownMarket, up_snapshot=Non
                 retry_attempts=api_connection_retry_attempts,
                 retry_timer_seconds=api_connection_retry_timer_seconds,
             )
+            raw_response_text = raw_text
             data = _extract_json_payload(raw_text)
         elif cfg.engine == "gemini":
-            data = _request_gemini_decision_with_parse_retry(
+            data, raw_response_text = _request_gemini_decision_with_parse_retry(
                 model=cfg.model,
                 api_key=cfg.api_key,
                 system_prompt=system_prompt,
@@ -1198,6 +1201,7 @@ def decide_trade(features: BtcFeatures, market: BtcUpDownMarket, up_snapshot=Non
             max_price_to_pay=0.0,
             reason=f"LLM request failed ({cfg.engine}/{cfg.model}): {str(exc)[:220]}",
             prompt_text=debug_prompt_text,
+            raw_response_text=None,
         )
 
     side = str(data.get("decision", "NO_TRADE")).upper()
@@ -1222,4 +1226,5 @@ def decide_trade(features: BtcFeatures, market: BtcUpDownMarket, up_snapshot=Non
         max_price_to_pay=max_price_to_pay,
         reason=reason,
         prompt_text=debug_prompt_text,
+        raw_response_text=raw_response_text,
     )

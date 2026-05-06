@@ -259,6 +259,58 @@ class TestBtcExecutor(unittest.TestCase):
         self.assertIsNotNone(rejection)
         self.assertIn("Confidence floor veto", rejection.reason)
 
+    def test_validate_trade_candidate_preserves_intent_quote_and_depth_on_rejection(self):
+        market = types.SimpleNamespace(
+            up_token_id="up-token",
+            down_token_id="down-token",
+            end_ts=9999999999,
+            volume=5000.0,
+        )
+        decision = types.SimpleNamespace(
+            side="UP",
+            confidence=0.48,
+            max_price_to_pay=1.0,
+            reason="test",
+        )
+        snapshot = TokenQuoteSnapshot(
+            token_id="up-token",
+            buy_quote=0.50,
+            midpoint=0.50,
+            last_trade_price=0.50,
+            reference_price=0.50,
+            target_limit_price=0.50,
+            recommended_limit_price=0.50,
+            ok_to_submit=True,
+            submit_reason="ok",
+            best_bid=0.49,
+            best_ask=0.50,
+            tick_size=0.01,
+            spread=0.01,
+            best_bid_size=8.0,
+            best_ask_size=12.5,
+        )
+
+        with patch(
+            "custom.btc_agent.executor.get_trading_config",
+            return_value=types.SimpleNamespace(
+                min_confidence=0.70,
+                disable_liquidity_filter=False,
+                use_recommended_limit=False,
+                paper_trading=True,
+                max_order_price_usd=2.0,
+                max_size_high_confidence_threshold=1.1,
+                max_size_high_confidence_shares=0.0,
+            ),
+        ):
+            validated_snapshot, rejection = _validate_trade_candidate(market, decision, snapshot=snapshot)
+
+        self.assertIsNone(validated_snapshot)
+        self.assertIsNotNone(rejection)
+        self.assertEqual(rejection.quoted_price_at_entry, 0.50)
+        self.assertEqual(rejection.book_depth_at_fill, 12.5)
+        self.assertGreater(rejection.shares_requested, 0.0)
+        self.assertEqual(rejection.order_latency_ms, 0)
+
     def test_get_effective_min_confidence_lowers_floor_in_strong_trend(self):
         market = types.SimpleNamespace(
             slug="btc-updown-5m-9999999600",
