@@ -101,15 +101,10 @@ Optional / supported:
 - `POLYGON_RPC_URLS` optional comma-separated list of Polygon RPC endpoints to try in order
 - `BTC_AGENT_DEBUG` default: `false`
 - `BTC_AGENT_LOOP_INTERVAL` default: `30`
-- `BTC_AGENT_MAX_TRADE_USD` default: `5`
-- `BTC_AGENT_MAX_PRICE` default: `5`; maximum pUSD budget for a normal order, with size derived to stay at or below that budget
-- `BTC_AGENT_MAX_SIZE_HIGH_CONFIDENCE_THRESHOLD` default: disabled above `1.0`; when confidence is at or above this threshold, the normal price-budget cap is ignored
-- `BTC_AGENT_MAX_SIZE_HIGH_CONFIDENCE_SHARES` default: `0`; fixed share size to use when the high-confidence threshold override is active
 - `BTC_AGENT_MAX_TRADES_PER_PERIOD` default: `1`
 - `MAX_PERIODS_PER_RUN` default: `0` meaning disabled; when set above zero, the agent counts unique BTC 5-minute slugs seen since launch and exits before entering slug `N+1`
 - `MAX_AUTOMATED_LOSS_TRADES` default: `0` meaning disabled; when set above zero, the agent counts completed losing trades since launch and stops once that loss count reaches the configured threshold
-- `CONFIDENCE` optional alias for `BTC_AGENT_MIN_CONFIDENCE`
-- `BTC_AGENT_MIN_CONFIDENCE` default: `0.7`
+- `BTC_AGENT_MIN_CONFIDENCE` optional override; otherwise the repo default comes from `DEFAULT_MIN_CONFIDENCE` in `custom/btc_agent/config.py`
 - `BTC_AGENT_MAX_ENTRY_PRICE` default: `0.62`
 - `BTC_AGENT_MAX_SPREAD` default: `0.06`
 - `BTC_AGENT_MARKET_SLUG` for override/debugging/backtesting
@@ -117,6 +112,8 @@ Optional / supported:
 Notes:
 
 - `config.py` loads `.env` from the repo root, so local execution assumes a root-level `.env`.
+- Non-secret threshold tuning is now beginning to move out of `.env` and into top-level defaults near the imports in [custom/btc_agent/config.py](/appl/agents/custom/btc_agent/config.py:1). Environment variables can still override those values, but the repo copy is now the primary reference for execution and prompt calibration defaults such as minimum confidence, ADX caution levels, market-win-chance veto levels, RSI veto thresholds, and required-velocity divisors.
+- Order sizing now also follows that repo-defined pattern: `SHARES_PER_TRADE` in `custom/btc_agent/config.py` is the active fixed size for both paper and live BTC orders.
 - `launch_btc_agent.sh` exports `.env` before starting Python so proxy variables such as `HTTP_PROXY` and `HTTPS_PROXY` are available to the full launch path.
 - The active BTC-agent runtime normalizes `ALL_PROXY=socks5://...` to `socks5h://...` for `requests` traffic and to `socks5://...` for the OpenAI HTTPX client so Mullvad SOCKS routing works consistently.
 
@@ -147,8 +144,8 @@ What the BTC agent does today:
 - Supports a dedicated `LLM_CONNECTION_DEBUG=true` mode that runs only a one-shot LLM connectivity test, prints the active connection settings, runs a direct Google connectivity probe after LLM connection failures, and exits without touching balances, market lookup, or trading execution.
 - Uses the configured AI engine with JSON output to decide `UP`, `DOWN`, or `NO_TRADE`.
 - Prints the current market `price_to_beat` in the BTC-agent output and includes that same period baseline in the LLM decision prompt, now preferring Vatic's BTC 5-minute timestamp target API and only falling back to Polymarket page / `_next/data` parsing when that external target lookup is unavailable.
-- Pulls Gamma `outcomePrices` from the active market payload and maps them to `up_market_probability` / `down_market_probability`, so the decision layer can see the market-implied odds directly instead of inferring everything from raw momentum and CLOB quotes.
-- Those Gamma market probabilities are now refreshed on every loop tick for the active slug instead of staying frozen from the first slug lookup, so terminal output, completed-period logs, completed-order logs, and prompt inputs reflect the current market-implied odds as price and time evolve within the 5-minute window.
+- Pulls Gamma `outcomePrices` from the active market payload as the initial `up_market_probability` / `down_market_probability` values, then refreshes those per loop tick from the Polymarket CLOB market websocket using the same `price_change.best_ask` fields as the local `getlimit.py` script, so terminal output, completed-period logs, completed-order logs, and prompt inputs track the same live probabilities shown on Polymarket more closely.
+- The live market-probability path is now authoritative: if the CLOB market websocket does not provide `best_ask` values for both outcome tokens, the refresh path raises instead of silently inventing or substituting probabilities.
 - Retries LLM API calls across configurable attempts using a single per-attempt timeout, logs each attempt result to stdout, and converts repeated failures into a `NO_TRADE` so the loop can move on to the next tick.
 - Computes a reference price from quote, midpoint, last trade, and order book data.
 - Reuses a single decision-time token quote snapshot for both the printed `UP/DOWN (with decision)` block and the paper execution gate so those logs cannot diverge within one loop tick.
@@ -179,12 +176,13 @@ What the BTC agent does today:
   - if the chosen side `MARKET_WIN_CHANCE` is below `0.15` and `15 <= time_remaining_seconds < 120`, prefer `NO_TRADE`
   - under the final 15 seconds, only fade that consensus on a clear reversal
 - The LLM prompt now also treats early-window caution as ADX-aware rather than flat:
-  - if `time_remaining_seconds > 240` and `ADX < 20`, stay cautious
+  - if `time_remaining_seconds > 240` and `ADX < 15`, stay cautious
   - if `time_remaining_seconds > 240` and `ADX > 30`, prioritize the trend over elapsed time
 - The LLM prompt now includes `momentum_alignment`, which is `True` when `velocity_15s`, `velocity_30s`, and `momentum_1m` all point the same direction; when it is `True`, the model is encouraged to treat clarity as high and trade with the trend.
 - The LLM prompt now includes an in-the-money confidence boost rule: if `DISTANCE_FROM_STRIKE_USD` is beyond `+20` for `UP` or `-20` for `DOWN` and the chosen `MARKET_WIN_CHANCE` is above `0.60`, the model may raise confidence by `0.10`.
 - The LLM prompt includes a sign-consistency rule: if `DISTANCE_FROM_STRIKE_PCT` is positive and the model chooses `DOWN`, or negative and it chooses `UP`, confidence should stay below `0.50` unless trend exhaustion is genuinely clear.
-- The LLM prompt now also includes an RSI directional sanity rule: if `RSI(9) < 30`, it should not choose `DOWN`; if `RSI(9) > 70`, it should not choose `UP`.
+- The LLM prompt now also includes an RSI directional sanity rule: if `RSI(9) < 30`, it should not choose `DOWN`; if `RSI(9) > 70`, it should not choose `UP` unless `ADX > 30`, and values above `RSI(9) > 85` are treated as explicit exhaustion risk even in strong trends.
+- The LLM prompt now also tells the model to lower confidence when `rsi_speed_divergence` is negative while price is still moving up, which is intended to catch weakening continuation setups before they become late-window fades or weak breakout chases.
 - The Phase 2.7 prompt layer now also instructs the model to prefer `NO_TRADE` when:
   - the market is too close to call, meaning `abs(gap_to_target_usd) < 0.2 * volatility_5m` with more than 60 seconds remaining
   - it wants `UP` while the `UP` quote is below `0.45`
@@ -193,16 +191,15 @@ What the BTC agent does today:
 - Prints the exact execution snapshot used by the paper-trade path, including the calculated `reference_price`, `target_limit_price`, and `recommended_limit_price`.
 - Executes paper trades by default and can submit live Polymarket buy orders through `agents/polymarket/polymarket.py` when `USE_PAPER_TRADES=false`.
 - Submits live orders with a configurable maker fee rate from `BTC_AGENT_LIVE_FEE_RATE_BPS`, defaulting to `1000` bps to match the current BTC Up/Down market requirement observed during live submission attempts.
-- Sizes paper and live orders from `BTC_AGENT_MAX_PRICE`, deriving the share count from the selected submission limit while keeping the order notional at or below the configured pUSD budget.
-- If `decision.confidence` is at or above `BTC_AGENT_MAX_SIZE_HIGH_CONFIDENCE_THRESHOLD`, the agent ignores the normal price-budget cap and uses `BTC_AGENT_MAX_SIZE_HIGH_CONFIDENCE_SHARES` instead.
+- Sizes paper and live orders from `SHARES_PER_TRADE` in `custom/btc_agent/config.py`, using a fixed share count for both paper and live orders.
 - Before live BUY submission, the agent quantizes share size to a Polymarket-compatible precision so the quote-side amount stays within the exchange’s 2-decimal maker-amount constraint while still respecting the 4-decimal taker-size limit.
-- Rejects live submissions cleanly when the configured budget cannot satisfy the venue minimum order size instead of silently scaling above the configured budget.
+- Rejects live submissions cleanly when the configured `SHARES_PER_TRADE` cannot satisfy the venue minimum order size instead of silently scaling or overriding size.
 - Applies a regime-aware execution-side market-win-chance veto before submission, using Gamma probability first and falling back to CLOB quote only if Gamma is unavailable:
   - if the chosen side `MARKET_WIN_CHANCE < 0.15` and `15 <= time_remaining_seconds < 120`, the trade is rejected as a low-probability reversal attempt
-- Applies a velocity/volatility sanity veto before submission: if `required_velocity_to_win > volatility_5m / 10`, the trade is rejected as a mathematically implausible late-window move.
+- Applies a velocity/volatility sanity veto before submission: if `required_velocity_to_win > volatility_5m / 15`, the trade is rejected as a mathematically implausible late-window move.
 - Applies a Gamma/CLOB consensus-gap veto before submission: if `abs(effective_confidence - market_implied_probability) > 0.50`, the trade is rejected as a hallucinated edge against market consensus.
 - Applies a regime-aware minimum-confidence veto before submission:
-  - base floor remains `CONFIDENCE` / `BTC_AGENT_MIN_CONFIDENCE`
+  - base floor now defaults to `DEFAULT_MIN_CONFIDENCE` through the top-level tuning defaults in `custom/btc_agent/config.py`, while still allowing a `BTC_AGENT_MIN_CONFIDENCE` env override
   - in early strong-trend regimes with more than 120 seconds remaining and `ADX(14) > 30`, the operational floor is relaxed to `0.62`
   - in the final 60 seconds, the operational floor is tightened to `0.75`
 - The execution layer now computes an `effective_confidence` before gating:
@@ -215,7 +212,8 @@ What the BTC agent does today:
 - Applies a Phase 2.7 RSI ceiling veto for `UP`: if `RSI(9) > 85` while BTC is already above the strike, the trade is rejected as an exhaustion-risk breakout chase.
 - Applies RSI directional vetoes before submission:
   - if `RSI(9) < 30`, `DOWN` is rejected as bottom-chasing
-  - if `RSI(9) > 70`, `UP` is rejected as top-chasing
+  - if `RSI(9) > 70`, `UP` is rejected unless `ADX > 30`
+  - if `RSI(9) > 85` while BTC is already above the strike, `UP` is rejected as an exhaustion-risk breakout chase
 - Tracks in-memory active orders for the current 5-minute market window and prints each order’s target BTC level plus whether the position is currently winning, losing, or tied.
 - Writes a per-slug order-tracking file under `completed_orders/` for each executed order, appending one status snapshot per tick plus the pre-order tick history that led into the trade.
 - Writes `completed_order_attempt_<slug_timestamp>.txt` when a directional trade is rejected before execution or live submission fails:
@@ -237,7 +235,7 @@ What the BTC agent does today:
   - `implied_oracle_price`
   - `feed_drift_usd`
   - `last_10_ticks_direction`
-- Completed-period logs now also preserve `up_market_probability` and `down_market_probability` from the active Gamma market so post-trade analysis can compare the model’s confidence with the market’s implied odds.
+- Completed-period logs now also preserve `up_market_probability` and `down_market_probability` from the live per-loop market view, which now prefers the token `best_ask` values that match Polymarket’s displayed probabilities.
 - Pre-order decision logging now also records `effective_confidence`, which is the regime-adjusted operational confidence after the winning-advantage boost and the dynamic minimum-confidence floor are applied.
 - Pre-order and attempt logs now also record:
   - `min_confidence`
@@ -458,7 +456,7 @@ Goal:
 
 Current status:
 
-- Started, first execution-metrics pass implemented.
+- Started, with the first execution-metrics pass implemented and a Phase 3.3 calibration pass now moving the main order-rate and veto thresholds into repo-visible config defaults instead of burying all of them in `.env`.
 - Executed orders now capture and log:
   - `quoted_price_at_entry`
   - `actual_fill_price`
@@ -470,6 +468,13 @@ Current status:
 - Live trades now measure round-trip submit latency around the actual Polymarket order call and attempt to resolve average fill price from the live response first, then from the Polymarket trades endpoint when an order id is available.
 - Completed-order logs now preserve those fields across `PLACED`, `ACTIVE`, and `COMPLETED` lifecycle entries so later analysis can compare prediction quality against execution quality.
 - Rejected directional attempts now also preserve `quoted_price_at_entry`, `book_depth_at_fill`, and derived `shares_requested` before veto logic returns, so Phase 3 analysis can inspect trades the bot wanted to place but did not execute.
+- Phase 3.3 also relaxed and centralized several order-rate controls:
+  - default minimum confidence is now `0.60`
+  - Discovery Phase caution now keys off `ADX < 15` instead of `ADX < 20`
+  - the velocity/volatility veto now uses `volatility_5m / 15`
+  - the execution edge floor now defaults to `0.02`
+  - the stronger-trend `UP` RSI veto now becomes dynamic, using `RSI > 70` normally and only hard-blocking continuation at `RSI > 85` when `ADX > 30`
+  - these values now live as top-level non-secret defaults in `custom/btc_agent/config.py` and can still be overridden from env when needed
 
 Data required:
 
@@ -655,7 +660,7 @@ Do not revert unrelated local changes unless the user explicitly asks for that.
 
 ### 2026-05-03
 
-- Replaced share-based BTC order sizing with budget-based sizing using `BTC_AGENT_MAX_PRICE`, so both paper and live orders derive the share count from the chosen submission limit while staying at or below the configured pUSD budget.
+- Replaced the old variable share-budget sizing path with a fixed `SHARES_PER_TRADE` sizing model in `custom/btc_agent/config.py`, so both paper and live orders now use the same repo-defined share count per trade.
 - Changed live execution so the agent no longer exceeds the configured budget to satisfy exchange minimum sizes; when the venue minimum cannot be met within budget, the attempt is rejected cleanly and the loop continues running.
 - Added failed directional order-attempt logging under `completed_orders/completed_order_attempt_<slug_ts>.txt`, preserving the same market, feature, quote, and regime context plus the failure reason.
 - Updated finalized completed-order filenames to include the order side, for example `completed_order_win_up_<slug_ts>.txt` and `completed_order_loss_down_<slug_ts>.txt`.

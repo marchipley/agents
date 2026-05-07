@@ -4,12 +4,14 @@ import json
 import os
 import re
 import time
+import asyncio
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from html import unescape
 from typing import Optional
 
 import requests
+import websockets
 
 from .config import get_polymarket_config, get_trading_config
 from .network import http_get
@@ -21,6 +23,8 @@ _BTC_LIVE_PERIOD_OPEN_ATTEMPTS = 3
 _BTC_LIVE_PERIOD_OPEN_RETRY_DELAY_SECONDS = 1.0
 _NEXT_DATA_CHAIN_MAX_PAGES = 3
 _NEXT_DATA_CHAIN_INTER_REQUEST_DELAY_SECONDS = 1.0
+_CLOB_MARKET_WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+_CLOB_MARKET_WS_TIMEOUT_SECONDS = 5.0
 
 
 @dataclass
@@ -39,6 +43,98 @@ class BtcUpDownMarket:
     up_market_probability: Optional[float] = None
     down_market_probability: Optional[float] = None
 
+
+def _parse_live_market_probabilities_message(
+    message: str,
+    up_token_id: str,
+    down_token_id: str,
+) -> tuple[Optional[float], Optional[float]]:
+    try:
+        data = json.loads(message)
+    except Exception:
+        return None, None
+
+    msg_body = data[0] if isinstance(data, list) and data else data
+    if not isinstance(msg_body, dict):
+        return None, None
+    if msg_body.get("event_type") != "price_change":
+        return None, None
+
+    up_probability = None
+    down_probability = None
+    for update in msg_body.get("price_changes", []):
+        if not isinstance(update, dict):
+            continue
+        asset_id = str(update.get("asset_id") or "")
+        best_ask = _coerce_threshold(update.get("best_ask"))
+        if best_ask is None:
+            continue
+        if asset_id == str(up_token_id):
+            up_probability = best_ask
+        elif asset_id == str(down_token_id):
+            down_probability = best_ask
+
+    return up_probability, down_probability
+
+
+async def _fetch_live_market_probabilities_from_clob_ws_async(
+    up_token_id: str,
+    down_token_id: str,
+) -> tuple[float, float]:
+    async with websockets.connect(
+        _CLOB_MARKET_WS_URL,
+        ping_interval=None,
+        open_timeout=_CLOB_MARKET_WS_TIMEOUT_SECONDS,
+        close_timeout=_CLOB_MARKET_WS_TIMEOUT_SECONDS,
+    ) as ws:
+        sub_msg = {
+            "type": "market",
+            "assets_ids": [str(up_token_id), str(down_token_id)],
+        }
+        await ws.send(json.dumps(sub_msg))
+
+        up_probability = None
+        down_probability = None
+        deadline = time.monotonic() + _CLOB_MARKET_WS_TIMEOUT_SECONDS
+        while time.monotonic() < deadline:
+            timeout_seconds = max(deadline - time.monotonic(), 0.1)
+            raw_message = await asyncio.wait_for(ws.recv(), timeout=timeout_seconds)
+            if raw_message in {"PONG", "[]"}:
+                continue
+            parsed_up, parsed_down = _parse_live_market_probabilities_message(
+                raw_message,
+                up_token_id=up_token_id,
+                down_token_id=down_token_id,
+            )
+            if parsed_up is not None:
+                up_probability = parsed_up
+            if parsed_down is not None:
+                down_probability = parsed_down
+            if up_probability is not None and down_probability is not None:
+                return float(up_probability), float(down_probability)
+
+    raise RuntimeError(
+        "Did not receive best_ask probabilities for both outcome tokens from the CLOB market websocket."
+    )
+
+
+def fetch_live_market_probabilities_from_clob_ws(
+    up_token_id: str,
+    down_token_id: str,
+) -> tuple[float, float]:
+    try:
+        return asyncio.run(
+            _fetch_live_market_probabilities_from_clob_ws_async(
+                up_token_id=up_token_id,
+                down_token_id=down_token_id,
+            )
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            "Failed to fetch live market probabilities from CLOB websocket "
+            f"for up_token_id={up_token_id}, down_token_id={down_token_id}: {exc}"
+        ) from exc
+
 def _current_btc_5m_slug() -> str:
     """
     Polymarket BTC 5-minute window slug is:
@@ -55,6 +151,40 @@ def _fetch_event_by_slug(slug: str) -> dict:
     resp = http_get(url, timeout=10)
     resp.raise_for_status()
     return resp.json()
+
+
+def _fetch_market_object_by_slug(slug: str) -> Optional[dict]:
+    cfg = get_polymarket_config()
+    url = f"{cfg.gamma_api}/markets"
+    resp = http_get(
+        url,
+        params={"slug": slug, "_ts": int(time.time() * 1000)},
+        headers={
+            "cache-control": "no-cache",
+            "pragma": "no-cache",
+        },
+        timeout=10,
+    )
+    if resp.status_code == 404:
+        return None
+    resp.raise_for_status()
+    data = resp.json()
+
+    candidates = []
+    if isinstance(data, list):
+        candidates = [item for item in data if isinstance(item, dict)]
+    elif isinstance(data, dict):
+        if isinstance(data.get("data"), list):
+            candidates = [item for item in data["data"] if isinstance(item, dict)]
+        elif isinstance(data.get("markets"), list):
+            candidates = [item for item in data["markets"] if isinstance(item, dict)]
+        else:
+            candidates = [data]
+
+    for market in candidates:
+        if str(market.get("slug") or "").strip() == slug:
+            return market
+    return candidates[0] if candidates else None
 
 def _parse_clob_token_ids(value):
     if not value:
@@ -1251,6 +1381,63 @@ def _cache_settlement_threshold(market: Optional[BtcUpDownMarket]) -> Optional[B
 def _refresh_market_probabilities(
     cached_market: BtcUpDownMarket,
 ) -> Optional[BtcUpDownMarket]:
+    if cached_market.slug.startswith("btc-updown-5m-"):
+        up_market_probability, down_market_probability = fetch_live_market_probabilities_from_clob_ws(
+            cached_market.up_token_id,
+            cached_market.down_token_id,
+        )
+        refreshed_market = replace(
+            cached_market,
+            up_market_probability=up_market_probability,
+            down_market_probability=down_market_probability,
+        )
+        _MARKET_CACHE[cached_market.slug] = replace(refreshed_market)
+        return refreshed_market
+
+    try:
+        fresh_market_object = _fetch_market_object_by_slug(cached_market.slug)
+    except Exception:
+        fresh_market_object = None
+
+    if isinstance(fresh_market_object, dict):
+        up_market_probability, down_market_probability = _parse_outcome_probabilities(
+            fresh_market_object
+        )
+        refreshed_market = replace(
+            cached_market,
+            start_ts=(
+                _coerce_timestamp(
+                    fresh_market_object.get("start_ts")
+                    or fresh_market_object.get("startTime")
+                    or fresh_market_object.get("eventStartTime")
+                    or fresh_market_object.get("startDate")
+                )
+                or cached_market.start_ts
+            ),
+            end_ts=(
+                _coerce_timestamp(
+                    fresh_market_object.get("end_ts")
+                    or fresh_market_object.get("endTime")
+                    or fresh_market_object.get("umaEndDate")
+                    or fresh_market_object.get("endDate")
+                )
+                or cached_market.end_ts
+            ),
+            volume=_coerce_threshold(fresh_market_object.get("volume")),
+            up_market_probability=(
+                up_market_probability
+                if up_market_probability is not None
+                else cached_market.up_market_probability
+            ),
+            down_market_probability=(
+                down_market_probability
+                if down_market_probability is not None
+                else cached_market.down_market_probability
+            ),
+        )
+        _MARKET_CACHE[cached_market.slug] = replace(refreshed_market)
+        return refreshed_market
+
     try:
         event = _fetch_event_by_slug(cached_market.slug)
     except Exception:

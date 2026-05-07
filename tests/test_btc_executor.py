@@ -138,9 +138,7 @@ class TestBtcExecutor(unittest.TestCase):
             "custom.btc_agent.executor.get_trading_config",
             return_value=types.SimpleNamespace(
                 use_recommended_limit=False,
-                max_order_price_usd=2.0,
-                max_size_high_confidence_threshold=1.1,
-                max_size_high_confidence_shares=0.0,
+                shares_per_trade=5.0,
             ),
         ):
             result = _execute_paper_trade(decision, snapshot, effective_confidence=0.8)
@@ -297,9 +295,7 @@ class TestBtcExecutor(unittest.TestCase):
                 disable_liquidity_filter=False,
                 use_recommended_limit=False,
                 paper_trading=True,
-                max_order_price_usd=2.0,
-                max_size_high_confidence_threshold=1.1,
-                max_size_high_confidence_shares=0.0,
+                shares_per_trade=5.0,
             ),
         ):
             validated_snapshot, rejection = _validate_trade_candidate(market, decision, snapshot=snapshot)
@@ -903,7 +899,7 @@ class TestBtcExecutor(unittest.TestCase):
         self.assertIsNone(validated_snapshot)
         self.assertIn("RSI directional veto blocked UP", rejection.reason)
 
-    def test_execute_paper_trade_uses_high_confidence_share_override(self):
+    def test_execute_paper_trade_uses_fixed_shares_per_trade(self):
         from custom.btc_agent.executor import _execute_paper_trade
 
         decision = types.SimpleNamespace(side="UP", confidence=0.91, max_price_to_pay=1.0)
@@ -926,9 +922,7 @@ class TestBtcExecutor(unittest.TestCase):
         with patch(
             "custom.btc_agent.executor.get_trading_config",
             return_value=types.SimpleNamespace(
-                max_order_price_usd=2.0,
-                max_size_high_confidence_threshold=0.9,
-                max_size_high_confidence_shares=5.0,
+                shares_per_trade=5.0,
                 use_recommended_limit=False,
             ),
         ):
@@ -936,7 +930,7 @@ class TestBtcExecutor(unittest.TestCase):
 
         self.assertTrue(result.executed)
         self.assertEqual(result.size, 5.0)
-        self.assertIn("high_confidence_size_override=True", result.reason)
+        self.assertIn("shares_per_trade=5.0000", result.reason)
 
     def test_validate_trade_candidate_allows_t5_deadline_execution_despite_negative_edge(self):
         market = types.SimpleNamespace(
@@ -1154,9 +1148,7 @@ class TestBtcExecutor(unittest.TestCase):
         with patch(
             "custom.btc_agent.executor.get_trading_config",
             return_value=types.SimpleNamespace(
-                max_order_price_usd=5.0,
-                max_size_high_confidence_threshold=1.1,
-                max_size_high_confidence_shares=0.0,
+                shares_per_trade=5.0,
                 live_min_order_usd=1.0,
                 live_fee_rate_bps=1000,
                 use_recommended_limit=False,
@@ -1204,9 +1196,7 @@ class TestBtcExecutor(unittest.TestCase):
         with patch(
             "custom.btc_agent.executor.get_trading_config",
             return_value=types.SimpleNamespace(
-                max_order_price_usd=5.0,
-                max_size_high_confidence_threshold=1.1,
-                max_size_high_confidence_shares=0.0,
+                shares_per_trade=5.0,
                 live_min_order_usd=1.0,
                 live_fee_rate_bps=1000,
                 use_recommended_limit=False,
@@ -1223,7 +1213,7 @@ class TestBtcExecutor(unittest.TestCase):
         self.assertIn("FOK order could not be fully filled", result.reason)
         self.assertEqual(client.execute_order.call_count, 1)
 
-    def test_execute_live_trade_returns_budget_rejection_when_minimum_size_exceeds_budget(self):
+    def test_execute_live_trade_returns_rejection_when_minimum_size_exceeds_shares_per_trade(self):
         market = types.SimpleNamespace(end_ts=int(datetime.now(timezone.utc).timestamp()) + 30)
         decision = types.SimpleNamespace(side="UP", confidence=0.8, max_price_to_pay=1.0)
         snapshot = TokenQuoteSnapshot(
@@ -1250,9 +1240,7 @@ class TestBtcExecutor(unittest.TestCase):
         with patch(
             "custom.btc_agent.executor.get_trading_config",
             return_value=types.SimpleNamespace(
-                max_order_price_usd=2.0,
-                max_size_high_confidence_threshold=1.1,
-                max_size_high_confidence_shares=0.0,
+                shares_per_trade=2.0,
                 live_min_order_usd=1.0,
                 live_fee_rate_bps=1000,
                 use_recommended_limit=False,
@@ -1266,10 +1254,10 @@ class TestBtcExecutor(unittest.TestCase):
             result = _execute_live_trade(decision=decision, market=market, snapshot=snapshot)
 
         self.assertFalse(result.executed)
-        self.assertIn("Exchange minimum size exceeds configured order budget", result.reason)
+        self.assertIn("Exchange minimum size exceeds configured shares_per_trade", result.reason)
         self.assertEqual(client.execute_order.call_count, 1)
 
-    def test_execute_live_trade_uses_high_confidence_share_override(self):
+    def test_execute_live_trade_uses_fixed_shares_per_trade(self):
         market = types.SimpleNamespace(end_ts=int(datetime.now(timezone.utc).timestamp()) + 30)
         decision = types.SimpleNamespace(side="UP", confidence=0.95, max_price_to_pay=1.0)
         snapshot = TokenQuoteSnapshot(
@@ -1292,9 +1280,7 @@ class TestBtcExecutor(unittest.TestCase):
         with patch(
             "custom.btc_agent.executor.get_trading_config",
             return_value=types.SimpleNamespace(
-                max_order_price_usd=2.0,
-                max_size_high_confidence_threshold=0.9,
-                max_size_high_confidence_shares=5.0,
+                shares_per_trade=5.0,
                 live_min_order_usd=1.0,
                 live_fee_rate_bps=1000,
                 use_recommended_limit=False,
@@ -1309,7 +1295,7 @@ class TestBtcExecutor(unittest.TestCase):
 
         self.assertTrue(result.executed)
         self.assertEqual(result.size, 5.0)
-        self.assertIn("high_confidence_size_override=True", result.reason)
+        self.assertIn("for 5.0000 shares", result.reason)
         self.assertEqual(client.execute_order.call_args.kwargs["size"], 5.0)
 
     def test_execute_live_trade_quantizes_size_for_market_buy_precision(self):
@@ -1335,9 +1321,7 @@ class TestBtcExecutor(unittest.TestCase):
         with patch(
             "custom.btc_agent.executor.get_trading_config",
             return_value=types.SimpleNamespace(
-                max_order_price_usd=2.0,
-                max_size_high_confidence_threshold=1.1,
-                max_size_high_confidence_shares=0.0,
+                shares_per_trade=2.4096,
                 live_min_order_usd=1.0,
                 live_fee_rate_bps=1000,
                 use_recommended_limit=False,

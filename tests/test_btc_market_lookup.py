@@ -1,15 +1,19 @@
+import json
 import sys
 import types
 import unittest
 from unittest.mock import Mock, patch
 
 sys.modules.setdefault("dotenv", types.SimpleNamespace(load_dotenv=lambda *args, **kwargs: None))
+sys.modules.setdefault("websockets", types.SimpleNamespace(connect=object))
 
 from custom.btc_agent.market_lookup import (
     BtcUpDownMarket,
+    _parse_live_market_probabilities_message,
     _build_current_period_dataset,
     build_price_to_beat_debug_report,
     build_price_to_beat_debug_reports,
+    fetch_live_market_probabilities_from_clob_ws,
     get_btc_updown_market_by_slug,
     _extract_current_period_open_from_next_data,
     _extract_embedded_next_data_payload,
@@ -34,6 +38,42 @@ from custom.btc_agent.market_lookup import (
 
 
 class TestBtcMarketLookup(unittest.TestCase):
+    def test_parse_live_market_probabilities_message_uses_best_ask_from_price_change(self):
+        message = json.dumps(
+            {
+                "market": "0xabc",
+                "price_changes": [
+                    {
+                        "asset_id": "up-token",
+                        "price": "0.67",
+                        "size": "212.43",
+                        "side": "BUY",
+                        "best_bid": "0.67",
+                        "best_ask": "0.68",
+                    },
+                    {
+                        "asset_id": "down-token",
+                        "price": "0.33",
+                        "size": "212.43",
+                        "side": "SELL",
+                        "best_bid": "0.32",
+                        "best_ask": "0.33",
+                    },
+                ],
+                "timestamp": "1778122403384",
+                "event_type": "price_change",
+            }
+        )
+
+        up_probability, down_probability = _parse_live_market_probabilities_message(
+            message,
+            up_token_id="up-token",
+            down_token_id="down-token",
+        )
+
+        self.assertEqual(up_probability, 0.68)
+        self.assertEqual(down_probability, 0.33)
+
     def test_extract_market_from_event_parses_gamma_outcome_probabilities(self):
         event = {
             "id": "event-1",
@@ -65,7 +105,7 @@ class TestBtcMarketLookup(unittest.TestCase):
             down_token_id="down-token",
             title="Bitcoin Up or Down",
             question="Bitcoin Up or Down",
-            slug="btc-updown-5m-1777056000",
+            slug="manual-slug",
             start_ts=1777056000,
             end_ts=1777056300,
             settlement_threshold=77560.75,
@@ -90,18 +130,98 @@ class TestBtcMarketLookup(unittest.TestCase):
 
         with patch(
             "custom.btc_agent.market_lookup._MARKET_CACHE",
-            {"btc-updown-5m-1777056000": cached_market},
+            {"manual-slug": cached_market},
+        ), patch(
+            "custom.btc_agent.market_lookup._fetch_market_object_by_slug",
+            side_effect=Exception("market fetch unavailable"),
         ), patch(
             "custom.btc_agent.market_lookup._fetch_event_by_slug",
             return_value=refreshed_event,
         ) as mock_fetch_event:
-            market = get_btc_updown_market_by_slug("btc-updown-5m-1777056000")
+            market = get_btc_updown_market_by_slug("manual-slug")
 
         self.assertEqual(market.settlement_threshold, 77560.75)
-        self.assertEqual(market.slug, "btc-updown-5m-1777056000")
+        self.assertEqual(market.slug, "manual-slug")
         self.assertEqual(market.up_market_probability, 0.61)
         self.assertEqual(market.down_market_probability, 0.39)
-        mock_fetch_event.assert_called_once_with("btc-updown-5m-1777056000")
+        mock_fetch_event.assert_called_once_with("manual-slug")
+
+    def test_get_btc_updown_market_by_slug_prefers_market_endpoint_for_probability_refresh(self):
+        cached_market = BtcUpDownMarket(
+            event_id="1",
+            market_id="2",
+            up_token_id="up-token",
+            down_token_id="down-token",
+            title="Bitcoin Up or Down",
+            question="Bitcoin Up or Down",
+            slug="manual-slug",
+            start_ts=1777056000,
+            end_ts=1777056300,
+            settlement_threshold=77560.75,
+            up_market_probability=0.50,
+            down_market_probability=0.50,
+        )
+        refreshed_market_object = {
+            "id": "2",
+            "slug": "btc-updown-5m-1777056000",
+            "outcomes": '["Up","Down"]',
+            "outcomePrices": '["0.63","0.37"]',
+            "startDate": "2026-05-04T00:00:00Z",
+            "endDate": "2026-05-04T00:05:00Z",
+            "volume": "1234.5",
+        }
+
+        with patch(
+            "custom.btc_agent.market_lookup._MARKET_CACHE",
+            {"manual-slug": cached_market},
+        ), patch(
+            "custom.btc_agent.market_lookup._fetch_market_object_by_slug",
+            return_value=refreshed_market_object,
+        ) as mock_fetch_market, patch(
+            "custom.btc_agent.market_lookup._fetch_event_by_slug",
+        ) as mock_fetch_event:
+            market = get_btc_updown_market_by_slug("manual-slug")
+
+        self.assertEqual(market.up_market_probability, 0.63)
+        self.assertEqual(market.down_market_probability, 0.37)
+        self.assertEqual(market.volume, 1234.5)
+        mock_fetch_market.assert_called_once_with("manual-slug")
+        mock_fetch_event.assert_not_called()
+
+    def test_get_btc_updown_market_by_slug_prefers_clob_ws_for_btc_probability_refresh(self):
+        cached_market = BtcUpDownMarket(
+            event_id="1",
+            market_id="2",
+            up_token_id="up-token",
+            down_token_id="down-token",
+            title="Bitcoin Up or Down",
+            question="Bitcoin Up or Down",
+            slug="btc-updown-5m-1777056000",
+            start_ts=1777056000,
+            end_ts=1777056300,
+            settlement_threshold=77560.75,
+            up_market_probability=0.50,
+            down_market_probability=0.50,
+        )
+
+        with patch(
+            "custom.btc_agent.market_lookup._MARKET_CACHE",
+            {"btc-updown-5m-1777056000": cached_market},
+        ), patch(
+            "custom.btc_agent.market_lookup.fetch_live_market_probabilities_from_clob_ws",
+            return_value=(0.68, 0.33),
+        ) as mock_fetch_ws, patch(
+            "custom.btc_agent.market_lookup._fetch_market_object_by_slug",
+        ) as mock_fetch_market, patch(
+            "custom.btc_agent.market_lookup._fetch_event_by_slug",
+        ) as mock_fetch_event:
+            market = get_btc_updown_market_by_slug("btc-updown-5m-1777056000")
+
+        self.assertEqual(market.up_market_probability, 0.68)
+        self.assertEqual(market.down_market_probability, 0.33)
+        mock_fetch_ws.assert_called_once_with("up-token", "down-token")
+        mock_fetch_market.assert_not_called()
+        mock_fetch_event.assert_not_called()
 
     def test_extract_market_ignores_structured_thresholds_for_btc_updown_markets(self):
         event = {

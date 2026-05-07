@@ -156,12 +156,13 @@ class TestBtcLlmDecision(unittest.TestCase):
         self.assertIn("DISTANCE_FROM_STRIKE_PCT is the source of truth", prompt)
         self.assertIn("Use the drift-adjusted Effective BTC price as the true current price", prompt)
         self.assertIn("velocity_30s is micro-momentum for entry timing only", prompt)
-        self.assertIn("If ADX < 20, stay cautious. If ADX > 30, prioritize the trend over time elapsed.", prompt)
+        self.assertIn("If ADX < 15, stay cautious. If ADX > 30, prioritize the trend over time elapsed.", prompt)
         self.assertIn("If the chosen side MARKET_WIN_CHANCE is below 0.15", prompt)
         self.assertIn("If momentum alignment is TRUE, clarity is HIGH", prompt)
         self.assertIn("If DISTANCE_FROM_STRIKE_PCT is positive and you choose DOWN", prompt)
-        self.assertIn("If required velocity to win exceeds volatility_5m / 10", prompt)
+        self.assertIn("If required velocity to win exceeds volatility_5m / 15", prompt)
         self.assertIn("If RSI(9) is below 30, do not choose DOWN.", prompt)
+        self.assertIn("If RSI speed divergence is negative while price is still moving up", prompt)
         self.assertIn("Focus on regime detection and direction, not limit pricing.", prompt)
         self.assertIn("execution layer will apply regime-aware EV, deadline, liquidity, and FOK rules", prompt)
 
@@ -212,6 +213,7 @@ class TestBtcLlmDecision(unittest.TestCase):
         self.assertIn("MARKET_WIN_CHANCE_UP=0.495", prompt)
         self.assertIn("MARKET_WIN_CHANCE_DOWN=0.505", prompt)
         self.assertIn("momentum_alignment=", prompt)
+        self.assertIn("rsi_speed_divergence=", prompt)
         self.assertIn("Do not confuse DISTANCE_FROM_STRIKE values with MARKET_WIN_CHANCE values.", prompt)
         self.assertNotIn("\ndelta_pct=", prompt)
 

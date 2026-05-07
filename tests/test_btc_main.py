@@ -56,7 +56,15 @@ class TestBtcMain(unittest.TestCase):
         "1999999999",
     )
 
+    def setUp(self):
+        self._live_probability_patcher = patch(
+            "custom.btc_agent.main.fetch_live_market_probabilities_from_clob_ws",
+            return_value=(0.50, 0.50),
+        )
+        self._live_probability_patcher.start()
+
     def tearDown(self):
+        self._live_probability_patcher.stop()
         from custom.btc_agent import main as main_module
         main_module._SESSION_PENDING_EXIT_AFTER_PERIOD = False
         main_module._SESSION_SLUGS_SEEN = set()

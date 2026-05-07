@@ -913,6 +913,7 @@ def get_effective_decision_confidence(
     market: BtcUpDownMarket,
     features: Optional[BtcFeatures] = None,
 ) -> float:
+    cfg = get_trading_config()
     confidence = float(getattr(decision, "confidence", 0.0) or 0.0)
     gap_to_target_usd = None
     if (
@@ -927,19 +928,19 @@ def get_effective_decision_confidence(
     if (
         decision.side == "UP"
         and gap_to_target_usd is not None
-        and gap_to_target_usd > 20.0
+        and gap_to_target_usd > float(getattr(cfg, "itm_confidence_boost_usd", 20.0))
         and up_probability is not None
-        and float(up_probability) > 0.60
+        and float(up_probability) > float(getattr(cfg, "itm_confidence_boost_market_win_chance", 0.60))
     ):
-        confidence = min(confidence + 0.10, 1.0)
+        confidence = min(confidence + float(getattr(cfg, "itm_confidence_boost_amount", 0.10)), 1.0)
     elif (
         decision.side == "DOWN"
         and gap_to_target_usd is not None
-        and gap_to_target_usd < -20.0
+        and gap_to_target_usd < -float(getattr(cfg, "itm_confidence_boost_usd", 20.0))
         and down_probability is not None
-        and float(down_probability) > 0.60
+        and float(down_probability) > float(getattr(cfg, "itm_confidence_boost_market_win_chance", 0.60))
     ):
-        confidence = min(confidence + 0.10, 1.0)
+        confidence = min(confidence + float(getattr(cfg, "itm_confidence_boost_amount", 0.10)), 1.0)
 
     return confidence
 
@@ -955,9 +956,13 @@ def get_effective_min_confidence(
     adx_14 = None if features is None else getattr(features, "adx_14", None)
 
     if time_remaining_seconds < 60:
-        return max(base_confidence, 0.75)
-    if time_remaining_seconds > 120 and adx_14 is not None and adx_14 > 30:
-        return min(base_confidence, 0.62)
+        return max(base_confidence, float(getattr(cfg, "final_window_min_confidence", 0.75)))
+    if (
+        time_remaining_seconds > 120
+        and adx_14 is not None
+        and adx_14 > float(getattr(cfg, "trend_priority_adx_threshold", 30.0))
+    ):
+        return min(base_confidence, float(getattr(cfg, "trend_relaxed_min_confidence", 0.62)))
     return base_confidence
 
 
@@ -1066,7 +1071,7 @@ def _validate_trade_candidate(
     hard_deadline_execution = time_remaining_seconds < 5 and effective_confidence > 0.70
     high_confidence_override = effective_confidence > 0.90
     window_delta_master_switch = _is_window_delta_master_switch(features, time_remaining_seconds)
-    min_edge_required = 0.0 if high_confidence_override else 0.05
+    min_edge_required = 0.0 if high_confidence_override else float(getattr(cfg, "min_execution_edge", 0.02))
     chosen_side_quote = snapshot.buy_quote if snapshot.buy_quote is not None else implied_probability
     gap_to_target = None
     if features is not None and getattr(features, "price_usd", None) is not None and market.settlement_threshold not in (None, 0):
@@ -1076,6 +1081,7 @@ def _validate_trade_candidate(
         required_velocity_to_win = abs(gap_to_target) / time_remaining_seconds
     volatility_5m = None if features is None else getattr(features, "volatility_5m", None)
     rsi_9 = None if features is None else getattr(features, "rsi_9", None)
+    adx_14 = None if features is None else getattr(features, "adx_14", None)
     market_implied_probability = _get_market_implied_probability(market, decision, snapshot)
     chosen_side_market_win_chance = (
         float(market_implied_probability)
@@ -1091,7 +1097,7 @@ def _validate_trade_candidate(
     if (
         decision.side == "DOWN"
         and rsi_9 is not None
-        and rsi_9 < 30
+        and rsi_9 < float(getattr(cfg, "down_rsi_veto_threshold", 30.0))
     ):
         return _reject(
             submission_limit_price,
@@ -1104,7 +1110,13 @@ def _validate_trade_candidate(
     if (
         decision.side == "UP"
         and rsi_9 is not None
-        and rsi_9 > 70
+        and gap_to_target is not None
+        and gap_to_target > 0
+        and rsi_9 > (
+            float(getattr(cfg, "up_rsi_veto_trend_threshold", 85.0))
+            if adx_14 is not None and adx_14 > float(getattr(cfg, "up_rsi_veto_adx_threshold", 30.0))
+            else float(getattr(cfg, "up_rsi_veto_base_threshold", 70.0))
+        )
     ):
         return _reject(
             submission_limit_price,
@@ -1116,8 +1128,8 @@ def _validate_trade_candidate(
 
     if (
         chosen_side_market_win_chance is not None
-        and chosen_side_market_win_chance < 0.15
-        and 15 <= time_remaining_seconds < 120
+        and chosen_side_market_win_chance < float(getattr(cfg, "market_win_chance_veto_threshold", 0.15))
+        and 15 <= time_remaining_seconds < int(getattr(cfg, "market_win_chance_veto_end_seconds", 120))
     ):
         return _reject(
             submission_limit_price,
@@ -1130,7 +1142,7 @@ def _validate_trade_candidate(
     if (
         required_velocity_to_win is not None
         and volatility_5m not in (None, 0)
-        and required_velocity_to_win > (float(volatility_5m) / 10.0)
+        and required_velocity_to_win > (float(volatility_5m) / float(getattr(cfg, "required_velocity_divisor", 15.0)))
     ):
         return _reject(
             submission_limit_price,
@@ -1138,7 +1150,7 @@ def _validate_trade_candidate(
                 "Velocity/volatility veto blocked trade "
                 f"(required_velocity_to_win={required_velocity_to_win:.3f}; "
                 f"volatility_5m={float(volatility_5m):.3f}; "
-                f"threshold={(float(volatility_5m) / 10.0):.3f})"
+                f"threshold={(float(volatility_5m) / float(getattr(cfg, 'required_velocity_divisor', 15.0))):.3f})"
             ),
         )
 
@@ -1182,21 +1194,6 @@ def _validate_trade_candidate(
             (
                 "Quote-price divergence veto blocked UP trade "
                 f"(up_buy_quote={chosen_side_quote:.3f})"
-            ),
-        )
-
-    if (
-        decision.side == "UP"
-        and rsi_9 is not None
-        and rsi_9 > 85
-        and gap_to_target is not None
-        and gap_to_target > 0
-    ):
-        return _reject(
-            submission_limit_price,
-            (
-                "RSI ceiling veto blocked UP trade above strike "
-                f"(rsi_9={rsi_9:.3f}; gap={gap_to_target:.3f})"
             ),
         )
 
@@ -1251,18 +1248,10 @@ def _execute_paper_trade(
     live_price = snapshot.reference_price
     submission_limit_price = get_submission_limit_price(snapshot)
     submission_limit_label = get_submission_limit_label()
-    max_order_budget_usd = _get_max_order_budget_usd(cfg)
     token_id = snapshot.token_id
     if submission_limit_price is None or live_price is None:
         raise RuntimeError("Paper trade execution called without a valid priced snapshot.")
-    decision_confidence = float(
-        decision.confidence if effective_confidence is None else effective_confidence
-    )
-    size, used_high_confidence_override = _get_order_size_for_decision(
-        decision_confidence,
-        cfg,
-        submission_limit_price,
-    )
+    size = _get_order_size_for_decision(cfg)
     quoted_price_at_entry = snapshot.buy_quote
     actual_fill_price = submission_limit_price
     realized_slippage_bps = _compute_realized_slippage_bps(
@@ -1279,7 +1268,7 @@ def _execute_paper_trade(
             price=submission_limit_price,
             token_id=token_id,
             reason=(
-                f"Order budget {max_order_budget_usd:.3f} is too small for "
+                "Configured shares_per_trade is non-positive for "
                 f"{submission_limit_label} {submission_limit_price:.3f}"
             ),
             live_order_response=None,
@@ -1306,8 +1295,7 @@ def _execute_paper_trade(
             f"actual_fill_price={_fmt_price_debug(actual_fill_price)}; "
             f"realized_slippage_bps={_fmt_price_debug(realized_slippage_bps)}; "
             f"book_depth_at_fill={_fmt_price_debug(book_depth_at_fill)}; "
-            f"max_order_price_usd={max_order_budget_usd:.3f}; "
-            f"high_confidence_size_override={used_high_confidence_override}; "
+            f"shares_per_trade={size:.4f}; "
             f"{snapshot.submit_reason})"
         ),
         live_order_response=None,
@@ -1328,15 +1316,6 @@ def _estimate_live_fee(size: float, limit_price: float, fee_rate_bps: int) -> fl
 
 def _get_order_notional(size: float, limit_price: float) -> float:
     return round(size * limit_price, 6)
-
-
-def _size_for_max_budget(max_budget_usd: float, limit_price: float) -> float:
-    if limit_price <= 0:
-        raise RuntimeError("Cannot size an order with a non-positive limit price.")
-    if max_budget_usd <= 0:
-        return 0.0
-    raw_size = max_budget_usd / limit_price
-    return math.floor(raw_size * 10_000) / 10_000
 
 
 def _quantize_live_buy_size_for_amount_precision(price: float, size: float) -> float:
@@ -1369,14 +1348,6 @@ def _quantize_live_buy_size_for_amount_precision(price: float, size: float) -> f
     return float(quantized_size.quantize(Decimal("0.0001"), rounding=ROUND_DOWN))
 
 
-def _get_max_order_budget_usd(cfg) -> float:
-    if hasattr(cfg, "max_order_price_usd"):
-        return max(float(cfg.max_order_price_usd), 0.0)
-    if hasattr(cfg, "trade_shares_size"):
-        return max(float(cfg.trade_shares_size), 0.0)
-    return 0.0
-
-
 def _get_rejection_intent_context(
     decision: Optional[LlmDecision],
     snapshot: Optional[TokenQuoteSnapshot],
@@ -1388,14 +1359,7 @@ def _get_rejection_intent_context(
     shares_requested = None
     if decision is not None and submission_limit_price not in (None, 0):
         cfg = get_trading_config()
-        decision_confidence = float(
-            decision.confidence if effective_confidence is None else effective_confidence
-        )
-        shares_requested, _ = _get_order_size_for_decision(
-            decision_confidence,
-            cfg,
-            float(submission_limit_price),
-        )
+        shares_requested = _get_order_size_for_decision(cfg)
         if not getattr(cfg, "paper_trading", True):
             shares_requested = _quantize_live_buy_size_for_amount_precision(
                 float(submission_limit_price),
@@ -1411,16 +1375,8 @@ def _get_rejection_intent_context(
     }
 
 
-def _get_order_size_for_decision(
-    decision_confidence: float,
-    cfg,
-    submission_limit_price: float,
-) -> tuple[float, bool]:
-    threshold = getattr(cfg, "max_size_high_confidence_threshold", 1.1)
-    override_shares = max(getattr(cfg, "max_size_high_confidence_shares", 0.0), 0.0)
-    if override_shares > 0 and decision_confidence >= threshold:
-        return override_shares, True
-    return _size_for_max_budget(_get_max_order_budget_usd(cfg), submission_limit_price), False
+def _get_order_size_for_decision(cfg) -> float:
+    return max(float(getattr(cfg, "shares_per_trade", 5.0)), 0.0)
 
 
 def _scale_live_size_for_min_notional(
@@ -1486,7 +1442,6 @@ def _execute_live_trade(
     live_price = snapshot.reference_price
     submission_limit_price = get_submission_limit_price(snapshot)
     submission_limit_label = get_submission_limit_label()
-    max_order_budget_usd = _get_max_order_budget_usd(cfg)
     time_remaining_seconds = _get_time_remaining_seconds(market)
     use_fok = time_remaining_seconds <= 10
     order_type_label = "FOK" if use_fok else "GTC"
@@ -1499,11 +1454,7 @@ def _execute_live_trade(
     if submission_limit_price is None or live_price is None:
         raise RuntimeError("Live trade execution called without a valid priced snapshot.")
 
-    size, used_high_confidence_override = _get_order_size_for_decision(
-        decision_confidence,
-        cfg,
-        submission_limit_price,
-    )
+    size = _get_order_size_for_decision(cfg)
     size = _quantize_live_buy_size_for_amount_precision(submission_limit_price, size)
     quoted_price_at_entry = snapshot.buy_quote
     book_depth_at_fill = _get_book_depth_at_fill(snapshot)
@@ -1520,7 +1471,7 @@ def _execute_live_trade(
             price=submission_limit_price,
             token_id=snapshot.token_id,
             reason=(
-                f"Order budget {max_order_budget_usd:.3f} is too small for "
+                f"Configured shares_per_trade is non-positive for "
                 f"{submission_limit_label} {submission_limit_price:.3f}"
             ),
             live_order_response=None,
@@ -1530,7 +1481,7 @@ def _execute_live_trade(
             book_depth_at_fill=book_depth_at_fill,
             shares_requested=size,
         )
-    if size < min_order_size and not used_high_confidence_override:
+    if size < min_order_size:
         return TradeExecutionResult(
             executed=False,
             side=decision.side,
@@ -1538,10 +1489,9 @@ def _execute_live_trade(
             price=submission_limit_price,
             token_id=snapshot.token_id,
             reason=(
-                "Order budget cannot satisfy live minimum order size "
-                f"(max_order_price_usd={max_order_budget_usd:.3f}; "
+                "Configured shares_per_trade cannot satisfy live minimum order size "
                 f"{submission_limit_label}={submission_limit_price:.3f}; "
-                f"max_size={size:.4f}; required_min_size={min_order_size:.4f})"
+                f"shares_per_trade={size:.4f}; required_min_size={min_order_size:.4f})"
             ),
             live_order_response=None,
             execution_snapshot=snapshot,
@@ -1587,8 +1537,7 @@ def _execute_live_trade(
                 price=submission_limit_price,
                 token_id=snapshot.token_id,
                 reason=(
-                    "Exchange minimum size exceeds configured order budget "
-                    f"(max_order_price_usd={max_order_budget_usd:.3f}; "
+                    "Exchange minimum size exceeds configured shares_per_trade "
                     f"attempted_size={size:.4f}; exchange_minimum_size={minimum_size:.4f}; "
                     f"{submission_limit_label}={submission_limit_price:.3f})"
                 ),
@@ -1655,7 +1604,6 @@ def _execute_live_trade(
             f"realized_slippage_bps={_fmt_price_debug(realized_slippage_bps)}; "
             f"order_latency_ms={order_latency_ms}; "
             f"book_depth_at_fill={_fmt_price_debug(book_depth_at_fill)}; "
-            f"high_confidence_size_override={used_high_confidence_override}; "
             f"required_cash={required_cash:.3f}; "
             f"estimated_fee={estimated_fee:.3f}; fee_rate_bps={cfg.live_fee_rate_bps}; "
             f"{snapshot.submit_reason})"
