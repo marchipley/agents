@@ -229,14 +229,16 @@ def _completed_order_final_log_path(
     market_slug: str,
     outcome_label: str,
     side: Optional[str] = None,
+    not_filled: bool = False,
     trade_number_in_period: Optional[int] = None,
 ) -> str:
     completed_orders_dir = os.path.join(os.getcwd(), "completed_orders")
     os.makedirs(completed_orders_dir, exist_ok=True)
     side_suffix = f"_{str(side).lower()}" if side else ""
+    fill_suffix = "_NotFilled" if not_filled else ""
     return os.path.join(
         completed_orders_dir,
-        f"completed_order_{outcome_label}{side_suffix}_{_extract_slug_timestamp(market_slug)}{_trade_number_suffix(trade_number_in_period)}.txt",
+        f"completed_order_{outcome_label}{side_suffix}{fill_suffix}_{_extract_slug_timestamp(market_slug)}{_trade_number_suffix(trade_number_in_period)}.txt",
     )
 
 
@@ -249,6 +251,18 @@ def _completed_order_attempt_log_path(
     return os.path.join(
         completed_orders_dir,
         f"completed_order_attempt_{_extract_slug_timestamp(market_slug)}{_trade_number_suffix(trade_number_in_period)}.txt",
+    )
+
+
+def _failed_order_log_path(
+    market_slug: str,
+    trade_number_in_period: Optional[int] = None,
+) -> str:
+    completed_orders_dir = os.path.join(os.getcwd(), "completed_orders")
+    os.makedirs(completed_orders_dir, exist_ok=True)
+    return os.path.join(
+        completed_orders_dir,
+        f"failed_order_{_extract_slug_timestamp(market_slug)}{_trade_number_suffix(trade_number_in_period)}.txt",
     )
 
 
@@ -796,6 +810,31 @@ def promote_pending_period_log_to_completed(
         completed_file.write(content)
 
 
+def _copy_pending_period_log_to_path(
+    market_slug: str,
+    destination_path: str,
+) -> None:
+    pending_path = _pending_period_log_path(market_slug)
+    if os.path.exists(destination_path):
+        return
+    if os.path.exists(pending_path):
+        with open(pending_path, "r", encoding="utf-8") as pending_file:
+            content = pending_file.read()
+        with open(destination_path, "w", encoding="utf-8") as destination_file:
+            destination_file.write(content)
+        return
+    with open(destination_path, "w", encoding="utf-8") as destination_file:
+        destination_file.write(
+            "\n".join(
+                [
+                    f"market_slug={market_slug}",
+                    f"slug_timestamp={_extract_slug_timestamp(market_slug)}",
+                    "",
+                ]
+            )
+        )
+
+
 def finalize_pending_period_log(market_slug: str, final_btc_price: Optional[float] = None) -> None:
     if not market_slug:
         return
@@ -960,8 +999,9 @@ def append_completed_order_tick(
         final_path = _completed_order_final_log_path(
             order.market_slug,
             outcome_label,
-            period_direction,
-            getattr(order, "trade_number_in_period", None),
+            side=period_direction,
+            not_filled=getattr(order, "actual_fill_price", None) is None,
+            trade_number_in_period=getattr(order, "trade_number_in_period", None),
         )
         try:
             os.replace(log_path, final_path)
@@ -1142,6 +1182,85 @@ def append_failed_order_attempt(
                     "regime_fingerprint=" + json.dumps(regime_fingerprint, sort_keys=True),
                 ]
             )
+        lines.append("")
+        log_file.write("\n".join(lines))
+
+
+def append_failed_live_order(
+    market,
+    decision,
+    failure_reason: str,
+    *,
+    features=None,
+    up_snapshot: TokenQuoteSnapshot = None,
+    down_snapshot: TokenQuoteSnapshot = None,
+    observed_at: datetime = None,
+    trade_number_in_period: Optional[int] = None,
+) -> None:
+    observed_at = observed_at or datetime.now(timezone.utc)
+    log_path = _failed_order_log_path(
+        market.slug,
+        trade_number_in_period=trade_number_in_period,
+    )
+    _copy_pending_period_log_to_path(market.slug, log_path)
+    regime_fingerprint = _build_regime_fingerprint(
+        market_slug=market.slug,
+        observed_at=observed_at,
+        features=features,
+        up_snapshot=up_snapshot,
+        down_snapshot=down_snapshot,
+        current_btc_price=None if features is None else getattr(features, "price_usd", None),
+        period_open_price_to_beat=market.settlement_threshold,
+    )
+    with open(log_path, "a", encoding="utf-8") as log_file:
+        lines = [
+            f"observed_at={observed_at.isoformat()}",
+            "phase=LIVE_ORDER_RUNTIME_FAILURE",
+            f"period_open_price_to_beat={_fmt(market.settlement_threshold)}",
+            f"failure_side={getattr(decision, 'side', None)}",
+            f"failure_confidence={_fmt(getattr(decision, 'confidence', None))}",
+            f"effective_confidence={_fmt(_effective_confidence(decision, market=market, features=features))}",
+            f"failure_max_price_to_pay={_fmt(getattr(decision, 'max_price_to_pay', None))}",
+            f"failure_reason={failure_reason}",
+            f"llm_raw_reasoning={getattr(decision, 'reason', '')}",
+            f"market_time_remaining_seconds={_fmt(_market_time_remaining_seconds(market.slug, observed_at))}",
+            f"market_time_remaining_mmss={_fmt_mmss_from_seconds(_market_time_remaining_seconds(market.slug, observed_at))}",
+        ]
+        if up_snapshot is not None:
+            lines.extend(_snapshot_summary("up", up_snapshot))
+        if down_snapshot is not None:
+            lines.extend(_snapshot_summary("down", down_snapshot))
+        if features is not None:
+            lines.extend(
+                [
+                    f"btc_price={_fmt(getattr(features, 'price_usd', None))}",
+                    f"delta_prev_tick={getattr(features, 'delta_from_previous_tick', None)}",
+                    f"momentum_1m={getattr(features, 'momentum_1m', None)}",
+                    f"momentum_5m={getattr(features, 'momentum_5m', None)}",
+                    f"velocity_15s={getattr(features, 'velocity_15s', None)}",
+                    f"velocity_30s={getattr(features, 'velocity_30s', None)}",
+                    f"momentum_acceleration={getattr(features, 'momentum_acceleration', None)}",
+                    f"volatility_5m={getattr(features, 'volatility_5m', None)}",
+                    f"consecutive_flat_ticks={getattr(features, 'consecutive_flat_ticks', None)}",
+                    f"consecutive_directional_ticks={getattr(features, 'consecutive_directional_ticks', None)}",
+                    f"last_10_ticks_direction={getattr(features, 'last_10_ticks_direction', None)}",
+                    f"rsi_9={getattr(features, 'rsi_9', None)}",
+                    f"rsi_speed_divergence={getattr(features, 'rsi_speed_divergence', None)}",
+                    f"ema_9={getattr(features, 'ema_9', None)}",
+                    f"ema_21={getattr(features, 'ema_21', None)}",
+                    f"ema_alignment={getattr(features, 'ema_alignment', None)}",
+                    f"ema_cross_direction={getattr(features, 'ema_cross_direction', None)}",
+                    f"adx_14={getattr(features, 'adx_14', None)}",
+                    f"atr_14={getattr(features, 'atr_14', None)}",
+                    "regime_fingerprint=" + json.dumps(regime_fingerprint, sort_keys=True),
+                ]
+            )
+        prompt_text = getattr(decision, "prompt_text", None)
+        if prompt_text:
+            lines.extend(["llm_prompt_start", prompt_text, "llm_prompt_end"])
+        raw_response_text = getattr(decision, "raw_response_text", None)
+        if raw_response_text:
+            lines.extend(["llm_raw_response_start", raw_response_text, "llm_raw_response_end"])
         lines.append("")
         log_file.write("\n".join(lines))
 
@@ -1789,7 +1908,19 @@ def run_once() -> None:
         result = maybe_execute_trade(market, decision, features=features, snapshot=decision_snapshot)
     except RuntimeError as exc:
         print(f"ERROR: {exc}")
-        sys.exit(1)
+        append_failed_live_order(
+            market,
+            decision,
+            str(exc),
+            features=features,
+            up_snapshot=up_snapshot,
+            down_snapshot=down_snapshot,
+            observed_at=features.as_of,
+            trade_number_in_period=state.trades_executed + 1,
+        )
+        if cfg.debug:
+            print("-" * 80)
+        return
     if result.execution_snapshot is not None and cfg.debug:
         print_quote_snapshot_from_snapshot("Execution", result.execution_snapshot, debug=True)
     print_trade_execution_result(result, debug=cfg.debug)

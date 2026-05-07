@@ -5,22 +5,99 @@ from dataclasses import dataclass
 from dotenv import load_dotenv
 from typing import Optional
 
+# Base minimum confidence required for a directional trade before any
+# time-remaining or trend-strength adjustments are applied.
+# Example: raising this from 0.65 to 0.72 reduces trade count by forcing
+# stronger raw LLM conviction; lowering it to 0.60 allows more marginal trades.
 DEFAULT_MIN_CONFIDENCE = 0.65
+
+# Fixed number of shares to submit for each paper/live trade.
+# Example: increasing from 5 to 10 doubles position size and PnL variance;
+# lowering to 3 reduces exposure per order.
 SHARES_PER_TRADE = 5
+
+# ADX level where the bot should still treat early-window conditions with caution.
+# This is mainly a prompt/regime threshold for "Discovery Phase" behavior.
+# Example: lowering from 15 to 10 makes the bot more willing to view weak trends
+# as actionable; raising to 20 makes early-window trading more conservative.
 DISCOVERY_ADX_CAUTION_THRESHOLD = 15.0
+
+# ADX level that marks a trend as strong enough to relax the normal confidence floor.
+# Example: lowering from 30 to 25 will allow more strong-trend trades to pass with
+# slightly lower confidence; raising to 35 means only very strong trends get that benefit.
 TREND_PRIORITY_ADX_THRESHOLD = 30.0
+
+# Relaxed minimum confidence used when ADX is above TREND_PRIORITY_ADX_THRESHOLD
+# and there is still meaningful time left in the period.
+# Example: lowering from 0.62 to 0.58 increases order rate in strong trends;
+# raising to 0.66 keeps the bot stricter even when momentum is obvious.
 TREND_RELAXED_MIN_CONFIDENCE = 0.62
+
+# Harder minimum confidence floor used in the final minute of the period.
+# Example: raising from 0.75 to 0.80 blocks more late-window trades; lowering
+# to 0.70 makes the bot more willing to take last-minute entries.
 FINAL_WINDOW_MIN_CONFIDENCE = 0.75
+
+# Minimum required execution edge above market implied probability for a trade
+# to pass, except for special very-high-confidence override cases.
+# Example: raising from 0.02 to 0.05 makes the bot demand more pricing edge;
+# lowering to 0.00 allows trades closer to fair value.
 MIN_EXECUTION_EDGE = 0.02
+
+# Distance in USD beyond the strike that the chosen side must already be winning
+# by before the in-the-money confidence boost can apply.
+# Example: lowering from 20 to 10 lets smaller leads earn a confidence boost;
+# raising to 30 means only clearly in-the-money trades get that boost.
 ITM_CONFIDENCE_BOOST_USD = 20.0
+
+# Minimum market win chance required before the in-the-money confidence boost
+# is allowed to apply.
+# Example: lowering from 0.60 to 0.55 makes the boost trigger more often;
+# raising to 0.70 restricts the boost to stronger market consensus cases.
 ITM_CONFIDENCE_BOOST_MARKET_WIN_CHANCE = 0.60
+
+# Amount added to decision confidence when the in-the-money boost conditions are met.
+# Example: raising from 0.10 to 0.15 helps more trades clear confidence/edge gates;
+# lowering to 0.05 makes the boost more modest.
 ITM_CONFIDENCE_BOOST_AMOUNT = 0.10
+
+# Low market-win-chance threshold used by the prompt/execution guardrails to avoid
+# betting on extremely unlikely reversals.
+# Example: lowering from 0.15 to 0.10 allows more contrarian entries; raising
+# to 0.20 blocks more low-probability fade attempts.
 MARKET_WIN_CHANCE_VETO_THRESHOLD = 0.15
+
+# Time-remaining boundary for the market-win-chance veto window.
+# Example: lowering from 120 to 90 shortens the veto period and allows more trades
+# earlier in the window; raising to 180 keeps the reversal veto active longer.
 MARKET_WIN_CHANCE_VETO_END_SECONDS = 120
+
+# Base RSI ceiling for blocking UP trades in overbought conditions.
+# This base threshold applies when trend strength is not extreme.
+# Example: lowering from 70 to 65 blocks more UP trades on stretched moves;
+# raising to 75 allows more breakout continuation attempts.
 UP_RSI_VETO_BASE_THRESHOLD = 70.0
+
+# Higher RSI ceiling for blocking UP trades when ADX confirms a strong trend.
+# Example: lowering from 85 to 80 makes the bot stop chasing strong-up moves sooner;
+# raising to 90 allows more late continuation trades before vetoing them.
 UP_RSI_VETO_TREND_THRESHOLD = 85.0
+
+# ADX threshold that switches the UP RSI veto from the base threshold to the
+# stronger-trend threshold above.
+# Example: lowering from 30 to 25 makes the trend-aware RSI ceiling engage earlier;
+# raising to 35 means only stronger trends get the looser RSI allowance.
 UP_RSI_VETO_ADX_THRESHOLD = 30.0
+
+# RSI floor for blocking DOWN trades in oversold conditions.
+# Example: lowering from 30 to 25 allows more downside continuation trades;
+# raising to 35 vetoes more "falling knife" short entries.
 DOWN_RSI_VETO_THRESHOLD = 30.0
+
+# Divisor used in the required-velocity sanity check.
+# The bot rejects trades when required_velocity_to_win exceeds volatility_5m / divisor.
+# Example: raising from 15 to 20 makes the check stricter and blocks more
+# mathematically difficult trades; lowering to 10 makes it more permissive.
 REQUIRED_VELOCITY_DIVISOR = 15.0
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))

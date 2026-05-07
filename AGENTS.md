@@ -227,6 +227,9 @@ What the BTC agent does today:
   - `completed_order_win_up_<slug_timestamp>.txt`
   - `completed_order_loss_down_<slug_timestamp>.txt`
   - and `...-<trade_num>.txt` suffixes still apply when multi-trade-per-period mode is enabled
+- If an order was submitted/tracked but never resolved an actual fill price by period close, the finalized filename now inserts `NotFilled` before the slug timestamp, for example:
+  - `completed_order_win_up_NotFilled_<slug_timestamp>.txt`
+  - `completed_order_loss_down_NotFilled_<slug_timestamp>.txt`
 - While an executed order is still unresolved, its working log file remains `completed_order_<slug_timestamp>.txt` and is only renamed to the finalized `completed_order_<win/loss>_<up/down>_<slug_timestamp>.txt` form once the period result is known.
 - Preserves every analyzed 5-minute window under `completed_orders/completed_period_<slug_timestamp>.txt` while the period is still unresolved, and finalizes resolved no-trade period files as:
   - `completed_period_up_<slug_timestamp>.txt`
@@ -238,6 +241,7 @@ What the BTC agent does today:
   - `implied_oracle_price`
   - `feed_drift_usd`
   - `last_10_ticks_direction`
+- Live submission-time exceptions no longer abort the full bot process. Instead, the agent writes `completed_orders/failed_order_<slug_timestamp>.txt` containing the copied per-period context collected so far plus the live submission failure reason, then continues to the next loop tick.
 - Completed-period logs now also preserve `up_market_probability` and `down_market_probability` from the live per-loop market view, which now prefers the token `best_ask` values that match Polymarket’s displayed probabilities.
 - Pre-order decision logging now also records `effective_confidence`, which is the regime-adjusted operational confidence after the winning-advantage boost and the dynamic minimum-confidence floor are applied.
 - Pre-order and attempt logs now also record:
