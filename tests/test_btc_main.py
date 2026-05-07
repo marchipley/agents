@@ -58,7 +58,7 @@ class TestBtcMain(unittest.TestCase):
 
     def setUp(self):
         self._live_probability_patcher = patch(
-            "custom.btc_agent.main.fetch_live_market_probabilities_from_clob_ws",
+            "custom.btc_agent.market_lookup.fetch_live_market_probabilities_from_clob_ws",
             return_value=(0.50, 0.50),
         )
         self._live_probability_patcher.start()

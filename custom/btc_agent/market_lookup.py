@@ -4,14 +4,13 @@ import json
 import os
 import re
 import time
-import asyncio
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from html import unescape
 from typing import Optional
 
 import requests
-import websockets
+import websocket
 
 from .config import get_polymarket_config, get_trading_config
 from .network import http_get
@@ -77,29 +76,31 @@ def _parse_live_market_probabilities_message(
     return up_probability, down_probability
 
 
-async def _fetch_live_market_probabilities_from_clob_ws_async(
+def fetch_live_market_probabilities_from_clob_ws(
     up_token_id: str,
     down_token_id: str,
 ) -> tuple[float, float]:
-    async with websockets.connect(
-        _CLOB_MARKET_WS_URL,
-        ping_interval=None,
-        open_timeout=_CLOB_MARKET_WS_TIMEOUT_SECONDS,
-        close_timeout=_CLOB_MARKET_WS_TIMEOUT_SECONDS,
-    ) as ws:
-        sub_msg = {
-            "type": "market",
-            "assets_ids": [str(up_token_id), str(down_token_id)],
-        }
-        await ws.send(json.dumps(sub_msg))
+    ws = None
+    try:
+        ws = websocket.create_connection(
+            _CLOB_MARKET_WS_URL,
+            timeout=_CLOB_MARKET_WS_TIMEOUT_SECONDS,
+        )
+        ws.send(
+            json.dumps(
+                {
+                    "type": "market",
+                    "assets_ids": [str(up_token_id), str(down_token_id)],
+                }
+            )
+        )
 
         up_probability = None
         down_probability = None
         deadline = time.monotonic() + _CLOB_MARKET_WS_TIMEOUT_SECONDS
         while time.monotonic() < deadline:
-            timeout_seconds = max(deadline - time.monotonic(), 0.1)
-            raw_message = await asyncio.wait_for(ws.recv(), timeout=timeout_seconds)
-            if raw_message in {"PONG", "[]"}:
+            raw_message = ws.recv()
+            if raw_message in {"PONG", "[]", "", None}:
                 continue
             parsed_up, parsed_down = _parse_live_market_probabilities_message(
                 raw_message,
@@ -113,27 +114,24 @@ async def _fetch_live_market_probabilities_from_clob_ws_async(
             if up_probability is not None and down_probability is not None:
                 return float(up_probability), float(down_probability)
 
-    raise RuntimeError(
-        "Did not receive best_ask probabilities for both outcome tokens from the CLOB market websocket."
-    )
-
-
-def fetch_live_market_probabilities_from_clob_ws(
-    up_token_id: str,
-    down_token_id: str,
-) -> tuple[float, float]:
-    try:
-        return asyncio.run(
-            _fetch_live_market_probabilities_from_clob_ws_async(
-                up_token_id=up_token_id,
-                down_token_id=down_token_id,
-            )
+        raise RuntimeError(
+            "Did not receive best_ask probabilities for both outcome tokens from the CLOB market websocket."
         )
     except Exception as exc:
         raise RuntimeError(
             "Failed to fetch live market probabilities from CLOB websocket "
             f"for up_token_id={up_token_id}, down_token_id={down_token_id}: {exc}"
         ) from exc
+    finally:
+        if ws is not None:
+            try:
+                ws.close(timeout=0)
+            except Exception:
+                pass
+            try:
+                ws.shutdown()
+            except Exception:
+                pass
 
 def _current_btc_5m_slug() -> str:
     """
@@ -1173,8 +1171,15 @@ def _extract_market_from_event(event: dict, slug: str) -> Optional[BtcUpDownMark
     up_token = None
     down_token = None
 
+    # For BTC up/down markets, Polymarket's clobTokenIds ordering is the
+    # authoritative outcome mapping:
+    #   index 0 => YES => UP
+    #   index 1 => NO  => DOWN
+    if slug.startswith("btc-updown-5m-"):
+        up_token, down_token = _parse_clob_token_ids(m.get("clobTokenIds"))
+
     tokens = m.get("tokens") or []
-    if len(tokens) >= 2:
+    if (not up_token or not down_token) and len(tokens) >= 2:
         for t in tokens:
             outcome = (t.get("outcome") or "").lower()
             symbol = (t.get("symbol") or "").lower()
@@ -1476,6 +1481,8 @@ def get_btc_updown_market_by_slug(slug: str) -> Optional[BtcUpDownMarket]:
     if market is None:
         return None
     market = _apply_cached_settlement_threshold(market)
+    if market.slug.startswith("btc-updown-5m-"):
+        market = _refresh_market_probabilities(market) or market
     if _coerce_btc_threshold(market.settlement_threshold) is not None:
         return _cache_settlement_threshold(market)
     market = _hydrate_missing_threshold_from_page(market, slug)

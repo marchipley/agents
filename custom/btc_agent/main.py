@@ -16,7 +16,6 @@ from .config import get_trading_config
 from .market_lookup import (
     build_price_to_beat_debug_reports,
     fetch_btc_resolution_price_for_slug,
-    fetch_live_market_probabilities_from_clob_ws,
     find_current_btc_updown_market,
     get_btc_updown_market_by_slug,
 )
@@ -1324,17 +1323,6 @@ def print_quote_snapshot_from_snapshot(
     print(f"  spread                 = {_fmt(q.spread)}")
 
 
-def _apply_live_market_probabilities_from_datasource(market) -> None:
-    if market is None:
-        return
-    up_probability, down_probability = fetch_live_market_probabilities_from_clob_ws(
-        market.up_token_id,
-        market.down_token_id,
-    )
-    market.up_market_probability = float(up_probability)
-    market.down_market_probability = float(down_probability)
-
-
 def get_decision_quote_snapshot(
     market,
     decision,
@@ -1695,7 +1683,6 @@ def run_once() -> None:
     down_snapshot = None
     up_snapshot = get_token_quote_snapshot(market.up_token_id)
     down_snapshot = get_token_quote_snapshot(market.down_token_id)
-    _apply_live_market_probabilities_from_datasource(market)
 
     print_market_context(market, debug=cfg.debug)
 
