@@ -837,23 +837,23 @@ class TestBtcExecutor(unittest.TestCase):
             reason="test",
         )
         features = types.SimpleNamespace(
-            price_usd=140.0,
-            volatility_5m=18.0,
+            price_usd=180.0,
+            volatility_5m=10.0,
             rsi_9=40.0,
             delta_pct_from_window_open=-0.001,
         )
         snapshot = TokenQuoteSnapshot(
             token_id="down-token",
-            buy_quote=0.20,
-            midpoint=0.20,
-            last_trade_price=0.20,
-            reference_price=0.20,
-            target_limit_price=0.20,
-            recommended_limit_price=0.20,
+            buy_quote=0.80,
+            midpoint=0.80,
+            last_trade_price=0.80,
+            reference_price=0.80,
+            target_limit_price=0.80,
+            recommended_limit_price=0.80,
             ok_to_submit=True,
             submit_reason="ok",
-            best_bid=0.19,
-            best_ask=0.20,
+            best_bid=0.79,
+            best_ask=0.80,
             tick_size=0.01,
             spread=0.01,
         )
@@ -1038,30 +1038,31 @@ class TestBtcExecutor(unittest.TestCase):
         self.assertIn("shares_per_trade=5.0000", result.reason)
 
     def test_validate_trade_candidate_allows_t5_deadline_execution_despite_negative_edge(self):
+        fake_now_ts = int(datetime.now(timezone.utc).timestamp())
         market = types.SimpleNamespace(
             up_token_id="up-token",
             down_token_id="down-token",
-            end_ts=0,
+            end_ts=fake_now_ts + 4,
             volume=5000.0,
         )
         decision = types.SimpleNamespace(
             side="UP",
-            confidence=0.76,
+            confidence=0.86,
             max_price_to_pay=1.0,
             reason="test",
         )
         snapshot = TokenQuoteSnapshot(
             token_id="up-token",
-            buy_quote=0.83,
-            midpoint=0.83,
-            last_trade_price=0.83,
-            reference_price=0.83,
-            target_limit_price=0.83,
-            recommended_limit_price=0.83,
+            buy_quote=0.89,
+            midpoint=0.89,
+            last_trade_price=0.89,
+            reference_price=0.89,
+            target_limit_price=0.89,
+            recommended_limit_price=0.89,
             ok_to_submit=True,
             submit_reason="ok",
-            best_bid=0.82,
-            best_ask=0.83,
+            best_bid=0.88,
+            best_ask=0.89,
             tick_size=0.01,
             spread=0.01,
         )
@@ -1080,7 +1081,7 @@ class TestBtcExecutor(unittest.TestCase):
         )
         decision = types.SimpleNamespace(
             side="UP",
-            confidence=0.80,
+            confidence=0.90,
             max_price_to_pay=1.0,
             reason="test",
         )
@@ -1147,15 +1148,53 @@ class TestBtcExecutor(unittest.TestCase):
         self.assertIn("liquidity filter", rejection.reason)
 
     def test_validate_trade_candidate_blocks_thin_liquidity_by_spread(self):
+        fake_now_ts = int(datetime.now(timezone.utc).timestamp())
         market = types.SimpleNamespace(
             up_token_id="up-token",
             down_token_id="down-token",
-            end_ts=0,
+            end_ts=fake_now_ts + 180,
             volume=5000.0,
         )
         decision = types.SimpleNamespace(
             side="UP",
-            confidence=0.80,
+            confidence=0.90,
+            max_price_to_pay=1.0,
+            reason="test",
+        )
+        snapshot = TokenQuoteSnapshot(
+            token_id="up-token",
+            buy_quote=0.82,
+            midpoint=0.82,
+            last_trade_price=0.82,
+            reference_price=0.82,
+            target_limit_price=0.82,
+            recommended_limit_price=0.82,
+            ok_to_submit=True,
+            submit_reason="ok",
+            best_bid=0.795,
+            best_ask=0.845,
+            tick_size=0.01,
+            spread=0.05,
+            spread_bps=2926.8,
+        )
+
+        validated_snapshot, rejection = _validate_trade_candidate(market, decision, snapshot=snapshot)
+
+        self.assertIsNone(validated_snapshot)
+        self.assertIsNotNone(rejection)
+        self.assertIn("Thin liquidity blocked execution", rejection.reason)
+
+    def test_validate_trade_candidate_blocks_spread_above_configured_max(self):
+        fake_now_ts = int(datetime.now(timezone.utc).timestamp())
+        market = types.SimpleNamespace(
+            up_token_id="up-token",
+            down_token_id="down-token",
+            end_ts=fake_now_ts + 180,
+            volume=5000.0,
+        )
+        decision = types.SimpleNamespace(
+            side="UP",
+            confidence=0.90,
             max_price_to_pay=1.0,
             reason="test",
         )
@@ -1170,17 +1209,43 @@ class TestBtcExecutor(unittest.TestCase):
             ok_to_submit=True,
             submit_reason="ok",
             best_bid=0.70,
-            best_ask=0.94,
+            best_ask=0.82,
             tick_size=0.01,
-            spread=0.24,
-            spread_bps=2926.8,
+            spread=0.12,
+            spread_bps=1400.0,
         )
 
-        validated_snapshot, rejection = _validate_trade_candidate(market, decision, snapshot=snapshot)
+        with patch(
+            "custom.btc_agent.executor.get_trading_config",
+            return_value=types.SimpleNamespace(
+                min_confidence=0.65,
+                discovery_min_confidence=0.65,
+                trend_priority_adx_threshold=30.0,
+                trend_relaxed_min_confidence=0.62,
+                final_window_min_confidence=0.85,
+                min_execution_edge=0.02,
+                max_spread=0.10,
+                use_recommended_limit=True,
+                disable_liquidity_filter=True,
+                market_win_chance_veto_threshold=0.15,
+                market_win_chance_veto_end_seconds=120,
+                down_rsi_veto_threshold=30.0,
+                up_rsi_veto_base_threshold=70.0,
+                up_rsi_veto_trend_threshold=85.0,
+                up_rsi_veto_adx_threshold=30.0,
+                parabolic_rsi_speed_divergence_threshold=5.0,
+                parabolic_rsi_suspend_adx_threshold=35.0,
+                required_velocity_divisor=5.0,
+                itm_confidence_boost_usd=20.0,
+                itm_confidence_boost_atr_multiplier=0.50,
+                itm_confidence_boost_amount=0.15,
+            ),
+        ):
+            validated_snapshot, rejection = _validate_trade_candidate(market, decision, snapshot=snapshot)
 
         self.assertIsNone(validated_snapshot)
         self.assertIsNotNone(rejection)
-        self.assertIn("Thin liquidity blocked execution", rejection.reason)
+        self.assertIn("Spread veto blocked execution", rejection.reason)
 
     def test_validate_trade_candidate_allows_high_price_low_liquidity_trade_when_filter_disabled(self):
         market = types.SimpleNamespace(

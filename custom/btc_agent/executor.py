@@ -381,6 +381,9 @@ def compute_reference_price(
     midpoint: Optional[float],
     last_trade_price: Optional[float],
     spread: Optional[float],
+    best_ask: Optional[float] = None,
+    tick_size: Optional[float] = None,
+    imbalance_pressure: Optional[float] = None,
 ) -> Optional[float]:
     """
     Suggested decision reference:
@@ -391,6 +394,20 @@ def compute_reference_price(
     if midpoint is not None:
         if spread is not None and spread > 0.10 and last_trade_price is not None:
             return last_trade_price
+        cfg = get_trading_config()
+        if (
+            best_ask is not None
+            and tick_size not in (None, 0)
+            and imbalance_pressure is not None
+            and imbalance_pressure > float(getattr(cfg, "imbalance_pricing_threshold", 0.50))
+        ):
+            ticks_to_shift = (
+                2
+                if imbalance_pressure > float(getattr(cfg, "imbalance_pricing_strong_threshold", 0.75))
+                else 1
+            )
+            shifted = midpoint + (float(tick_size) * ticks_to_shift)
+            return round(min(float(best_ask), shifted), 3)
         return midpoint
 
     if last_trade_price is not None:
@@ -545,15 +562,6 @@ def get_token_quote_snapshot(
     if best_bid is not None and best_ask is not None:
         spread = best_ask - best_bid
 
-    reference_price = compute_reference_price(
-        buy_quote=buy_quote,
-        midpoint=midpoint,
-        last_trade_price=last_trade_price,
-        spread=spread,
-    )
-    spread_bps = None
-    if spread is not None and reference_price not in (None, 0):
-        spread_bps = (spread / reference_price) * 10_000
     top_level_book_imbalance = None
     top_depth_levels = 5
     top_three_bid_size = sum(
@@ -571,6 +579,19 @@ def get_token_quote_snapshot(
     if total_top_three_size > 0:
         top_level_book_imbalance = top_three_bid_size / total_top_three_size
         imbalance_pressure = (top_three_bid_size - top_three_ask_size) / total_top_three_size
+
+    reference_price = compute_reference_price(
+        buy_quote=buy_quote,
+        midpoint=midpoint,
+        last_trade_price=last_trade_price,
+        spread=spread,
+        best_ask=best_ask,
+        tick_size=tick_size,
+        imbalance_pressure=imbalance_pressure,
+    )
+    spread_bps = None
+    if spread is not None and reference_price not in (None, 0):
+        spread_bps = (spread / reference_price) * 10_000
 
     target_limit_price = compute_target_limit_price(
         reference_price=reference_price,
@@ -684,6 +705,27 @@ def _compute_realized_slippage_bps(
     if quoted_price == 0:
         return None
     return ((fill_price - quoted_price) / quoted_price) * 10_000
+
+
+def _momentum_alignment(features: Optional[BtcFeatures]) -> Optional[bool]:
+    if features is None:
+        return None
+    values = [
+        getattr(features, "velocity_15s", None),
+        getattr(features, "velocity_30s", None),
+        getattr(features, "momentum_1m", None),
+    ]
+    if any(value is None for value in values):
+        return None
+    signs = []
+    for value in values:
+        if value > 0:
+            signs.append(1)
+        elif value < 0:
+            signs.append(-1)
+        else:
+            return False
+    return signs[0] == signs[1] == signs[2]
 
 
 def _extract_order_id_from_live_response(response: Any) -> Optional[str]:
@@ -1221,6 +1263,13 @@ def _validate_trade_candidate(
     gap_to_target = None
     if features is not None and getattr(features, "price_usd", None) is not None and market.settlement_threshold not in (None, 0):
         gap_to_target = float(features.price_usd) - float(market.settlement_threshold)
+    side_is_itm = (
+        gap_to_target is not None
+        and (
+            (decision.side == "UP" and gap_to_target > 0)
+            or (decision.side == "DOWN" and gap_to_target < 0)
+        )
+    )
     required_velocity_to_win = None
     if gap_to_target is not None and time_remaining_seconds > 0:
         required_velocity_to_win = abs(gap_to_target) / time_remaining_seconds
@@ -1281,6 +1330,28 @@ def _validate_trade_candidate(
         )
 
     if (
+        time_remaining_seconds > 240
+        and gap_to_target is not None
+        and features is not None
+        and getattr(features, "atr_14", None) not in (None, 0)
+        and abs(gap_to_target) < (0.2 * float(getattr(features, "atr_14", 0.0)))
+        and not (
+            _momentum_alignment(features) is True
+            and adx_14 is not None
+            and adx_14 >= float(getattr(cfg, "trend_priority_adx_threshold", 30.0))
+        )
+    ):
+        return _reject(
+            submission_limit_price,
+            (
+                "Discovery strike-buffer veto blocked early low-separation trade "
+                f"(gap={gap_to_target:.3f}; atr_14={float(getattr(features, 'atr_14', 0.0)):.3f}; "
+                f"buffer={(0.2 * float(getattr(features, 'atr_14', 0.0))):.3f}; "
+                f"time_remaining={time_remaining_seconds}s)"
+            ),
+        )
+
+    if (
         chosen_side_market_win_chance is not None
         and chosen_side_market_win_chance < float(getattr(cfg, "market_win_chance_veto_threshold", 0.15))
         and 15 <= time_remaining_seconds < int(getattr(cfg, "market_win_chance_veto_end_seconds", 120))
@@ -1295,13 +1366,14 @@ def _validate_trade_candidate(
 
     if (
         required_velocity_to_win is not None
+        and not side_is_itm
         and volatility_5m not in (None, 0)
         and required_velocity_to_win > (float(volatility_5m) / float(getattr(cfg, "required_velocity_divisor", 15.0)))
     ):
         return _reject(
             submission_limit_price,
             (
-                "Velocity/volatility veto blocked trade "
+                "Velocity/volatility veto blocked OTM trade "
                 f"(required_velocity_to_win={required_velocity_to_win:.3f}; "
                 f"volatility_5m={float(volatility_5m):.3f}; "
                 f"threshold={(float(volatility_5m) / float(getattr(cfg, 'required_velocity_divisor', 15.0))):.3f})"
@@ -1348,6 +1420,19 @@ def _validate_trade_candidate(
             (
                 "Quote-price divergence veto blocked UP trade "
                 f"(up_buy_quote={chosen_side_quote:.3f})"
+            ),
+        )
+
+    if (
+        snapshot.spread is not None
+        and snapshot.spread > float(getattr(cfg, "max_spread", 0.10))
+    ):
+        return _reject(
+            live_price,
+            (
+                "Spread veto blocked execution "
+                f"(spread={snapshot.spread:.3f}; "
+                f"max_spread={float(getattr(cfg, 'max_spread', 0.10)):.3f})"
             ),
         )
 

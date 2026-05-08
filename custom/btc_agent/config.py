@@ -1,6 +1,8 @@
 # custom/btc_agent/config.py
 
 import os
+import sys
+import importlib
 from dataclasses import dataclass
 from dotenv import load_dotenv
 from typing import Optional
@@ -15,18 +17,23 @@ DEFAULT_MIN_CONFIDENCE = 0.65
 # mathematically favorable early entries before the market fully trends.
 # Example: raising from 0.10 to 0.25 makes early entries rarer; lowering it
 # further makes the bot more willing to probe early-window setups.
-DISCOVERY_MIN_CONFIDENCE = 0.10
+DISCOVERY_MIN_CONFIDENCE = 0.65
 
 # Fixed number of shares to submit for each paper/live trade.
 # Example: increasing from 5 to 10 doubles position size and PnL variance;
 # lowering to 3 reduces exposure per order.
-SHARES_PER_TRADE = 5
+SHARES_PER_TRADE = 3
+
+# Maximum spread allowed by configuration for a trade candidate.
+# Example: raising from 0.06 to 0.10 allows participation in wider, more
+# volatile books; lowering it makes the bot stricter about entry quality.
+DEFAULT_MAX_SPREAD = 0.20
 
 # ADX level where the bot should still treat early-window conditions with caution.
 # This is mainly a prompt/regime threshold for "Discovery Phase" behavior.
 # Example: lowering from 15 to 10 makes the bot more willing to view weak trends
 # as actionable; raising to 20 makes early-window trading more conservative.
-DISCOVERY_ADX_CAUTION_THRESHOLD = 15.0
+DISCOVERY_ADX_CAUTION_THRESHOLD = 20.0
 
 # ADX level that marks a trend as strong enough to relax the normal confidence floor.
 # Example: lowering from 30 to 25 will allow more strong-trend trades to pass with
@@ -42,7 +49,7 @@ TREND_RELAXED_MIN_CONFIDENCE = 0.62
 # Harder minimum confidence floor used in the final minute of the period.
 # Example: raising from 0.75 to 0.80 blocks more late-window trades; lowering
 # to 0.70 makes the bot more willing to take last-minute entries.
-FINAL_WINDOW_MIN_CONFIDENCE = 0.75
+FINAL_WINDOW_MIN_CONFIDENCE = 0.85
 
 # Minimum required execution edge above market implied probability for a trade
 # to pass, except for special very-high-confidence override cases.
@@ -122,7 +129,27 @@ DOWN_RSI_VETO_THRESHOLD = 30.0
 # The bot rejects trades when required_velocity_to_win exceeds volatility_5m / divisor.
 # Example: raising from 15 to 20 makes the check stricter and blocks more
 # mathematically difficult trades; lowering to 10 makes it more permissive.
-REQUIRED_VELOCITY_DIVISOR = 15.0
+REQUIRED_VELOCITY_DIVISOR = 5.0
+
+# When order-book imbalance pressure is strongly positive for the chosen side,
+# shift the reference price toward the ask to favor faster fills.
+# Example: lowering this from 0.50 to 0.35 makes the bot react sooner to
+# imbalance; raising it makes the shift rarer.
+IMBALANCE_PRICING_THRESHOLD = 0.50
+
+# Stronger imbalance threshold that justifies a 2-tick shift instead of 1 tick.
+# Example: lowering from 0.75 to 0.65 makes aggressive repricing more common.
+IMBALANCE_PRICING_STRONG_THRESHOLD = 0.75
+
+# Realized slippage guard in basis points. If the confirmed fill exceeds this
+# slippage relative to the quoted entry price, trigger a cooldown.
+# Example: lowering from 500 to 300 reacts faster to unstable books; raising it
+# tolerates more slippage before cooling down.
+SLIPPAGE_COOLDOWN_THRESHOLD_BPS = 500.0
+
+# Cooldown duration, in seconds, after a trade fills with extreme slippage.
+# Example: raising from 300 to 600 pauses the strategy longer after a bad fill.
+SLIPPAGE_COOLDOWN_SECONDS = 300
 
 # The total number of completed losing trades allowed in a single run before the
 # bot stops. This is a repo-visible non-secret runtime cap.
@@ -141,6 +168,10 @@ LIVE_ORDER_STATUS_POLL_INTERVAL_SECONDS = 0.75
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 load_dotenv(os.path.join(REPO_ROOT, ".env"))
+
+
+def reload_runtime_config_module():
+    return importlib.reload(sys.modules[__name__])
 
 
 def _parse_rpc_urls() -> list[str]:
@@ -196,7 +227,7 @@ class TradingConfig:
     min_confidence: float = DEFAULT_MIN_CONFIDENCE
     discovery_min_confidence: float = DISCOVERY_MIN_CONFIDENCE
     max_entry_price: float = 0.62
-    max_spread: float = 0.06
+    max_spread: float = DEFAULT_MAX_SPREAD
     discovery_adx_caution_threshold: float = DISCOVERY_ADX_CAUTION_THRESHOLD
     trend_priority_adx_threshold: float = TREND_PRIORITY_ADX_THRESHOLD
     trend_relaxed_min_confidence: float = TREND_RELAXED_MIN_CONFIDENCE
@@ -215,6 +246,10 @@ class TradingConfig:
     parabolic_rsi_suspend_adx_threshold: float = PARABOLIC_RSI_SUSPEND_ADX_THRESHOLD
     down_rsi_veto_threshold: float = DOWN_RSI_VETO_THRESHOLD
     required_velocity_divisor: float = REQUIRED_VELOCITY_DIVISOR
+    imbalance_pricing_threshold: float = IMBALANCE_PRICING_THRESHOLD
+    imbalance_pricing_strong_threshold: float = IMBALANCE_PRICING_STRONG_THRESHOLD
+    slippage_cooldown_threshold_bps: float = SLIPPAGE_COOLDOWN_THRESHOLD_BPS
+    slippage_cooldown_seconds: int = SLIPPAGE_COOLDOWN_SECONDS
     live_order_status_poll_attempts: int = LIVE_ORDER_STATUS_POLL_ATTEMPTS
     live_order_status_poll_interval_seconds: float = LIVE_ORDER_STATUS_POLL_INTERVAL_SECONDS
     market_slug_override: Optional[str] = None
@@ -307,7 +342,7 @@ def get_trading_config() -> TradingConfig:
             os.getenv("BTC_AGENT_DISCOVERY_MIN_CONFIDENCE", str(DISCOVERY_MIN_CONFIDENCE))
         ),
         max_entry_price=float(os.getenv("BTC_AGENT_MAX_ENTRY_PRICE", "0.62")),
-        max_spread=float(os.getenv("BTC_AGENT_MAX_SPREAD", "0.06")),
+        max_spread=float(os.getenv("BTC_AGENT_MAX_SPREAD", str(DEFAULT_MAX_SPREAD))),
         discovery_adx_caution_threshold=float(
             os.getenv("BTC_AGENT_DISCOVERY_ADX_CAUTION_THRESHOLD", str(DISCOVERY_ADX_CAUTION_THRESHOLD))
         ),
@@ -379,6 +414,25 @@ def get_trading_config() -> TradingConfig:
         ),
         required_velocity_divisor=float(
             os.getenv("BTC_AGENT_REQUIRED_VELOCITY_DIVISOR", str(REQUIRED_VELOCITY_DIVISOR))
+        ),
+        imbalance_pricing_threshold=float(
+            os.getenv("BTC_AGENT_IMBALANCE_PRICING_THRESHOLD", str(IMBALANCE_PRICING_THRESHOLD))
+        ),
+        imbalance_pricing_strong_threshold=float(
+            os.getenv(
+                "BTC_AGENT_IMBALANCE_PRICING_STRONG_THRESHOLD",
+                str(IMBALANCE_PRICING_STRONG_THRESHOLD),
+            )
+        ),
+        slippage_cooldown_threshold_bps=float(
+            os.getenv(
+                "BTC_AGENT_SLIPPAGE_COOLDOWN_THRESHOLD_BPS",
+                str(SLIPPAGE_COOLDOWN_THRESHOLD_BPS),
+            )
+        ),
+        slippage_cooldown_seconds=max(
+            int(os.getenv("BTC_AGENT_SLIPPAGE_COOLDOWN_SECONDS", str(SLIPPAGE_COOLDOWN_SECONDS))),
+            0,
         ),
         live_order_status_poll_attempts=max(
             int(

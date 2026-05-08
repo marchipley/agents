@@ -2,6 +2,7 @@
 
 from contextlib import nullcontext
 from datetime import datetime, timezone
+import math
 import os
 import re
 import select
@@ -12,6 +13,7 @@ import tty
 from typing import Optional
 import json
 
+from . import config as config_module
 from .config import get_trading_config
 from .market_lookup import (
     build_price_to_beat_debug_reports,
@@ -119,6 +121,20 @@ def _fmt_mmss_from_seconds(seconds: Optional[int]) -> str:
         return "None"
     minutes, secs = divmod(total_seconds, 60)
     return f"{minutes:02d}:{secs:02d}"
+
+
+def _apply_slippage_cooldown_if_needed(entity) -> None:
+    slippage_bps = getattr(entity, "realized_slippage_bps", None)
+    if slippage_bps is None:
+        return
+    cfg = get_trading_config()
+    threshold_bps = float(getattr(cfg, "slippage_cooldown_threshold_bps", 500.0))
+    if abs(float(slippage_bps)) <= threshold_bps:
+        return
+    loop_interval = max(int(os.getenv("BTC_AGENT_LOOP_INTERVAL", "30")), 1)
+    cooldown_seconds = max(int(getattr(cfg, "slippage_cooldown_seconds", 300)), 0)
+    cooldown_loops = max(int(math.ceil(cooldown_seconds / loop_interval)), 1)
+    set_trade_cooldown(cooldown_loops)
 
 
 def _effective_confidence(decision, market=None, features=None) -> float:
@@ -1038,12 +1054,15 @@ def finalize_completed_orders(previous_orders, current_btc_price: float) -> int:
     return loss_count
 
 
-def refresh_active_live_order_fills(active_orders) -> None:
+def refresh_active_live_order_fills(active_orders):
+    newly_filled = []
     for order in active_orders or []:
         try:
-            refresh_live_order_fill_status(order)
+            if refresh_live_order_fill_status(order):
+                newly_filled.append(order)
         except Exception:
             continue
+    return newly_filled
 
 
 def finalize_current_period_logs_on_exit() -> None:
@@ -1709,12 +1728,19 @@ def print_features(features, debug: bool) -> None:
     print(f"  trailing_5m_samples   = {features.trailing_5m_sample_count}")
 
 
-def print_market_context(market, debug: bool) -> None:
+def print_market_context(
+    market,
+    debug: bool,
+    up_snapshot: Optional[TokenQuoteSnapshot] = None,
+    down_snapshot: Optional[TokenQuoteSnapshot] = None,
+) -> None:
     print("Market:")
     print(f"  slug                  = {market.slug}")
     print(f"  period_open_price_to_beat = {_fmt(market.settlement_threshold)}")
     print(f"  up_market_probability = {_fmt(getattr(market, 'up_market_probability', None))}")
     print(f"  down_market_probability = {_fmt(getattr(market, 'down_market_probability', None))}")
+    print(f"  up_spread             = {_fmt(getattr(up_snapshot, 'spread', None))}")
+    print(f"  down_spread           = {_fmt(getattr(down_snapshot, 'spread', None))}")
     if not debug:
         return
 
@@ -1786,6 +1812,9 @@ def run_once() -> None:
     previous_orders = list(getattr(previous_state, "active_orders", []))
     previous_market_slug = getattr(previous_state, "market_slug", None)
     period_changed = sync_period_state(market.slug, market.title)
+    if _FIRST_LOOP or period_changed:
+        config_module.reload_runtime_config_module()
+        cfg = get_trading_config()
     state = get_state()
     if _FIRST_LOOP or period_changed:
         account = get_account_balance_snapshot()
@@ -1805,7 +1834,8 @@ def run_once() -> None:
             final_resolution_btc_price = None
         if previous_orders:
             try:
-                refresh_active_live_order_fills(previous_orders)
+                for filled_order in refresh_active_live_order_fills(previous_orders):
+                    _apply_slippage_cooldown_if_needed(filled_order)
                 _SESSION_LOSS_TRADES += finalize_completed_orders(
                     previous_orders,
                     final_resolution_btc_price if final_resolution_btc_price is not None else fetch_btc_spot_price(),
@@ -1838,7 +1868,8 @@ def run_once() -> None:
             )
         active_orders = get_active_orders()
         if active_orders:
-            refresh_active_live_order_fills(active_orders)
+            for filled_order in refresh_active_live_order_fills(active_orders):
+                _apply_slippage_cooldown_if_needed(filled_order)
             up_snapshot = None
             down_snapshot = None
             up_snapshot = get_token_quote_snapshot(market.up_token_id)
@@ -1883,7 +1914,8 @@ def run_once() -> None:
             down_snapshot = None
             active_orders = get_active_orders()
             if active_orders:
-                refresh_active_live_order_fills(active_orders)
+                for filled_order in refresh_active_live_order_fills(active_orders):
+                    _apply_slippage_cooldown_if_needed(filled_order)
                 up_snapshot = get_token_quote_snapshot(market.up_token_id)
                 down_snapshot = get_token_quote_snapshot(market.down_token_id)
 
@@ -1911,7 +1943,12 @@ def run_once() -> None:
     up_snapshot = get_token_quote_snapshot(market.up_token_id)
     down_snapshot = get_token_quote_snapshot(market.down_token_id)
 
-    print_market_context(market, debug=cfg.debug)
+    print_market_context(
+        market,
+        debug=cfg.debug,
+        up_snapshot=up_snapshot,
+        down_snapshot=down_snapshot,
+    )
 
     if use_recommended_limit:
         print_quote_snapshot_from_snapshot("UP", up_snapshot, debug=cfg.debug)
@@ -2051,6 +2088,8 @@ def run_once() -> None:
     if result.executed or getattr(result, "submission_accepted", False):
         if cfg.max_trades_per_period > 1:
             set_trade_cooldown(3)
+        if getattr(result, "actual_fill_price", None) is not None:
+            _apply_slippage_cooldown_if_needed(result)
 
     if (
         (result.executed or getattr(result, "submission_accepted", False))
@@ -2107,7 +2146,8 @@ def run_once() -> None:
     enforce_session_loss_trade_limit(cfg)
 
     active_btc_price = features.price_usd
-    refresh_active_live_order_fills(get_active_orders())
+    for filled_order in refresh_active_live_order_fills(get_active_orders()):
+        _apply_slippage_cooldown_if_needed(filled_order)
     update_active_order_logs(
         active_btc_price,
         observed_at=features.as_of,
