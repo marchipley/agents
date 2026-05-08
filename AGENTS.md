@@ -102,8 +102,7 @@ Optional / supported:
 - `BTC_AGENT_DEBUG` default: `false`
 - `BTC_AGENT_LOOP_INTERVAL` default: `30`
 - `BTC_AGENT_MAX_TRADES_PER_PERIOD` default: `1`
-- `MAX_PERIODS_PER_RUN` default: `0` meaning disabled; when set above zero, the agent counts unique BTC 5-minute slugs seen since launch and exits before entering slug `N+1`
-- `MAX_AUTOMATED_LOSS_TRADES` default: `0` meaning disabled; when set above zero, the agent counts completed losing trades since launch and stops once that loss count reaches the configured threshold
+- `MAX_LOSSES_PER_RUN` default: `4` in `custom/btc_agent/config.py`; the agent counts completed losing trades since launch and stops once that loss count reaches the configured threshold
 - `BTC_AGENT_MIN_CONFIDENCE` optional override; otherwise the repo default comes from `DEFAULT_MIN_CONFIDENCE` in `custom/btc_agent/config.py`
 - `BTC_AGENT_MAX_ENTRY_PRICE` default: `0.62`
 - `BTC_AGENT_MAX_SPREAD` default: `0.06`
@@ -129,6 +128,7 @@ What the BTC agent does today:
   - converts them to the human-readable BTC/USD price used by the agent
 - Maintains an in-memory rolling price history during process lifetime only.
 - Backfills enough recent BTC history on startup to support the Phase 2 indicator set, including the longer EMA(21) warmup.
+- Even with that historical backfill, startup readiness now keys off fresh live samples for the visible RSI / Phase 2 warmup counters, so a restart still shows the familiar `RSI warmup incomplete (...)` and `phase 2 indicator warmup incomplete (...)` messages before trading is allowed.
 - Approximates market-window open price using the earliest retained BTC sample inside the current 5-minute market window, not a true historical open fetched from a historical BTC data source.
 - Computes 5-minute momentum and volatility from a trailing 5-minute BTC sample window, so analysis continues to reference recent cross-period history even immediately after a new market window begins.
 - Computes a Phase 2 indicator set from the retained BTC history, including `RSI(9)`, `RSI(14)`, `EMA(9)`, `EMA(21)`, `ADX(14)`, `ATR(14)`, `rsi_speed_divergence`, `ema_alignment`, and `ema_cross_direction`.
@@ -182,9 +182,11 @@ What the BTC agent does today:
   - if `time_remaining_seconds > 240` and `ADX < 15`, stay cautious
   - if `time_remaining_seconds > 240` and `ADX > 30`, prioritize the trend over elapsed time
 - The LLM prompt now includes `momentum_alignment`, which is `True` when `velocity_15s`, `velocity_30s`, and `momentum_1m` all point the same direction; when it is `True`, the model is encouraged to treat clarity as high and trade with the trend.
-- The LLM prompt now includes an in-the-money confidence boost rule: if `DISTANCE_FROM_STRIKE_USD` is beyond `+20` for `UP` or `-20` for `DOWN` and the chosen `MARKET_WIN_CHANCE` is above `0.60`, the model may raise confidence by `0.10`.
+- The LLM prompt now includes an in-the-money confidence boost rule: if `DISTANCE_FROM_STRIKE_USD` is beyond `0.5 * ATR` in the chosen direction, the model may raise confidence by `0.15`.
+- The LLM prompt now explicitly disambiguates market probability from physical strike distance: a `MARKET_WIN_CHANCE` of `65%` is an aggressive consensus signal, while even a `$1.00` physical `DISTANCE_FROM_STRIKE_USD` can justify `~95%` confidence when fewer than 15 seconds remain.
 - The LLM prompt includes a sign-consistency rule: if `DISTANCE_FROM_STRIKE_PCT` is positive and the model chooses `DOWN`, or negative and it chooses `UP`, confidence should stay below `0.50` unless trend exhaustion is genuinely clear.
 - The LLM prompt now also includes an RSI directional sanity rule: if `RSI(9) < 30`, it should not choose `DOWN`; if `RSI(9) > 70`, it should not choose `UP` unless `ADX > 30`, and values above `RSI(9) > 85` are treated as explicit exhaustion risk even in strong trends.
+- The LLM prompt and execution layer now both suspend the normal `UP` RSI veto when `rsi_speed_divergence > 5` and `ADX > 35`, so accelerating RSI in a strong trend is treated as a parabolic continuation signal instead of automatic exhaustion.
 - The LLM prompt now also tells the model to lower confidence when `rsi_speed_divergence` is negative while price is still moving up, which is intended to catch weakening continuation setups before they become late-window fades or weak breakout chases.
 - The Phase 2.7 prompt layer now also instructs the model to prefer `NO_TRADE` when:
   - the market is too close to call, meaning `abs(gap_to_target_usd) < 0.2 * volatility_5m` with more than 60 seconds remaining
@@ -196,6 +198,7 @@ What the BTC agent does today:
 - Submits live orders with a configurable maker fee rate from `BTC_AGENT_LIVE_FEE_RATE_BPS`, defaulting to `1000` bps to match the current BTC Up/Down market requirement observed during live submission attempts.
 - Sizes paper and live orders from `SHARES_PER_TRADE` in `custom/btc_agent/config.py`, using a fixed share count for both paper and live orders.
 - Before live BUY submission, the agent quantizes share size to a Polymarket-compatible precision so the quote-side amount stays within the exchange’s 2-decimal maker-amount constraint while still respecting the 4-decimal taker-size limit.
+- That live BUY quantization now guarantees a minimum positive valid quantum when the configured size is non-zero, preventing edge-case rounding from collapsing a tiny but valid order to zero shares.
 - Rejects live submissions cleanly when the configured `SHARES_PER_TRADE` cannot satisfy the venue minimum order size instead of silently scaling or overriding size.
 - Applies a regime-aware execution-side market-win-chance veto before submission, using Gamma probability first and falling back to CLOB quote only if Gamma is unavailable:
   - if the chosen side `MARKET_WIN_CHANCE < 0.15` and `15 <= time_remaining_seconds < 120`, the trade is rejected as a low-probability reversal attempt
@@ -203,12 +206,12 @@ What the BTC agent does today:
 - Applies a Gamma/CLOB consensus-gap veto before submission: if `abs(effective_confidence - market_implied_probability) > 0.50`, the trade is rejected as a hallucinated edge against market consensus.
 - Applies a regime-aware minimum-confidence veto before submission:
   - base floor now defaults to `DEFAULT_MIN_CONFIDENCE` through the top-level tuning defaults in `custom/btc_agent/config.py`, while still allowing a `BTC_AGENT_MIN_CONFIDENCE` env override
-  - in early strong-trend regimes with more than 120 seconds remaining and `ADX(14) > 30`, the operational floor is relaxed to `0.62`
+  - in the Discovery Phase with more than 180 seconds remaining, the operational floor is relaxed to `0.10`
+  - in the mid-window band with `60 < time_remaining_seconds < 240` and `ADX(14) > 30`, the operational floor is relaxed to `0.62`
   - in the final 60 seconds, the operational floor is tightened to `0.75`
 - The execution layer now computes an `effective_confidence` before gating:
-  - if the chosen side is already winning against the strike by more than `$20`
-  - and Gamma market consensus on that same side is above `60%`
-  - the confidence is boosted by `+0.10` before floor / edge / consensus-gap checks
+  - if the chosen side is already winning against the strike by more than `0.5 * ATR(14)` in the chosen direction
+  - the confidence is boosted by `+0.15` before floor / edge / consensus-gap checks
 - Execution timing now also prefers the canonical slug timestamp plus 300 seconds over stale upstream `start_ts` / `end_ts`, so late-window vetoes and FOK logic use the same boundary the logs print in `mm:ss`.
 - Applies a Phase 2.7 victory-margin veto before submission: if there are more than 60 seconds remaining and the BTC gap to target is smaller than `0.2 * volatility_5m`, the trade is rejected as too close to call.
 - Applies a Phase 2.7 quote-price divergence veto for `UP`: if the bot wants `UP` but the `UP` quote is below `0.45`, the trade is rejected because the market is not confirming the breakout.
@@ -217,6 +220,7 @@ What the BTC agent does today:
   - if `RSI(9) < 30`, `DOWN` is rejected as bottom-chasing
   - if `RSI(9) > 70`, `UP` is rejected unless `ADX > 30`
   - if `RSI(9) > 85` while BTC is already above the strike, `UP` is rejected as an exhaustion-risk breakout chase
+- Decision-time recommended-limit gating now allows up to a 4-tick adverse move instead of 2 ticks when `volatility_5m` is in the `extreme` regime, which helps preserve valid entries during fast quote drift.
 - Tracks in-memory active orders for the current 5-minute market window and prints each order’s target BTC level plus whether the position is currently winning, losing, or tied.
 - Writes a per-slug order-tracking file under `completed_orders/` for each executed order, appending one status snapshot per tick plus the pre-order tick history that led into the trade.
 - Writes `completed_order_attempt_<slug_timestamp>.txt` when a directional trade is rejected before execution or live submission fails:
@@ -227,9 +231,10 @@ What the BTC agent does today:
   - `completed_order_win_up_<slug_timestamp>.txt`
   - `completed_order_loss_down_<slug_timestamp>.txt`
   - and `...-<trade_num>.txt` suffixes still apply when multi-trade-per-period mode is enabled
-- If an order was submitted/tracked but never resolved an actual fill price by period close, the finalized filename now inserts `NotFilled` before the slug timestamp, for example:
-  - `completed_order_win_up_NotFilled_<slug_timestamp>.txt`
-  - `completed_order_loss_down_NotFilled_<slug_timestamp>.txt`
+- Live fill confirmation now prefers explicit Polymarket order-status data (`get_order(order_id)`) plus trade-resolution lookups instead of inferring fills from generic submission-response fields.
+- If a live order submission is accepted but no actual fill price is confirmed yet, the agent now tracks it as a pending live order (`PENDING_FILL`) and rechecks Polymarket status on later ticks and at period rollover.
+- If that tracked live order reaches period close without a confirmed fill price, the finalized filename is neutral and does not carry a win/loss or direction label:
+  - `completed_order_unfilled_<slug_timestamp>.txt`
 - While an executed order is still unresolved, its working log file remains `completed_order_<slug_timestamp>.txt` and is only renamed to the finalized `completed_order_<win/loss>_<up/down>_<slug_timestamp>.txt` form once the period result is known.
 - Preserves every analyzed 5-minute window under `completed_orders/completed_period_<slug_timestamp>.txt` while the period is still unresolved, and finalizes resolved no-trade period files as:
   - `completed_period_up_<slug_timestamp>.txt`
@@ -254,8 +259,7 @@ What the BTC agent does today:
 - On graceful exit (`q` or `KeyboardInterrupt`), the current slug’s `pending_period_<timestamp>.txt` is finalized into `completed_period_<timestamp>.txt` so pending analysis files are not stranded.
 - Evaluates paper-order win/loss status against the market-period settlement reference, preferring Polymarket’s parsed threshold and otherwise falling back to the closest retained BTC sample at the start of the 5-minute period rather than the trade-entry BTC price.
 - Enforces `BTC_AGENT_MAX_TRADES_PER_PERIOD` per 5-minute market slug; current production usage assumes `1`, so once that limit is reached the remaining loop ticks in the slug skip new trade evaluation and only continue status/data tracking until the next market window begins.
-- Enforces `MAX_PERIODS_PER_RUN` across the full process session as a unique-slug cap; the starting slug counts as period `1`, and once the configured number of slugs has been processed, the agent exits before entering the next slug.
-- Enforces `MAX_AUTOMATED_LOSS_TRADES` across the full process session as a completed-loss stop; once that many trades have actually settled as losses, the agent exits.
+- Enforces `MAX_LOSSES_PER_RUN` across the full process session as a completed-loss stop; once that many trades have actually settled as losses, the agent exits.
 - When `BTC_AGENT_DEBUG=false`, suppresses most verbose diagnostics and only prints a compact subset of geolocation, balances, quote snapshots, BTC features, LLM decision fields, and final paper execution fields.
 - When `BTC_AGENT_DEBUG=true`, the agent also prints the exact LLM prompt text to terminal output and writes that same prompt into the pending-period / completed-order logs for post-trade review.
 - The raw LLM response text is preserved for successful decisions regardless of debug mode:
@@ -411,7 +415,7 @@ Current status:
 - The regime builder now prioritizes the fast RSI signal when deciding whether the environment is `PARABOLIC_UP` or `PARABOLIC_DOWN`.
 - The regime builder is also now strike-aware, so if BTC is materially above or below the current `price_to_beat`, the trend label will not flip to the opposite side just because the very recent window delta is slightly negative or positive.
 - `RSI(9)` and `RSI(14)` are now computed independently from the trailing price window, so the fast RSI can diverge from the slow RSI instead of silently collapsing onto the same value.
-- Feature readiness now requires enough retained history for the longer Phase 2 calculations, so the bot waits for the extended warmup when those values are missing.
+- Feature readiness now treats the RSI / Phase 2 warmup counters as live-run counters rather than trusting startup backfill alone, so the bot must accumulate fresh post-launch samples before those indicator gates become ready.
 - The LLM prompt paths now explicitly carry the advanced Phase 2.5 / 2.6 fields, including:
   - `momentum_acceleration`
   - `trend_intensity` / `ADX(14)`

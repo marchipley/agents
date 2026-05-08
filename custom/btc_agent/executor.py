@@ -33,6 +33,8 @@ class TradeExecutionResult:
     order_latency_ms: Optional[int] = None
     book_depth_at_fill: Optional[float] = None
     shares_requested: Optional[float] = None
+    submission_accepted: bool = False
+    live_order_id: Optional[str] = None
 
 
 @dataclass
@@ -456,6 +458,7 @@ def evaluate_ok_to_submit(
     reference_price: Optional[float],
     submission_limit_price: Optional[float],
     tick_size: Optional[float],
+    volatility_5m: Optional[float] = None,
 ) -> (bool, str):
     """
     OK to submit if:
@@ -495,13 +498,14 @@ def evaluate_ok_to_submit(
             f"{submission_limit_price:.3f}"
         )
 
-    allowed_slippage = tick_size * 2
+    allowed_ticks = 4 if volatility_5m is not None and float(volatility_5m) >= 25 else 2
+    allowed_slippage = tick_size * allowed_ticks
     diff = buy_quote - submission_limit_price
 
     if diff <= allowed_slippage:
         return True, (
             f"Current buy quote is only {diff:.3f} above {limit_label} "
-            f"(within 2 ticks)"
+            f"(within {allowed_ticks} ticks)"
         )
 
     return False, (
@@ -717,7 +721,6 @@ def _extract_average_fill_price_from_live_response(response: Any) -> Optional[fl
             "avg_fill",
             "fillPrice",
             "filledPrice",
-            "price",
         ):
             value = _coerce_price(response.get(key))
             if value is not None:
@@ -810,6 +813,140 @@ def _fetch_actual_fill_price_from_trades(
     return None
 
 
+def _fetch_live_order_status(order_id: str) -> Optional[Dict[str, Any]]:
+    try:
+        response = Polymarket().client.get_order(order_id)
+    except Exception:
+        return None
+    if isinstance(response, dict):
+        for key in ("data", "order", "result"):
+            nested = response.get(key)
+            if isinstance(nested, dict):
+                return nested
+        return response
+    return None
+
+
+def _extract_order_status_text(order_data: Optional[Dict[str, Any]]) -> Optional[str]:
+    if not isinstance(order_data, dict):
+        return None
+    for key in ("status", "orderStatus", "state"):
+        value = order_data.get(key)
+        if value:
+            return str(value).strip().lower()
+    return None
+
+
+def _extract_filled_size_from_order_data(order_data: Optional[Dict[str, Any]]) -> Optional[float]:
+    if not isinstance(order_data, dict):
+        return None
+    for key in (
+        "filledSize",
+        "filled_size",
+        "sizeMatched",
+        "size_matched",
+        "matchedSize",
+        "matched_size",
+        "totalFilled",
+        "filled",
+    ):
+        value = _coerce_price(order_data.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def _extract_average_fill_price_from_order_data(order_data: Optional[Dict[str, Any]]) -> Optional[float]:
+    if not isinstance(order_data, dict):
+        return None
+    for key in (
+        "avgPrice",
+        "averagePrice",
+        "average_price",
+        "avg_fill_price",
+        "avg_fill",
+        "fillPrice",
+        "filledPrice",
+    ):
+        value = _coerce_price(order_data.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def _order_status_indicates_no_fill(status_text: Optional[str], filled_size: Optional[float]) -> bool:
+    if filled_size is not None and filled_size > 0:
+        return False
+    if not status_text:
+        return False
+    return status_text in {
+        "live",
+        "open",
+        "pending",
+        "delayed",
+        "unmatched",
+        "canceled",
+        "cancelled",
+        "expired",
+    }
+
+
+def _resolve_confirmed_live_fill(
+    order_id: Optional[str],
+    token_id: Optional[str],
+    *,
+    poll_attempts: int,
+    poll_interval_seconds: float,
+) -> Optional[float]:
+    if not order_id:
+        return None
+
+    attempts = max(int(poll_attempts), 1)
+    interval = max(float(poll_interval_seconds), 0.0)
+    for attempt in range(attempts):
+        order_data = _fetch_live_order_status(order_id)
+        average_fill = _extract_average_fill_price_from_order_data(order_data)
+        filled_size = _extract_filled_size_from_order_data(order_data)
+        status_text = _extract_order_status_text(order_data)
+
+        if average_fill is not None:
+            return average_fill
+
+        trades_fill = _fetch_actual_fill_price_from_trades(order_id, token_id)
+        if trades_fill is not None:
+            return trades_fill
+
+        if _order_status_indicates_no_fill(status_text, filled_size):
+            if attempt < attempts - 1 and interval > 0:
+                time.sleep(interval)
+            continue
+
+        if attempt < attempts - 1 and interval > 0:
+            time.sleep(interval)
+
+    return None
+
+
+def refresh_live_order_fill_status(order) -> bool:
+    order_id = getattr(order, "live_order_id", None)
+    if not order_id or getattr(order, "actual_fill_price", None) is not None:
+        return False
+    actual_fill_price = _resolve_confirmed_live_fill(
+        order_id,
+        getattr(order, "token_id", None),
+        poll_attempts=1,
+        poll_interval_seconds=0.0,
+    )
+    if actual_fill_price is None:
+        return False
+    order.actual_fill_price = actual_fill_price
+    order.realized_slippage_bps = _compute_realized_slippage_bps(
+        getattr(order, "quoted_price_at_entry", None),
+        actual_fill_price,
+    )
+    return True
+
+
 def _resolve_actual_fill_price(response: Any, token_id: Optional[str]) -> Optional[float]:
     average_fill = _extract_average_fill_price_from_live_response(response)
     if average_fill is not None:
@@ -817,7 +954,13 @@ def _resolve_actual_fill_price(response: Any, token_id: Optional[str]) -> Option
     order_id = _extract_order_id_from_live_response(response)
     if not order_id:
         return None
-    return _fetch_actual_fill_price_from_trades(order_id, token_id)
+    cfg = get_trading_config()
+    return _resolve_confirmed_live_fill(
+        order_id,
+        token_id,
+        poll_attempts=getattr(cfg, "live_order_status_poll_attempts", 4),
+        poll_interval_seconds=getattr(cfg, "live_order_status_poll_interval_seconds", 0.75),
+    )
 
 
 def _slug_start_ts(slug: Optional[str]) -> Optional[int]:
@@ -916,29 +1059,29 @@ def get_effective_decision_confidence(
     cfg = get_trading_config()
     confidence = float(getattr(decision, "confidence", 0.0) or 0.0)
     gap_to_target_usd = None
+    atr_14 = None if features is None else getattr(features, "atr_14", None)
     if (
         features is not None
         and getattr(features, "price_usd", None) is not None
         and market.settlement_threshold not in (None, 0)
     ):
         gap_to_target_usd = float(features.price_usd) - float(market.settlement_threshold)
-    up_probability = getattr(market, "up_market_probability", None)
-    down_probability = getattr(market, "down_market_probability", None)
+    boost_threshold_usd = float(getattr(cfg, "itm_confidence_boost_usd", 20.0))
+    if atr_14 not in (None, 0):
+        boost_threshold_usd = abs(float(atr_14)) * float(
+            getattr(cfg, "itm_confidence_boost_atr_multiplier", 0.50)
+        )
 
     if (
         decision.side == "UP"
         and gap_to_target_usd is not None
-        and gap_to_target_usd > float(getattr(cfg, "itm_confidence_boost_usd", 20.0))
-        and up_probability is not None
-        and float(up_probability) > float(getattr(cfg, "itm_confidence_boost_market_win_chance", 0.60))
+        and gap_to_target_usd > boost_threshold_usd
     ):
         confidence = min(confidence + float(getattr(cfg, "itm_confidence_boost_amount", 0.10)), 1.0)
     elif (
         decision.side == "DOWN"
         and gap_to_target_usd is not None
-        and gap_to_target_usd < -float(getattr(cfg, "itm_confidence_boost_usd", 20.0))
-        and down_probability is not None
-        and float(down_probability) > float(getattr(cfg, "itm_confidence_boost_market_win_chance", 0.60))
+        and gap_to_target_usd < -boost_threshold_usd
     ):
         confidence = min(confidence + float(getattr(cfg, "itm_confidence_boost_amount", 0.10)), 1.0)
 
@@ -955,10 +1098,12 @@ def get_effective_min_confidence(
     time_remaining_seconds = _get_time_remaining_seconds(market)
     adx_14 = None if features is None else getattr(features, "adx_14", None)
 
+    if time_remaining_seconds > 180:
+        return min(base_confidence, float(getattr(cfg, "discovery_min_confidence", 0.10)))
     if time_remaining_seconds < 60:
         return max(base_confidence, float(getattr(cfg, "final_window_min_confidence", 0.75)))
     if (
-        time_remaining_seconds > 120
+        60 < time_remaining_seconds < 240
         and adx_14 is not None
         and adx_14 > float(getattr(cfg, "trend_priority_adx_threshold", 30.0))
     ):
@@ -1081,6 +1226,7 @@ def _validate_trade_candidate(
         required_velocity_to_win = abs(gap_to_target) / time_remaining_seconds
     volatility_5m = None if features is None else getattr(features, "volatility_5m", None)
     rsi_9 = None if features is None else getattr(features, "rsi_9", None)
+    rsi_speed_divergence = None if features is None else getattr(features, "rsi_speed_divergence", None)
     adx_14 = None if features is None else getattr(features, "adx_14", None)
     market_implied_probability = _get_market_implied_probability(market, decision, snapshot)
     chosen_side_market_win_chance = (
@@ -1099,30 +1245,38 @@ def _validate_trade_candidate(
         and rsi_9 is not None
         and rsi_9 < float(getattr(cfg, "down_rsi_veto_threshold", 30.0))
     ):
+        down_rsi_threshold = float(getattr(cfg, "down_rsi_veto_threshold", 30.0))
         return _reject(
             submission_limit_price,
             (
                 "RSI directional veto blocked DOWN trade in oversold conditions "
-                f"(rsi_9={rsi_9:.3f})"
+                f"(rsi_9={rsi_9:.3f}; threshold={down_rsi_threshold:.3f})"
             ),
         )
 
+    up_rsi_threshold = (
+        float(getattr(cfg, "up_rsi_veto_trend_threshold", 85.0))
+        if adx_14 is not None and adx_14 > float(getattr(cfg, "up_rsi_veto_adx_threshold", 30.0))
+        else float(getattr(cfg, "up_rsi_veto_base_threshold", 70.0))
+    )
     if (
         decision.side == "UP"
         and rsi_9 is not None
         and gap_to_target is not None
         and gap_to_target > 0
-        and rsi_9 > (
-            float(getattr(cfg, "up_rsi_veto_trend_threshold", 85.0))
-            if adx_14 is not None and adx_14 > float(getattr(cfg, "up_rsi_veto_adx_threshold", 30.0))
-            else float(getattr(cfg, "up_rsi_veto_base_threshold", 70.0))
+        and not (
+            rsi_speed_divergence is not None
+            and rsi_speed_divergence > float(getattr(cfg, "parabolic_rsi_speed_divergence_threshold", 5.0))
+            and adx_14 is not None
+            and adx_14 > float(getattr(cfg, "parabolic_rsi_suspend_adx_threshold", 35.0))
         )
+        and rsi_9 > up_rsi_threshold
     ):
         return _reject(
             submission_limit_price,
             (
                 "RSI directional veto blocked UP trade in overbought conditions "
-                f"(rsi_9={rsi_9:.3f})"
+                f"(rsi_9={rsi_9:.3f}; threshold={up_rsi_threshold:.3f})"
             ),
         )
 
@@ -1344,6 +1498,8 @@ def _quantize_live_buy_size_for_amount_precision(price: float, size: float) -> f
         return float(size_dec)
 
     units = (size_dec / quantum).to_integral_value(rounding=ROUND_DOWN)
+    if units <= 0 and size_dec > 0:
+        units = Decimal(1)
     quantized_size = units * quantum
     return float(quantized_size.quantize(Decimal("0.0001"), rounding=ROUND_DOWN))
 
@@ -1579,7 +1735,35 @@ def _execute_live_trade(
         else:
             raise RuntimeError(f"Live order submission failed: {exc}") from exc
 
+    order_id = _extract_order_id_from_live_response(response)
     actual_fill_price = _resolve_actual_fill_price(response, snapshot.token_id)
+    if actual_fill_price is None:
+        return TradeExecutionResult(
+            executed=False,
+            side=decision.side,
+            size=size,
+            price=submission_limit_price,
+            token_id=snapshot.token_id,
+            reason=(
+                "Live order submission was accepted but no fill was confirmed "
+                f"({submission_limit_label}={submission_limit_price:.3f}; "
+                f"size={size:.4f}; "
+                f"time_remaining={time_remaining_seconds}s; "
+                f"order_type={order_type_label}; "
+                f"order_latency_ms={order_latency_ms}; "
+                f"{snapshot.submit_reason})"
+            ),
+            live_order_response=response,
+            execution_snapshot=snapshot,
+            quoted_price_at_entry=quoted_price_at_entry,
+            actual_fill_price=None,
+            realized_slippage_bps=None,
+            order_latency_ms=order_latency_ms,
+            book_depth_at_fill=book_depth_at_fill,
+            shares_requested=size,
+            submission_accepted=True,
+            live_order_id=order_id,
+        )
     realized_slippage_bps = _compute_realized_slippage_bps(
         quoted_price_at_entry,
         actual_fill_price,
@@ -1616,6 +1800,8 @@ def _execute_live_trade(
         order_latency_ms=order_latency_ms,
         book_depth_at_fill=book_depth_at_fill,
         shares_requested=size,
+        submission_accepted=True,
+        live_order_id=order_id,
     )
 
 

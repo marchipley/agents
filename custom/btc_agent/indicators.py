@@ -20,6 +20,7 @@ from .network import http_get
 _PRICE_HISTORY: List[Tuple[datetime, float]] = []
 _LAST_SUCCESSFUL_PROVIDER_INDEX = 0
 _PRICE_HISTORY_BACKFILLED = False
+_LIVE_PRICE_SAMPLES_RECORDED = 0
 _BACKFILL_WINDOW_SECONDS = 420
 _BACKFILL_BUCKET_SECONDS = 20
 _WINDOW_BASELINE_CARRY_FORWARD_SECONDS = 60
@@ -72,6 +73,7 @@ class BtcFeatures:
     retained_sample_count: int
     window_sample_count: int
     trailing_5m_sample_count: int
+    live_sample_count: int = 0
 
 
 def _fetch_spot_price_from_coingecko() -> float:
@@ -350,8 +352,8 @@ def get_latest_cached_price() -> Optional[float]:
     return _PRICE_HISTORY[-1][1]
 
 
-def _record_price_sample(price: float, as_of: Optional[datetime] = None) -> None:
-    global _PRICE_HISTORY
+def _record_price_sample(price: float, as_of: Optional[datetime] = None, seeded: bool = False) -> None:
+    global _PRICE_HISTORY, _LIVE_PRICE_SAMPLES_RECORDED
 
     timestamp = as_of or datetime.now(timezone.utc)
     if _PRICE_HISTORY:
@@ -363,6 +365,8 @@ def _record_price_sample(price: float, as_of: Optional[datetime] = None) -> None
     _PRICE_HISTORY.append((timestamp, price))
     if len(_PRICE_HISTORY) > 60:
         _PRICE_HISTORY = _PRICE_HISTORY[-60:]
+    if not seeded:
+        _LIVE_PRICE_SAMPLES_RECORDED += 1
 
 
 def _fetch_recent_trades_from_coinbase(limit: int = 1000) -> List[Tuple[datetime, float]]:
@@ -439,7 +443,7 @@ def _seed_price_history_from_trades(now: datetime) -> bool:
         if last_price is None:
             last_price = trades[0][1]
 
-        _record_price_sample(last_price, as_of=bucket_time)
+        _record_price_sample(last_price, as_of=bucket_time, seeded=True)
         seeded_samples += 1
 
     return seeded_samples >= 15
@@ -457,7 +461,7 @@ def _seed_price_history_from_candles(now: datetime) -> bool:
             sample_time = candle_time + timedelta(seconds=offset_seconds)
             if sample_time > now:
                 continue
-            _record_price_sample(price, as_of=sample_time)
+            _record_price_sample(price, as_of=sample_time, seeded=True)
             seeded_samples += 1
 
     return seeded_samples >= 15
@@ -791,30 +795,37 @@ def build_btc_features(window_start_ts: int) -> BtcFeatures:
         retained_sample_count=len(prices),
         window_sample_count=len(window_prices),
         trailing_5m_sample_count=len(trailing_5m_prices),
+        live_sample_count=_LIVE_PRICE_SAMPLES_RECORDED,
     )
 
 
 def get_feature_readiness(features: BtcFeatures) -> Tuple[bool, str]:
     reasons = []
+    indicator_sample_count = min(
+        int(getattr(features, "retained_sample_count", 0) or 0),
+        int(getattr(features, "live_sample_count", 0) or 0),
+    )
 
-    if features.rsi_14 is None:
-        samples_needed = max(15 - features.retained_sample_count, 0)
+    if features.rsi_14 is None or indicator_sample_count < 15:
+        samples_needed = max(15 - indicator_sample_count, 0)
         reasons.append(
-            f"RSI warmup incomplete ({features.retained_sample_count}/15 samples"
+            f"RSI warmup incomplete ({indicator_sample_count}/15 samples"
             + (f", need {samples_needed} more" if samples_needed else "")
             + ")"
         )
 
     if (
+        indicator_sample_count < 21
+        or
         features.rsi_9 is None
         or features.ema_9 is None
         or features.ema_21 is None
         or features.adx_14 is None
         or features.atr_14 is None
     ):
-        extended_needed = max(21 - features.retained_sample_count, 0)
+        extended_needed = max(21 - indicator_sample_count, 0)
         reasons.append(
-            f"phase 2 indicator warmup incomplete ({features.retained_sample_count}/21 samples"
+            f"phase 2 indicator warmup incomplete ({indicator_sample_count}/21 samples"
             + (f", need {extended_needed} more" if extended_needed else "")
             + ")"
         )

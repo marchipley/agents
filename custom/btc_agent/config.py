@@ -11,6 +11,12 @@ from typing import Optional
 # stronger raw LLM conviction; lowering it to 0.60 allows more marginal trades.
 DEFAULT_MIN_CONFIDENCE = 0.65
 
+# Very low confidence floor used in the early Discovery Phase to allow
+# mathematically favorable early entries before the market fully trends.
+# Example: raising from 0.10 to 0.25 makes early entries rarer; lowering it
+# further makes the bot more willing to probe early-window setups.
+DISCOVERY_MIN_CONFIDENCE = 0.10
+
 # Fixed number of shares to submit for each paper/live trade.
 # Example: increasing from 5 to 10 doubles position size and PnL variance;
 # lowering to 3 reduces exposure per order.
@@ -44,11 +50,17 @@ FINAL_WINDOW_MIN_CONFIDENCE = 0.75
 # lowering to 0.00 allows trades closer to fair value.
 MIN_EXECUTION_EDGE = 0.02
 
-# Distance in USD beyond the strike that the chosen side must already be winning
-# by before the in-the-money confidence boost can apply.
-# Example: lowering from 20 to 10 lets smaller leads earn a confidence boost;
-# raising to 30 means only clearly in-the-money trades get that boost.
+# Legacy fixed-USD fallback for the in-the-money confidence boost. The active
+# logic now prefers an ATR-based threshold when ATR is available.
+# Example: lowering from 20 to 10 lets smaller leads earn a fallback boost;
+# raising to 30 means only clearly in-the-money trades get that fallback.
 ITM_CONFIDENCE_BOOST_USD = 20.0
+
+# ATR multiplier used to decide when a side is winning by enough to deserve
+# the in-the-money confidence boost.
+# Example: lowering from 0.50 to 0.25 makes the boost trigger earlier; raising
+# to 0.75 requires a larger cushion over the strike before boosting confidence.
+ITM_CONFIDENCE_BOOST_ATR_MULTIPLIER = 0.50
 
 # Minimum market win chance required before the in-the-money confidence boost
 # is allowed to apply.
@@ -57,9 +69,9 @@ ITM_CONFIDENCE_BOOST_USD = 20.0
 ITM_CONFIDENCE_BOOST_MARKET_WIN_CHANCE = 0.60
 
 # Amount added to decision confidence when the in-the-money boost conditions are met.
-# Example: raising from 0.10 to 0.15 helps more trades clear confidence/edge gates;
-# lowering to 0.05 makes the boost more modest.
-ITM_CONFIDENCE_BOOST_AMOUNT = 0.10
+# Example: raising from 0.15 to 0.20 helps more trades clear confidence/edge gates;
+# lowering to 0.10 makes the boost more modest.
+ITM_CONFIDENCE_BOOST_AMOUNT = 0.15
 
 # Low market-win-chance threshold used by the prompt/execution guardrails to avoid
 # betting on extremely unlikely reversals.
@@ -89,6 +101,18 @@ UP_RSI_VETO_TREND_THRESHOLD = 85.0
 # raising to 35 means only stronger trends get the looser RSI allowance.
 UP_RSI_VETO_ADX_THRESHOLD = 30.0
 
+# When RSI(9) - RSI(14) exceeds this value in a strong trend, the normal UP RSI
+# veto can be suspended because accelerating RSI is being treated as breakout
+# continuation instead of exhaustion.
+# Example: lowering from 5 to 3 makes the suspension happen more often; raising
+# to 7 requires a sharper RSI acceleration before allowing parabolic continuation.
+PARABOLIC_RSI_SPEED_DIVERGENCE_THRESHOLD = 5.0
+
+# ADX threshold required before the parabolic RSI suspension is allowed.
+# Example: lowering from 35 to 30 allows more breakouts to bypass the RSI veto;
+# raising to 40 reserves the suspension for only the strongest trends.
+PARABOLIC_RSI_SUSPEND_ADX_THRESHOLD = 35.0
+
 # RSI floor for blocking DOWN trades in oversold conditions.
 # Example: lowering from 30 to 25 allows more downside continuation trades;
 # raising to 35 vetoes more "falling knife" short entries.
@@ -99,6 +123,21 @@ DOWN_RSI_VETO_THRESHOLD = 30.0
 # Example: raising from 15 to 20 makes the check stricter and blocks more
 # mathematically difficult trades; lowering to 10 makes it more permissive.
 REQUIRED_VELOCITY_DIVISOR = 15.0
+
+# The total number of completed losing trades allowed in a single run before the
+# bot stops. This is a repo-visible non-secret runtime cap.
+MAX_LOSSES_PER_RUN = 4
+
+# Number of times to poll Polymarket order status right after live submission
+# before deciding the order is still unfilled.
+# Example: raising from 4 to 8 waits longer for exchange confirmation; lowering
+# to 2 makes the bot classify unfilled orders faster but with less certainty.
+LIVE_ORDER_STATUS_POLL_ATTEMPTS = 4
+
+# Delay between live order-status polls after submission.
+# Example: raising from 0.75s to 1.5s gives more time for matching but slows
+# the loop; lowering to 0.25s checks faster but can miss slower confirmations.
+LIVE_ORDER_STATUS_POLL_INTERVAL_SECONDS = 0.75
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 load_dotenv(os.path.join(REPO_ROOT, ".env"))
@@ -153,9 +192,9 @@ class TradingConfig:
     disable_liquidity_filter: bool = False
     shares_per_trade: float = SHARES_PER_TRADE
     max_trades_per_period: int = 1
-    max_periods_per_run: int = 0
-    max_automated_loss_trades: int = 0
+    max_losses_per_run: int = MAX_LOSSES_PER_RUN
     min_confidence: float = DEFAULT_MIN_CONFIDENCE
+    discovery_min_confidence: float = DISCOVERY_MIN_CONFIDENCE
     max_entry_price: float = 0.62
     max_spread: float = 0.06
     discovery_adx_caution_threshold: float = DISCOVERY_ADX_CAUTION_THRESHOLD
@@ -164,6 +203,7 @@ class TradingConfig:
     final_window_min_confidence: float = FINAL_WINDOW_MIN_CONFIDENCE
     min_execution_edge: float = MIN_EXECUTION_EDGE
     itm_confidence_boost_usd: float = ITM_CONFIDENCE_BOOST_USD
+    itm_confidence_boost_atr_multiplier: float = ITM_CONFIDENCE_BOOST_ATR_MULTIPLIER
     itm_confidence_boost_market_win_chance: float = ITM_CONFIDENCE_BOOST_MARKET_WIN_CHANCE
     itm_confidence_boost_amount: float = ITM_CONFIDENCE_BOOST_AMOUNT
     market_win_chance_veto_threshold: float = MARKET_WIN_CHANCE_VETO_THRESHOLD
@@ -171,8 +211,12 @@ class TradingConfig:
     up_rsi_veto_base_threshold: float = UP_RSI_VETO_BASE_THRESHOLD
     up_rsi_veto_trend_threshold: float = UP_RSI_VETO_TREND_THRESHOLD
     up_rsi_veto_adx_threshold: float = UP_RSI_VETO_ADX_THRESHOLD
+    parabolic_rsi_speed_divergence_threshold: float = PARABOLIC_RSI_SPEED_DIVERGENCE_THRESHOLD
+    parabolic_rsi_suspend_adx_threshold: float = PARABOLIC_RSI_SUSPEND_ADX_THRESHOLD
     down_rsi_veto_threshold: float = DOWN_RSI_VETO_THRESHOLD
     required_velocity_divisor: float = REQUIRED_VELOCITY_DIVISOR
+    live_order_status_poll_attempts: int = LIVE_ORDER_STATUS_POLL_ATTEMPTS
+    live_order_status_poll_interval_seconds: float = LIVE_ORDER_STATUS_POLL_INTERVAL_SECONDS
     market_slug_override: Optional[str] = None
 
 @dataclass
@@ -257,9 +301,11 @@ def get_trading_config() -> TradingConfig:
         disable_liquidity_filter=_parse_bool_env("DISABLE_LIQUIDITY_FILTER", False),
         shares_per_trade=float(SHARES_PER_TRADE),
         max_trades_per_period=max(int(os.getenv("BTC_AGENT_MAX_TRADES_PER_PERIOD", "1")), 1),
-        max_periods_per_run=max(int(os.getenv("MAX_PERIODS_PER_RUN", "0")), 0),
-        max_automated_loss_trades=max(int(os.getenv("MAX_AUTOMATED_LOSS_TRADES", "0")), 0),
+        max_losses_per_run=max(int(MAX_LOSSES_PER_RUN), 0),
         min_confidence=float(os.getenv("BTC_AGENT_MIN_CONFIDENCE", str(DEFAULT_MIN_CONFIDENCE))),
+        discovery_min_confidence=float(
+            os.getenv("BTC_AGENT_DISCOVERY_MIN_CONFIDENCE", str(DISCOVERY_MIN_CONFIDENCE))
+        ),
         max_entry_price=float(os.getenv("BTC_AGENT_MAX_ENTRY_PRICE", "0.62")),
         max_spread=float(os.getenv("BTC_AGENT_MAX_SPREAD", "0.06")),
         discovery_adx_caution_threshold=float(
@@ -279,6 +325,12 @@ def get_trading_config() -> TradingConfig:
         ),
         itm_confidence_boost_usd=float(
             os.getenv("BTC_AGENT_ITM_CONFIDENCE_BOOST_USD", str(ITM_CONFIDENCE_BOOST_USD))
+        ),
+        itm_confidence_boost_atr_multiplier=float(
+            os.getenv(
+                "BTC_AGENT_ITM_CONFIDENCE_BOOST_ATR_MULTIPLIER",
+                str(ITM_CONFIDENCE_BOOST_ATR_MULTIPLIER),
+            )
         ),
         itm_confidence_boost_market_win_chance=float(
             os.getenv(
@@ -310,11 +362,41 @@ def get_trading_config() -> TradingConfig:
         up_rsi_veto_adx_threshold=float(
             os.getenv("BTC_AGENT_UP_RSI_VETO_ADX_THRESHOLD", str(UP_RSI_VETO_ADX_THRESHOLD))
         ),
+        parabolic_rsi_speed_divergence_threshold=float(
+            os.getenv(
+                "BTC_AGENT_PARABOLIC_RSI_SPEED_DIVERGENCE_THRESHOLD",
+                str(PARABOLIC_RSI_SPEED_DIVERGENCE_THRESHOLD),
+            )
+        ),
+        parabolic_rsi_suspend_adx_threshold=float(
+            os.getenv(
+                "BTC_AGENT_PARABOLIC_RSI_SUSPEND_ADX_THRESHOLD",
+                str(PARABOLIC_RSI_SUSPEND_ADX_THRESHOLD),
+            )
+        ),
         down_rsi_veto_threshold=float(
             os.getenv("BTC_AGENT_DOWN_RSI_VETO_THRESHOLD", str(DOWN_RSI_VETO_THRESHOLD))
         ),
         required_velocity_divisor=float(
             os.getenv("BTC_AGENT_REQUIRED_VELOCITY_DIVISOR", str(REQUIRED_VELOCITY_DIVISOR))
+        ),
+        live_order_status_poll_attempts=max(
+            int(
+                os.getenv(
+                    "BTC_AGENT_LIVE_ORDER_STATUS_POLL_ATTEMPTS",
+                    str(LIVE_ORDER_STATUS_POLL_ATTEMPTS),
+                )
+            ),
+            1,
+        ),
+        live_order_status_poll_interval_seconds=max(
+            float(
+                os.getenv(
+                    "BTC_AGENT_LIVE_ORDER_STATUS_POLL_INTERVAL_SECONDS",
+                    str(LIVE_ORDER_STATUS_POLL_INTERVAL_SECONDS),
+                )
+            ),
+            0.0,
         ),
         market_slug_override=os.getenv("BTC_AGENT_MARKET_SLUG"),
     )

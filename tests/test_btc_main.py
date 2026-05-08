@@ -19,7 +19,6 @@ sys.modules.setdefault(
 
 from custom.btc_agent.main import (
     _SESSION_LOSS_TRADES,
-    _SESSION_SLUGS_SEEN,
     _build_regime_fingerprint,
     _should_log_failed_order_attempt,
     append_completed_order_tick,
@@ -30,7 +29,6 @@ from custom.btc_agent.main import (
     finalize_current_period_logs_on_exit,
     finalize_pending_period_log,
     enforce_session_loss_trade_limit,
-    enforce_session_period_limit,
     has_valid_price_to_beat,
     promote_pending_period_log_to_completed,
     run_once,
@@ -52,6 +50,7 @@ class TestBtcMain(unittest.TestCase):
         "1777513811",
         "1777513999",
         "1777675200",
+        "1778208300",
         "1999999997",
         "1999999998",
         "1999999999",
@@ -68,7 +67,6 @@ class TestBtcMain(unittest.TestCase):
         self._live_probability_patcher.stop()
         from custom.btc_agent import main as main_module
         main_module._SESSION_PENDING_EXIT_AFTER_PERIOD = False
-        main_module._SESSION_SLUGS_SEEN = set()
         self._cleanup_test_artifacts()
 
     @classmethod
@@ -101,7 +99,7 @@ class TestBtcMain(unittest.TestCase):
         ) as mock_exit:
             with self.assertRaises(SystemExit):
                 enforce_session_loss_trade_limit(
-                    SimpleNamespace(max_automated_loss_trades=3)
+                    SimpleNamespace(max_losses_per_run=3)
                 )
 
         mock_exit.assert_called_once_with(0)
@@ -114,39 +112,10 @@ class TestBtcMain(unittest.TestCase):
             "custom.btc_agent.main.sys.exit",
         ) as mock_exit:
             enforce_session_loss_trade_limit(
-                SimpleNamespace(max_automated_loss_trades=3)
+                SimpleNamespace(max_losses_per_run=3)
             )
 
         mock_exit.assert_not_called()
-
-    def test_enforce_session_period_limit_tracks_first_seen_slug(self):
-        tracked_slugs = set()
-        with patch(
-            "custom.btc_agent.main._SESSION_SLUGS_SEEN",
-            tracked_slugs,
-        ):
-            enforce_session_period_limit(
-                SimpleNamespace(max_periods_per_run=2),
-                "btc-updown-5m-1777056000",
-            )
-
-        self.assertEqual(tracked_slugs, {"btc-updown-5m-1777056000"})
-
-    def test_enforce_session_period_limit_exits_before_slug_n_plus_one(self):
-        with patch(
-            "custom.btc_agent.main._SESSION_SLUGS_SEEN",
-            {"btc-updown-5m-1777056000"},
-        ), patch(
-            "custom.btc_agent.main.sys.exit",
-            side_effect=SystemExit(0),
-        ) as mock_exit:
-            with self.assertRaises(SystemExit):
-                enforce_session_period_limit(
-                    SimpleNamespace(max_periods_per_run=1),
-                    "btc-updown-5m-1777056300",
-                )
-
-        mock_exit.assert_called_once_with(0)
 
     def test_should_not_log_failed_order_attempt_for_paper_trade_rejection(self):
         cfg = SimpleNamespace(paper_trading=True)
@@ -429,7 +398,7 @@ class TestBtcMain(unittest.TestCase):
                         debug=False,
                         debug_price_to_beat=False,
                         max_trades_per_period=1,
-                        max_automated_loss_trades=0,
+                        max_losses_per_run=0,
                         minimum_wallet_balance=0.0,
                         paper_trading=False,
                         use_recommended_limit=True,
@@ -1260,7 +1229,7 @@ class TestBtcMain(unittest.TestCase):
                         debug=False,
                         debug_price_to_beat=False,
                         max_trades_per_period=1,
-                        max_automated_loss_trades=1,
+                        max_losses_per_run=1,
                         minimum_wallet_balance=0.0,
                     ),
                 )
@@ -1375,7 +1344,7 @@ class TestBtcMain(unittest.TestCase):
                         debug_price_to_beat=False,
                         use_recommended_limit=False,
                         max_trades_per_period=1,
-                        max_automated_loss_trades=0,
+                        max_losses_per_run=0,
                         minimum_wallet_balance=0.0,
                     ),
                 )
@@ -1462,7 +1431,7 @@ class TestBtcMain(unittest.TestCase):
                         debug_price_to_beat=False,
                         use_recommended_limit=False,
                         max_trades_per_period=2,
-                        max_automated_loss_trades=0,
+                        max_losses_per_run=0,
                         minimum_wallet_balance=0.0,
                     ),
                 )
@@ -1545,6 +1514,7 @@ class TestBtcMain(unittest.TestCase):
             token_id="up-token",
             target_btc_price=77560.75,
             entry_btc_price=77570.0,
+            actual_fill_price=0.45,
         )
 
         with ExitStack() as stack:
@@ -1557,7 +1527,7 @@ class TestBtcMain(unittest.TestCase):
                         debug_price_to_beat=False,
                         use_recommended_limit=False,
                         max_trades_per_period=2,
-                        max_automated_loss_trades=0,
+                        max_losses_per_run=0,
                         minimum_wallet_balance=0.0,
                     ),
                 )
@@ -1660,7 +1630,7 @@ class TestBtcMain(unittest.TestCase):
                 debug=False,
                 debug_price_to_beat=False,
                 max_trades_per_period=1,
-                max_automated_loss_trades=0,
+                max_losses_per_run=0,
                 minimum_wallet_balance=0.0,
             ),
         ), patch(
@@ -1708,7 +1678,7 @@ class TestBtcMain(unittest.TestCase):
         self.assertIn("current_btc_price=77710.00", content)
         self.assertIn("outcome_label=win", content)
 
-    def test_run_once_finalizes_previous_not_filled_orders_with_notfilled_filename(self):
+    def test_run_once_finalizes_previous_not_filled_orders_with_neutral_unfilled_filename(self):
         previous_order = ActivePaperOrder(
             market_slug="btc-updown-5m-1777513500",
             market_title="Prior Period",
@@ -1736,7 +1706,7 @@ class TestBtcMain(unittest.TestCase):
                 debug=False,
                 debug_price_to_beat=False,
                 max_trades_per_period=1,
-                max_automated_loss_trades=0,
+                max_losses_per_run=0,
                 minimum_wallet_balance=0.0,
             ),
         ), patch(
@@ -1776,7 +1746,160 @@ class TestBtcMain(unittest.TestCase):
 
         self.assertTrue(
             os.path.exists(
-                "/appl/agents/completed_orders/completed_order_win_down_NotFilled_1777513500.txt"
+                "/appl/agents/completed_orders/completed_order_unfilled_1777513500.txt"
+            )
+        )
+        with open(
+            "/appl/agents/completed_orders/completed_order_unfilled_1777513500.txt",
+            encoding="utf-8",
+        ) as order_file:
+            content = order_file.read()
+        self.assertIn("outcome_label=unfilled", content)
+        self.assertIn("position_state=UNFILLED", content)
+
+    def test_run_once_tracks_live_submitted_but_unfilled_order_without_creating_win_file(self):
+        market = SimpleNamespace(
+            slug="btc-updown-5m-1778208300",
+            title="Bitcoin Up or Down",
+            settlement_threshold=80100.0,
+            up_token_id="up-token",
+            down_token_id="down-token",
+            start_ts=1778208300,
+        )
+        state = SimpleNamespace(trades_executed=0, active_orders=[])
+        features = SimpleNamespace(
+            price_usd=80120.0,
+            as_of=datetime.now(timezone.utc),
+            delta_from_previous_tick=1.0,
+            momentum_1m=2.0,
+            momentum_5m=5.0,
+            velocity_15s=1.0,
+            velocity_30s=2.0,
+            momentum_acceleration=-1.0,
+            volatility_5m=10.0,
+            consecutive_flat_ticks=0,
+            consecutive_directional_ticks=3,
+            last_10_ticks_direction="UUUD",
+            delta_pct_from_window_open=0.001,
+            rsi_9=60.0,
+            rsi_14=55.0,
+            rsi_speed_divergence=5.0,
+            ema_9=80110.0,
+            ema_21=80100.0,
+            ema_alignment=True,
+            ema_cross_direction="bullish",
+            adx_14=35.0,
+            atr_14=8.0,
+            window_open_price=80100.0,
+            trailing_window_open_price=80095.0,
+        )
+        up_snapshot = SimpleNamespace(
+            token_id="up-token",
+            buy_quote=0.67,
+            reference_price=0.67,
+            target_limit_price=0.67,
+            recommended_limit_price=0.67,
+            ok_to_submit=True,
+            submit_reason="ok",
+            best_bid=0.66,
+            best_ask=0.67,
+            best_bid_size=100.0,
+            best_ask_size=100.0,
+            spread=0.01,
+            spread_bps=15.0,
+            top_level_book_imbalance=0.5,
+            imbalance_pressure=0.0,
+        )
+        decision = SimpleNamespace(
+            side="UP",
+            confidence=0.72,
+            max_price_to_pay=1.0,
+            reason="test reason",
+            prompt_text=None,
+            raw_response_text='{"decision":"UP"}',
+        )
+        result = SimpleNamespace(
+            executed=False,
+            submission_accepted=True,
+            side="UP",
+            size=5.0,
+            price=0.67,
+            token_id="up-token",
+            reason="Live order submission was accepted but no fill was confirmed",
+            execution_snapshot=up_snapshot,
+            quoted_price_at_entry=0.67,
+            actual_fill_price=None,
+            realized_slippage_bps=None,
+            order_latency_ms=250,
+            book_depth_at_fill=100.0,
+            shares_requested=5.0,
+            live_order_id="order-123",
+        )
+
+        with ExitStack() as stack:
+            stack.enter_context(patch("custom.btc_agent.main._FIRST_LOOP", False))
+            stack.enter_context(
+                patch(
+                    "custom.btc_agent.main.get_trading_config",
+                    return_value=SimpleNamespace(
+                        debug=False,
+                        debug_price_to_beat=False,
+                        use_recommended_limit=False,
+                        max_trades_per_period=1,
+                        max_losses_per_run=0,
+                        minimum_wallet_balance=0.0,
+                        paper_trading=False,
+                    ),
+                )
+            )
+            stack.enter_context(
+                patch("custom.btc_agent.main.find_current_btc_updown_market", return_value=market)
+            )
+            stack.enter_context(patch("custom.btc_agent.main.sync_period_state", return_value=False))
+            stack.enter_context(patch("custom.btc_agent.main.get_state", return_value=state))
+            stack.enter_context(
+                patch("custom.btc_agent.main.resolve_price_to_beat_with_retries", return_value=market)
+            )
+            stack.enter_context(
+                patch(
+                    "custom.btc_agent.main.get_account_balance_snapshot",
+                    return_value=SimpleNamespace(cash_balance=100.0, total_account_value=100.0),
+                )
+            )
+            stack.enter_context(
+                patch("custom.btc_agent.main.get_feature_readiness", return_value=(True, None))
+            )
+            stack.enter_context(
+                patch("custom.btc_agent.main.build_btc_features", return_value=features)
+            )
+            stack.enter_context(
+                patch("custom.btc_agent.main.get_active_orders", return_value=[])
+            )
+            stack.enter_context(
+                patch("custom.btc_agent.main.get_token_quote_snapshot", return_value=up_snapshot)
+            )
+            stack.enter_context(patch("custom.btc_agent.main.print_market_context"))
+            stack.enter_context(patch("custom.btc_agent.main.print_features"))
+            stack.enter_context(patch("custom.btc_agent.main.print_active_orders"))
+            stack.enter_context(patch("custom.btc_agent.main.decide_trade", return_value=decision))
+            stack.enter_context(patch("custom.btc_agent.main.maybe_execute_trade", return_value=result))
+            mock_record = stack.enter_context(patch("custom.btc_agent.main.record_executed_trade"))
+            stack.enter_context(patch("custom.btc_agent.main.os.getcwd", return_value="/appl/agents"))
+
+            run_once()
+
+        mock_record.assert_called_once()
+        tracked_order = mock_record.call_args.args[0]
+        self.assertEqual(tracked_order.live_order_id, "order-123")
+        self.assertIsNone(tracked_order.actual_fill_price)
+        self.assertFalse(
+            os.path.exists(
+                "/appl/agents/completed_orders/completed_order_win_up_1778208300.txt"
+            )
+        )
+        self.assertFalse(
+            os.path.exists(
+                "/appl/agents/completed_orders/completed_order_unfilled_1778208300.txt"
             )
         )
 
@@ -1811,7 +1934,7 @@ class TestBtcMain(unittest.TestCase):
                 debug=False,
                 debug_price_to_beat=False,
                 max_trades_per_period=1,
-                max_automated_loss_trades=0,
+                max_losses_per_run=0,
                 minimum_wallet_balance=0.0,
             ),
         ), patch(
@@ -1893,7 +2016,7 @@ class TestBtcMain(unittest.TestCase):
                 debug=False,
                 debug_price_to_beat=False,
                 max_trades_per_period=1,
-                max_automated_loss_trades=0,
+                max_losses_per_run=0,
                 minimum_wallet_balance=0.0,
             ),
         ), patch(
@@ -1948,7 +2071,7 @@ class TestBtcMain(unittest.TestCase):
             "custom.btc_agent.main.sys.exit",
         ) as mock_exit:
             enforce_session_loss_trade_limit(
-                SimpleNamespace(max_automated_loss_trades=3)
+                SimpleNamespace(max_losses_per_run=3)
             )
 
         mock_exit.assert_not_called()

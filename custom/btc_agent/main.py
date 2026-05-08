@@ -39,6 +39,7 @@ from .executor import (
     get_account_balance_snapshot,
     get_token_quote_snapshot,
     maybe_execute_trade,
+    refresh_live_order_fill_status,
 )
 from .paper_state import (
     ActivePaperOrder,
@@ -61,7 +62,6 @@ from scripts.python.check_public_ip_indonesia import (
 _FIRST_LOOP = True
 _DEBUG_WRITTEN_SLUGS = set()
 _SESSION_LOSS_TRADES = 0
-_SESSION_SLUGS_SEEN = set()
 
 
 class QuitKeyMonitor:
@@ -234,11 +234,15 @@ def _completed_order_final_log_path(
 ) -> str:
     completed_orders_dir = os.path.join(os.getcwd(), "completed_orders")
     os.makedirs(completed_orders_dir, exist_ok=True)
+    if not_filled:
+        return os.path.join(
+            completed_orders_dir,
+            f"completed_order_unfilled_{_extract_slug_timestamp(market_slug)}{_trade_number_suffix(trade_number_in_period)}.txt",
+        )
     side_suffix = f"_{str(side).lower()}" if side else ""
-    fill_suffix = "_NotFilled" if not_filled else ""
     return os.path.join(
         completed_orders_dir,
-        f"completed_order_{outcome_label}{side_suffix}{fill_suffix}_{_extract_slug_timestamp(market_slug)}{_trade_number_suffix(trade_number_in_period)}.txt",
+        f"completed_order_{outcome_label}{side_suffix}_{_extract_slug_timestamp(market_slug)}{_trade_number_suffix(trade_number_in_period)}.txt",
     )
 
 
@@ -872,6 +876,7 @@ def append_completed_order_tick(
         order.market_slug,
         getattr(order, "trade_number_in_period", None),
     )
+    is_unfilled = getattr(order, "actual_fill_price", None) is None
     status = classify_position(order, current_btc_price)
     btc_move_from_entry = current_btc_price - order.entry_btc_price
     btc_move_from_entry_pct = (
@@ -880,8 +885,17 @@ def append_completed_order_tick(
         else 0.0
     )
     btc_gap_to_target = current_btc_price - order.target_btc_price
-    outcome_label = _classify_outcome_label(status)
-    outcome_reason = _position_outcome_reason(order, current_btc_price, status)
+    if is_unfilled:
+        status = "UNFILLED" if phase == "COMPLETED" else "PENDING_FILL"
+        outcome_label = "unfilled"
+        outcome_reason = (
+            "Live order was submitted but no fill was confirmed before period close."
+            if phase == "COMPLETED"
+            else "Live order has been submitted but no fill is confirmed yet."
+        )
+    else:
+        outcome_label = _classify_outcome_label(status)
+        outcome_reason = _position_outcome_reason(order, current_btc_price, status)
     selected_snapshot = up_snapshot if order.side == "UP" else down_snapshot if order.side == "DOWN" else None
     market_impact_ratio = _market_impact_ratio(
         order.side,
@@ -918,6 +932,7 @@ def append_completed_order_tick(
                     f"shares={order.shares:.4f}",
                     f"entry_price={order.entry_price:.3f}",
                     f"entry_btc_price={order.entry_btc_price:.2f}",
+                    f"live_order_id={getattr(order, 'live_order_id', None)}",
                     f"period_open_price_to_beat={order.target_btc_price:.2f}",
                     f"current_btc_price={current_btc_price:.2f}",
                     f"btc_move_from_entry={btc_move_from_entry:.2f}",
@@ -1000,7 +1015,7 @@ def append_completed_order_tick(
             order.market_slug,
             outcome_label,
             side=period_direction,
-            not_filled=getattr(order, "actual_fill_price", None) is None,
+            not_filled=is_unfilled,
             trade_number_in_period=getattr(order, "trade_number_in_period", None),
         )
         try:
@@ -1021,6 +1036,14 @@ def finalize_completed_orders(previous_orders, current_btc_price: float) -> int:
         if outcome_label == "loss":
             loss_count += 1
     return loss_count
+
+
+def refresh_active_live_order_fills(active_orders) -> None:
+    for order in active_orders or []:
+        try:
+            refresh_live_order_fill_status(order)
+        except Exception:
+            continue
 
 
 def finalize_current_period_logs_on_exit() -> None:
@@ -1123,6 +1146,7 @@ def append_failed_order_attempt(
             f"attempted_price={_fmt(getattr(result, 'price', None))}",
             f"attempted_size={_fmt(getattr(result, 'size', None))}",
             f"attempt_token_id={getattr(result, 'token_id', None)}",
+            f"live_order_id={getattr(result, 'live_order_id', None)}",
             f"attempt_reason={getattr(result, 'reason', '')}",
             f"market_impact_ratio={_fmt(market_impact_ratio)}",
             *_execution_microstructure_lines(
@@ -1265,10 +1289,105 @@ def append_failed_live_order(
         log_file.write("\n".join(lines))
 
 
+def append_unfilled_live_order(
+    market,
+    decision,
+    result,
+    *,
+    features=None,
+    up_snapshot: TokenQuoteSnapshot = None,
+    down_snapshot: TokenQuoteSnapshot = None,
+    observed_at: datetime = None,
+    trade_number_in_period: Optional[int] = None,
+) -> None:
+    observed_at = observed_at or datetime.now(timezone.utc)
+    log_path = _completed_order_final_log_path(
+        market.slug,
+        outcome_label="unfilled",
+        not_filled=True,
+        trade_number_in_period=trade_number_in_period,
+    )
+    _copy_pending_period_log_to_path(market.slug, log_path)
+    regime_fingerprint = _build_regime_fingerprint(
+        market_slug=market.slug,
+        observed_at=observed_at,
+        features=features,
+        up_snapshot=up_snapshot,
+        down_snapshot=down_snapshot,
+        current_btc_price=None if features is None else getattr(features, "price_usd", None),
+        period_open_price_to_beat=market.settlement_threshold,
+    )
+    with open(log_path, "a", encoding="utf-8") as log_file:
+        lines = [
+            f"observed_at={observed_at.isoformat()}",
+            "phase=LIVE_SUBMITTED_UNFILLED",
+            f"period_open_price_to_beat={_fmt(market.settlement_threshold)}",
+            f"attempt_side={getattr(decision, 'side', None)}",
+            f"attempt_confidence={_fmt(getattr(decision, 'confidence', None))}",
+            f"effective_confidence={_fmt(_effective_confidence(decision, market=market, features=features))}",
+            f"attempt_max_price_to_pay={_fmt(getattr(decision, 'max_price_to_pay', None))}",
+            f"llm_raw_reasoning={getattr(decision, 'reason', '')}",
+            f"attempted_price={_fmt(getattr(result, 'price', None))}",
+            f"attempted_size={_fmt(getattr(result, 'size', None))}",
+            f"attempt_token_id={getattr(result, 'token_id', None)}",
+            f"live_order_id={getattr(result, 'live_order_id', None)}",
+            f"attempt_reason={getattr(result, 'reason', '')}",
+            "filled=false",
+            *_execution_microstructure_lines(
+                quoted_price_at_entry=getattr(result, "quoted_price_at_entry", None),
+                actual_fill_price=getattr(result, "actual_fill_price", None),
+                realized_slippage_bps=getattr(result, "realized_slippage_bps", None),
+                order_latency_ms=getattr(result, "order_latency_ms", None),
+                book_depth_at_fill=getattr(result, "book_depth_at_fill", None),
+                shares_requested=getattr(result, "shares_requested", None),
+            ),
+        ]
+        prompt_text = getattr(decision, "prompt_text", None)
+        if prompt_text:
+            lines.extend(["llm_prompt_start", prompt_text, "llm_prompt_end"])
+        raw_response_text = getattr(decision, "raw_response_text", None)
+        if raw_response_text:
+            lines.extend(["llm_raw_response_start", raw_response_text, "llm_raw_response_end"])
+        if up_snapshot is not None:
+            lines.extend(_snapshot_summary("up", up_snapshot))
+        if down_snapshot is not None:
+            lines.extend(_snapshot_summary("down", down_snapshot))
+        if features is not None:
+            lines.extend(
+                [
+                    f"btc_price={_fmt(getattr(features, 'price_usd', None))}",
+                    f"delta_prev_tick={getattr(features, 'delta_from_previous_tick', None)}",
+                    f"momentum_1m={getattr(features, 'momentum_1m', None)}",
+                    f"momentum_5m={getattr(features, 'momentum_5m', None)}",
+                    f"velocity_15s={getattr(features, 'velocity_15s', None)}",
+                    f"velocity_30s={getattr(features, 'velocity_30s', None)}",
+                    f"momentum_acceleration={getattr(features, 'momentum_acceleration', None)}",
+                    f"momentum_alignment={_momentum_alignment(features)}",
+                    f"volatility_5m={getattr(features, 'volatility_5m', None)}",
+                    f"consecutive_flat_ticks={getattr(features, 'consecutive_flat_ticks', None)}",
+                    f"consecutive_directional_ticks={getattr(features, 'consecutive_directional_ticks', None)}",
+                    f"last_10_ticks_direction={getattr(features, 'last_10_ticks_direction', None)}",
+                    f"rsi_9={getattr(features, 'rsi_9', None)}",
+                    f"rsi_speed_divergence={getattr(features, 'rsi_speed_divergence', None)}",
+                    f"ema_9={getattr(features, 'ema_9', None)}",
+                    f"ema_21={getattr(features, 'ema_21', None)}",
+                    f"ema_alignment={getattr(features, 'ema_alignment', None)}",
+                    f"ema_cross_direction={getattr(features, 'ema_cross_direction', None)}",
+                    f"adx_14={getattr(features, 'adx_14', None)}",
+                    f"atr_14={getattr(features, 'atr_14', None)}",
+                    "regime_fingerprint=" + json.dumps(regime_fingerprint, sort_keys=True),
+                ]
+            )
+        lines.append("")
+        log_file.write("\n".join(lines))
+
+
 def _should_log_failed_order_attempt(cfg, decision, result) -> bool:
     if getattr(decision, "side", None) not in ("UP", "DOWN"):
         return False
     if getattr(result, "executed", False):
+        return False
+    if getattr(result, "submission_accepted", False):
         return False
     if not getattr(result, "token_id", None):
         return False
@@ -1276,41 +1395,23 @@ def _should_log_failed_order_attempt(cfg, decision, result) -> bool:
 
 
 def enforce_session_loss_trade_limit(cfg) -> None:
-    if getattr(cfg, "max_automated_loss_trades", 0) <= 0:
+    if getattr(cfg, "max_losses_per_run", 0) <= 0:
         return
-    if _SESSION_LOSS_TRADES < cfg.max_automated_loss_trades:
+    if _SESSION_LOSS_TRADES < cfg.max_losses_per_run:
         return
     print(
-        "Max automated loss trades for this session has been reached "
-        f"({_SESSION_LOSS_TRADES}/{cfg.max_automated_loss_trades}). "
+        "Max losses per run has been reached "
+        f"({_SESSION_LOSS_TRADES}/{cfg.max_losses_per_run}). "
         "Exiting BTC agent."
     )
     sys.exit(0)
-
-
-def enforce_session_period_limit(cfg, current_slug: str) -> None:
-    if getattr(cfg, "max_periods_per_run", 0) <= 0:
-        _SESSION_SLUGS_SEEN.add(current_slug)
-        return
-
-    if current_slug in _SESSION_SLUGS_SEEN:
-        return
-
-    if len(_SESSION_SLUGS_SEEN) >= cfg.max_periods_per_run:
-        print(
-            "Max periods per run has been reached "
-            f"({len(_SESSION_SLUGS_SEEN)}/{cfg.max_periods_per_run}). "
-            "Exiting BTC agent."
-        )
-        sys.exit(0)
-
-    _SESSION_SLUGS_SEEN.add(current_slug)
 
 
 def _get_losing_active_orders(current_btc_price: float) -> list[ActivePaperOrder]:
     return [
         order
         for order in get_active_orders()
+        if getattr(order, "actual_fill_price", None) is not None
         if classify_position(order, current_btc_price) == "LOSING"
     ]
 
@@ -1447,6 +1548,7 @@ def get_decision_quote_snapshot(
     decision,
     up_snapshot: TokenQuoteSnapshot,
     down_snapshot: TokenQuoteSnapshot,
+    features=None,
 ) -> TokenQuoteSnapshot:
     base_snapshot = up_snapshot if decision.side == "UP" else down_snapshot
     target_limit_price = compute_target_limit_price(
@@ -1479,6 +1581,7 @@ def get_decision_quote_snapshot(
         reference_price=base_snapshot.reference_price,
         submission_limit_price=get_submission_limit_price(provisional_snapshot),
         tick_size=base_snapshot.tick_size,
+        volatility_5m=None if features is None else getattr(features, "volatility_5m", None),
     )
     return TokenQuoteSnapshot(
         token_id=base_snapshot.token_id,
@@ -1549,7 +1652,11 @@ def print_active_orders(current_btc_price: float) -> None:
 
     print("Active orders:")
     for idx, order in enumerate(active_orders, start=1):
-        status = classify_position(order, current_btc_price)
+        status = (
+            "PENDING_FILL"
+            if getattr(order, "actual_fill_price", None) is None
+            else classify_position(order, current_btc_price)
+        )
         win_condition = (
             f"BTC must finish above {order.target_btc_price:.2f}"
             if order.side == "UP"
@@ -1675,8 +1782,6 @@ def run_once() -> None:
             print("No BTC Up/Down market found.")
         return
 
-    enforce_session_period_limit(cfg, market.slug)
-
     previous_state = get_state()
     previous_orders = list(getattr(previous_state, "active_orders", []))
     previous_market_slug = getattr(previous_state, "market_slug", None)
@@ -1700,6 +1805,7 @@ def run_once() -> None:
             final_resolution_btc_price = None
         if previous_orders:
             try:
+                refresh_active_live_order_fills(previous_orders)
                 _SESSION_LOSS_TRADES += finalize_completed_orders(
                     previous_orders,
                     final_resolution_btc_price if final_resolution_btc_price is not None else fetch_btc_spot_price(),
@@ -1732,6 +1838,7 @@ def run_once() -> None:
             )
         active_orders = get_active_orders()
         if active_orders:
+            refresh_active_live_order_fills(active_orders)
             up_snapshot = None
             down_snapshot = None
             up_snapshot = get_token_quote_snapshot(market.up_token_id)
@@ -1776,6 +1883,7 @@ def run_once() -> None:
             down_snapshot = None
             active_orders = get_active_orders()
             if active_orders:
+                refresh_active_live_order_fills(active_orders)
                 up_snapshot = get_token_quote_snapshot(market.up_token_id)
                 down_snapshot = get_token_quote_snapshot(market.down_token_id)
 
@@ -1886,6 +1994,7 @@ def run_once() -> None:
                 decision,
                 up_snapshot,
                 down_snapshot,
+                features=features,
             )
             if cfg.debug:
                 print_quote_snapshot_from_snapshot("UP (with decision)", decision_snapshot, debug=True)
@@ -1898,6 +2007,7 @@ def run_once() -> None:
                 decision,
                 up_snapshot,
                 down_snapshot,
+                features=features,
             )
             if cfg.debug:
                 print_quote_snapshot_from_snapshot("DOWN (with decision)", decision_snapshot, debug=True)
@@ -1938,11 +2048,15 @@ def run_once() -> None:
             trade_number_in_period=state.trades_executed + 1,
         )
 
-    if result.executed:
+    if result.executed or getattr(result, "submission_accepted", False):
         if cfg.max_trades_per_period > 1:
             set_trade_cooldown(3)
 
-    if result.executed and decision.side in ("UP", "DOWN") and result.token_id:
+    if (
+        (result.executed or getattr(result, "submission_accepted", False))
+        and decision.side in ("UP", "DOWN")
+        and result.token_id
+    ):
         target_btc_price = market.settlement_threshold
         target_is_approximate = target_btc_price is None
         if target_btc_price is None:
@@ -1970,6 +2084,7 @@ def run_once() -> None:
             order_latency_ms=getattr(result, "order_latency_ms", None),
             book_depth_at_fill=getattr(result, "book_depth_at_fill", None),
             shares_requested=getattr(result, "shares_requested", None),
+            live_order_id=getattr(result, "live_order_id", None),
             llm_prompt_text=getattr(decision, "prompt_text", None),
             llm_raw_response_text=getattr(decision, "raw_response_text", None),
             target_is_approximate=target_is_approximate,
@@ -1992,6 +2107,7 @@ def run_once() -> None:
     enforce_session_loss_trade_limit(cfg)
 
     active_btc_price = features.price_usd
+    refresh_active_live_order_fills(get_active_orders())
     update_active_order_logs(
         active_btc_price,
         observed_at=features.as_of,

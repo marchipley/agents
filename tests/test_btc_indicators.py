@@ -13,6 +13,7 @@ class TestBtcIndicators(unittest.TestCase):
         indicators._PRICE_HISTORY.clear()
         indicators._LAST_SUCCESSFUL_PROVIDER_INDEX = 0
         indicators._PRICE_HISTORY_BACKFILLED = False
+        indicators._LIVE_PRICE_SAMPLES_RECORDED = 0
 
     @staticmethod
     def _recorded_price_return(price: float):
@@ -525,6 +526,8 @@ class TestBtcIndicators(unittest.TestCase):
         ready, reason = indicators.get_feature_readiness(features)
 
         self.assertFalse(ready)
+        self.assertIn("RSI warmup incomplete (0/15 samples, need 15 more)", reason)
+        self.assertIn("phase 2 indicator warmup incomplete (0/21 samples, need 21 more)", reason)
         self.assertIn("RSI warmup incomplete", reason)
         self.assertIn("trailing 5-minute warmup incomplete", reason)
         self.assertIn("phase 2 indicator warmup incomplete", reason)
@@ -559,12 +562,52 @@ class TestBtcIndicators(unittest.TestCase):
             retained_sample_count=21,
             window_sample_count=3,
             trailing_5m_sample_count=3,
+            live_sample_count=21,
         )
 
         ready, reason = indicators.get_feature_readiness(features)
 
         self.assertTrue(ready)
         self.assertEqual(reason, "ready")
+
+    def test_feature_readiness_false_until_live_samples_are_collected_for_indicators(self):
+        features = indicators.BtcFeatures(
+            as_of=datetime.now(timezone.utc),
+            price_usd=75000.0,
+            window_open_price=74990.0,
+            trailing_5m_open_price=74980.0,
+            delta_pct_from_window_open=0.0,
+            delta_pct_from_trailing_5m_open=0.0,
+            delta_from_previous_tick=3.0,
+            rsi_9=58.0,
+            rsi_14=55.0,
+            rsi_speed_divergence=3.0,
+            momentum_1m=8.0,
+            momentum_5m=10.0,
+            velocity_15s=4.0,
+            velocity_30s=6.0,
+            momentum_acceleration=-2.0,
+            ema_9=74995.0,
+            ema_21=74980.0,
+            ema_alignment=True,
+            ema_cross_direction="bullish",
+            adx_14=29.0,
+            atr_14=11.0,
+            volatility_5m=6.0,
+            consecutive_flat_ticks=1,
+            consecutive_directional_ticks=3,
+            last_10_ticks_direction="UUUDUUUUUU",
+            retained_sample_count=21,
+            window_sample_count=3,
+            trailing_5m_sample_count=3,
+            live_sample_count=1,
+        )
+
+        ready, reason = indicators.get_feature_readiness(features)
+
+        self.assertFalse(ready)
+        self.assertIn("RSI warmup incomplete (1/15 samples, need 14 more)", reason)
+        self.assertIn("phase 2 indicator warmup incomplete (1/21 samples, need 20 more)", reason)
 
     def test_ensure_price_history_backfilled_seeds_from_recent_trades(self):
         now = datetime.fromtimestamp(1_776_813_660, tz=timezone.utc)
