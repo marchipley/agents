@@ -22,7 +22,7 @@ DISCOVERY_MIN_CONFIDENCE = 0.65
 # Fixed number of shares to submit for each paper/live trade.
 # Example: increasing from 5 to 10 doubles position size and PnL variance;
 # lowering to 3 reduces exposure per order.
-SHARES_PER_TRADE = 3
+SHARES_PER_TRADE = 5
 
 # Maximum spread allowed by configuration for a trade candidate.
 # Example: raising from 0.06 to 0.10 allows participation in wider, more
@@ -141,6 +141,16 @@ IMBALANCE_PRICING_THRESHOLD = 0.50
 # Example: lowering from 0.75 to 0.65 makes aggressive repricing more common.
 IMBALANCE_PRICING_STRONG_THRESHOLD = 0.75
 
+# Early-window safety buffer multiplier for strike-distance filtering.
+# Example: raising from 0.50 to 0.65 makes the bot wait for a larger lead early
+# in the period; lowering it allows more early near-strike entries.
+EARLY_WINDOW_BUFFER_MULTIPLIER = 0.50
+
+# Late-window safety buffer multiplier for strike-distance filtering.
+# Example: lowering from 0.15 to 0.10 allows more late near-strike trades;
+# raising it makes the bot stay more conservative closer to expiry.
+LATE_WINDOW_BUFFER_MULTIPLIER = 0.15
+
 # Realized slippage guard in basis points. If the confirmed fill exceeds this
 # slippage relative to the quoted entry price, trigger a cooldown.
 # Example: lowering from 500 to 300 reacts faster to unstable books; raising it
@@ -248,6 +258,8 @@ class TradingConfig:
     required_velocity_divisor: float = REQUIRED_VELOCITY_DIVISOR
     imbalance_pricing_threshold: float = IMBALANCE_PRICING_THRESHOLD
     imbalance_pricing_strong_threshold: float = IMBALANCE_PRICING_STRONG_THRESHOLD
+    early_window_buffer_multiplier: float = EARLY_WINDOW_BUFFER_MULTIPLIER
+    late_window_buffer_multiplier: float = LATE_WINDOW_BUFFER_MULTIPLIER
     slippage_cooldown_threshold_bps: float = SLIPPAGE_COOLDOWN_THRESHOLD_BPS
     slippage_cooldown_seconds: int = SLIPPAGE_COOLDOWN_SECONDS
     live_order_status_poll_attempts: int = LIVE_ORDER_STATUS_POLL_ATTEMPTS
@@ -422,6 +434,18 @@ def get_trading_config() -> TradingConfig:
             os.getenv(
                 "BTC_AGENT_IMBALANCE_PRICING_STRONG_THRESHOLD",
                 str(IMBALANCE_PRICING_STRONG_THRESHOLD),
+            )
+        ),
+        early_window_buffer_multiplier=float(
+            os.getenv(
+                "BTC_AGENT_EARLY_WINDOW_BUFFER_MULTIPLIER",
+                str(EARLY_WINDOW_BUFFER_MULTIPLIER),
+            )
+        ),
+        late_window_buffer_multiplier=float(
+            os.getenv(
+                "BTC_AGENT_LATE_WINDOW_BUFFER_MULTIPLIER",
+                str(LATE_WINDOW_BUFFER_MULTIPLIER),
             )
         ),
         slippage_cooldown_threshold_bps=float(

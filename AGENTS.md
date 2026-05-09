@@ -148,6 +148,7 @@ What the BTC agent does today:
 - Prints the current market `price_to_beat` in the BTC-agent output and includes that same period baseline in the LLM decision prompt, now preferring Vatic's BTC 5-minute timestamp target API and only falling back to Polymarket page / `_next/data` parsing when that external target lookup is unavailable.
 - Pulls Gamma `outcomePrices` from the active market payload only as an initial discovery fallback, then refreshes `up_market_probability` / `down_market_probability` from the Polymarket CLOB market websocket using the same token-mapped `price_change.best_ask` fields as the local `getlimitfull.py` script, so terminal output, completed-period logs, completed-order logs, and prompt inputs track the same live probabilities shown on Polymarket more closely.
 - Prints `up_spread` and `down_spread` in the per-tick `Market:` block so each loop shows the current book width for both sides even when verbose quote snapshots are not being emphasized.
+- Derives `best_bid`, `best_ask`, `spread`, and `spread_bps` from the executable quote pair first (`SELL` quote as bid, `BUY` quote as ask), only falling back to raw `/book` extremes when quote-side prices are unavailable. This avoids the old ghost-spread problem where thin 5-minute books surfaced fake `0.01 / 0.99` bounds and triggered toxic-liquidity rejections.
 - Uses a one-shot synchronous websocket scrape for that per-tick probability refresh and closes it immediately after both side probabilities arrive, avoiding the older `asyncio.run()` / websocket close-handshake delay that could stretch a nominal 5-second sleep into 10-15 seconds.
 - Refreshes those live market probabilities only once per loop tick; the main loop now reuses the market object’s already-refreshed `up_market_probability` / `down_market_probability` values instead of opening a second websocket connection.
 - The live market-probability path is now authoritative: if the CLOB market websocket does not provide `best_ask` values for both outcome tokens, the refresh path raises instead of silently inventing or substituting probabilities.
@@ -190,6 +191,7 @@ What the BTC agent does today:
 - The LLM prompt now also includes an RSI directional sanity rule: if `RSI(9) < 30`, it should not choose `DOWN`; if `RSI(9) > 70`, it should not choose `UP` unless `ADX > 30`, and values above `RSI(9) > 85` are treated as explicit exhaustion risk even in strong trends.
 - The LLM prompt and execution layer now both suspend the normal `UP` RSI veto when `rsi_speed_divergence > 5` and `ADX > 35`, so accelerating RSI in a strong trend is treated as a parabolic continuation signal instead of automatic exhaustion.
 - The LLM prompt now also tells the model to lower confidence when `rsi_speed_divergence` is negative while price is still moving up, which is intended to catch weakening continuation setups before they become late-window fades or weak breakout chases.
+- The LLM prompt now also carries a late-window ITM maintenance rule: if a side is already in the money and fewer than 60 seconds remain, generic RSI exhaustion fears should be deprioritized unless a genuinely large counter-trend spike is occurring.
 - The Phase 2.7 prompt layer now also instructs the model to prefer `NO_TRADE` when:
   - the market is too close to call, meaning `abs(gap_to_target_usd) < 0.2 * volatility_5m` with more than 60 seconds remaining
   - it wants `UP` while the `UP` quote is below `0.45`
@@ -217,7 +219,10 @@ What the BTC agent does today:
   - the confidence is boosted by `+0.15` before floor / edge / consensus-gap checks
 - Execution timing now also prefers the canonical slug timestamp plus 300 seconds over stale upstream `start_ts` / `end_ts`, so late-window vetoes and FOK logic use the same boundary the logs print in `mm:ss`.
 - Applies a configured spread veto before thin-liquidity checks: if `snapshot.spread > max_spread`, the trade is rejected. The repo default is now `0.10`, which is intentionally looser than the earlier `0.06` setting.
-- Applies a Phase 2.7 victory-margin veto before submission: if there are more than 60 seconds remaining and the BTC gap to target is smaller than `0.2 * volatility_5m`, the trade is rejected as too close to call.
+- Applies a dynamic “too close to call” strike buffer before submission instead of a flat `0.2 * volatility_5m` rule:
+  - early in the 5-minute window the buffer is larger, using `EARLY_WINDOW_BUFFER_MULTIPLIER`, currently `0.50 * volatility_5m`
+  - near expiry it decays toward `LATE_WINDOW_BUFFER_MULTIPLIER`, currently `0.15 * volatility_5m`
+  - this is intended to reduce early near-strike chop losses without over-blocking stronger late-window entries
 - Applies a Phase 2.7 quote-price divergence veto for `UP`: if the bot wants `UP` but the `UP` quote is below `0.45`, the trade is rejected because the market is not confirming the breakout.
 - Applies a Phase 2.7 RSI ceiling veto for `UP`: if `RSI(9) > 85` while BTC is already above the strike, the trade is rejected as an exhaustion-risk breakout chase.
 - Applies RSI directional vetoes before submission:
@@ -230,6 +235,7 @@ What the BTC agent does today:
 - Decision-time recommended-limit gating now allows up to a 4-tick adverse move instead of 2 ticks when `volatility_5m` is in the `extreme` regime, which helps preserve valid entries during fast quote drift.
 - Applies a Discovery strike-buffer veto during the first 60 seconds of a new window: if `time_remaining_seconds > 240` and the BTC price is within `0.2 * ATR` of the strike, the trade is rejected unless momentum alignment is fully positive and ADX already shows strong trend strength.
 - Tracks in-memory active orders for the current 5-minute market window and prints each order’s target BTC level plus whether the position is currently winning, losing, or tied.
+- If a live order has been submitted but no fill is confirmed yet, the runtime now shows `order_<n>_position_state = UNFILLED` instead of `PENDING_FILL`, so the terminal output clearly distinguishes an accepted order from a confirmed fill.
 - Writes a per-slug order-tracking file under `completed_orders/` for each executed order, appending one status snapshot per tick plus the pre-order tick history that led into the trade.
 - Writes `completed_order_attempt_<slug_timestamp>.txt` when a directional trade is rejected before execution or live submission fails:
   - in paper mode, these files represent pre-execution validation rejections and explicitly mark `order_submission_attempted=false`
@@ -240,7 +246,12 @@ What the BTC agent does today:
   - `completed_order_loss_down_<slug_timestamp>.txt`
   - and `...-<trade_num>.txt` suffixes still apply when multi-trade-per-period mode is enabled
 - Live fill confirmation now prefers explicit Polymarket order-status data (`get_order(order_id)`) plus trade-resolution lookups instead of inferring fills from generic submission-response fields.
-- If a live order submission is accepted but no actual fill price is confirmed yet, the agent now tracks it as a pending live order (`PENDING_FILL`) and rechecks Polymarket status on later ticks and at period rollover.
+- If a live order submission is accepted but no actual fill price is confirmed yet, the agent now tracks it as an unfilled live order and rechecks Polymarket status on later ticks and at period rollover.
+- On later ticks, if that accepted live order is still unfilled, the bot now attempts one live maintenance retry:
+  - cancel the outstanding order through the Polymarket client
+  - fetch a fresh current quote snapshot for the same token
+  - re-submit the same side and size at the latest submission-limit probability price
+  - if the retry still does not fill, the order remains tracked as `UNFILLED`
 - If that tracked live order reaches period close without a confirmed fill price, the finalized filename is neutral and does not carry a win/loss or direction label:
   - `completed_order_unfilled_<slug_timestamp>.txt`
 - If a confirmed filled order shows realized slippage above `SLIPPAGE_COOLDOWN_THRESHOLD_BPS`, currently `500` bps, the bot now triggers a trade cooldown for `SLIPPAGE_COOLDOWN_SECONDS`, currently `300` seconds, before taking another order.

@@ -42,6 +42,7 @@ from .executor import (
     get_token_quote_snapshot,
     maybe_execute_trade,
     refresh_live_order_fill_status,
+    retry_unfilled_live_order,
 )
 from .paper_state import (
     ActivePaperOrder,
@@ -902,7 +903,7 @@ def append_completed_order_tick(
     )
     btc_gap_to_target = current_btc_price - order.target_btc_price
     if is_unfilled:
-        status = "UNFILLED" if phase == "COMPLETED" else "PENDING_FILL"
+        status = "UNFILLED"
         outcome_label = "unfilled"
         outcome_reason = (
             "Live order was submitted but no fill was confirmed before period close."
@@ -1063,6 +1064,36 @@ def refresh_active_live_order_fills(active_orders):
         except Exception:
             continue
     return newly_filled
+
+
+def maintain_unfilled_live_orders(active_orders, market):
+    updated_orders = []
+    for order in active_orders or []:
+        try:
+            if refresh_live_order_fill_status(order):
+                updated_orders.append(order)
+                continue
+            if getattr(order, "actual_fill_price", None) is not None:
+                continue
+            if int(getattr(order, "live_reprice_attempts", 0) or 0) >= 1:
+                continue
+            result = retry_unfilled_live_order(order, market)
+            if result is None:
+                continue
+            order.live_reprice_attempts = int(getattr(order, "live_reprice_attempts", 0) or 0) + 1
+            order.live_order_id = getattr(result, "live_order_id", None) or getattr(order, "live_order_id", None)
+            order.entry_price = getattr(result, "price", order.entry_price) or order.entry_price
+            order.quoted_price_at_entry = getattr(result, "quoted_price_at_entry", None)
+            order.order_latency_ms = getattr(result, "order_latency_ms", None)
+            order.book_depth_at_fill = getattr(result, "book_depth_at_fill", None)
+            order.shares_requested = getattr(result, "shares_requested", None)
+            if getattr(result, "actual_fill_price", None) is not None:
+                order.actual_fill_price = result.actual_fill_price
+                order.realized_slippage_bps = getattr(result, "realized_slippage_bps", None)
+                updated_orders.append(order)
+        except Exception:
+            continue
+    return updated_orders
 
 
 def finalize_current_period_logs_on_exit() -> None:
@@ -1672,7 +1703,7 @@ def print_active_orders(current_btc_price: float) -> None:
     print("Active orders:")
     for idx, order in enumerate(active_orders, start=1):
         status = (
-            "PENDING_FILL"
+            "UNFILLED"
             if getattr(order, "actual_fill_price", None) is None
             else classify_position(order, current_btc_price)
         )
@@ -1870,6 +1901,8 @@ def run_once() -> None:
         if active_orders:
             for filled_order in refresh_active_live_order_fills(active_orders):
                 _apply_slippage_cooldown_if_needed(filled_order)
+            for filled_order in maintain_unfilled_live_orders(active_orders, market):
+                _apply_slippage_cooldown_if_needed(filled_order)
             up_snapshot = None
             down_snapshot = None
             up_snapshot = get_token_quote_snapshot(market.up_token_id)
@@ -1915,6 +1948,8 @@ def run_once() -> None:
             active_orders = get_active_orders()
             if active_orders:
                 for filled_order in refresh_active_live_order_fills(active_orders):
+                    _apply_slippage_cooldown_if_needed(filled_order)
+                for filled_order in maintain_unfilled_live_orders(active_orders, market):
                     _apply_slippage_cooldown_if_needed(filled_order)
                 up_snapshot = get_token_quote_snapshot(market.up_token_id)
                 down_snapshot = get_token_quote_snapshot(market.down_token_id)
@@ -2147,6 +2182,8 @@ def run_once() -> None:
 
     active_btc_price = features.price_usd
     for filled_order in refresh_active_live_order_fills(get_active_orders()):
+        _apply_slippage_cooldown_if_needed(filled_order)
+    for filled_order in maintain_unfilled_live_orders(get_active_orders(), market):
         _apply_slippage_cooldown_if_needed(filled_order)
     update_active_order_logs(
         active_btc_price,

@@ -536,6 +536,7 @@ def get_token_quote_snapshot(
     decision: Optional[LlmDecision] = None,
 ) -> TokenQuoteSnapshot:
     buy_quote = get_price_for_side(token_id, "BUY")
+    sell_quote = get_price_for_side(token_id, "SELL")
     midpoint = _get_midpoint_price(token_id)
     last_trade_price = _get_last_trade_price(token_id)
 
@@ -543,12 +544,14 @@ def get_token_quote_snapshot(
     bids = book.get("bids") or []
     asks = book.get("asks") or []
 
-    best_bid = None
-    best_ask = None
+    # Prioritize executable quote-derived bounds over the often-toxic thin-book
+    # extremes that show up as 0.01/0.99 on these 5-minute markets.
+    best_bid = sell_quote if sell_quote is not None else None
+    best_ask = buy_quote if buy_quote is not None else None
 
-    if bids and isinstance(bids[0], dict):
+    if best_bid is None and bids and isinstance(bids[0], dict):
         best_bid = _coerce_price(bids[0].get("price"))
-    if asks and isinstance(asks[0], dict):
+    if best_ask is None and asks and isinstance(asks[0], dict):
         best_ask = _coerce_price(asks[0].get("price"))
     best_bid_size = None
     best_ask_size = None
@@ -989,6 +992,204 @@ def refresh_live_order_fill_status(order) -> bool:
     return True
 
 
+def cancel_live_order(order_id: Optional[str]) -> bool:
+    if not order_id:
+        return False
+    client = Polymarket().client
+    for method_name, args in (
+        ("cancel", (order_id,)),
+        ("cancel_order", (order_id,)),
+        ("cancel_orders", ([order_id],)),
+    ):
+        method = getattr(client, method_name, None)
+        if method is None:
+            continue
+        try:
+            method(*args)
+            return True
+        except Exception:
+            continue
+    return False
+
+
+def retry_unfilled_live_order(order, market: BtcUpDownMarket) -> Optional[TradeExecutionResult]:
+    if getattr(order, "actual_fill_price", None) is not None:
+        return None
+    order_id = getattr(order, "live_order_id", None)
+    if not order_id:
+        return None
+
+    cfg = get_trading_config()
+    if getattr(cfg, "paper_trading", True):
+        return None
+
+    canceled = cancel_live_order(order_id)
+    if not canceled:
+        return TradeExecutionResult(
+            executed=False,
+            side=getattr(order, "side", None),
+            size=0.0,
+            price=0.0,
+            token_id=getattr(order, "token_id", None),
+            reason=f"Unable to cancel unfilled live order before repricing (live_order_id={order_id})",
+            live_order_response=None,
+            execution_snapshot=None,
+            quoted_price_at_entry=getattr(order, "quoted_price_at_entry", None),
+            actual_fill_price=None,
+            realized_slippage_bps=None,
+            order_latency_ms=0,
+            book_depth_at_fill=getattr(order, "book_depth_at_fill", None),
+            shares_requested=getattr(order, "shares_requested", None),
+            submission_accepted=True,
+            live_order_id=order_id,
+        )
+
+    snapshot = get_token_quote_snapshot(getattr(order, "token_id", None))
+    submission_limit_price = get_submission_limit_price(snapshot)
+    if submission_limit_price is None or snapshot.reference_price is None:
+        return TradeExecutionResult(
+            executed=False,
+            side=getattr(order, "side", None),
+            size=0.0,
+            price=0.0,
+            token_id=getattr(order, "token_id", None),
+            reason="Unable to reprice unfilled live order: no fresh submission limit available",
+            live_order_response=None,
+            execution_snapshot=snapshot,
+            quoted_price_at_entry=snapshot.buy_quote,
+            actual_fill_price=None,
+            realized_slippage_bps=None,
+            order_latency_ms=0,
+            book_depth_at_fill=_get_book_depth_at_fill(snapshot),
+            shares_requested=getattr(order, "shares_requested", None),
+            submission_accepted=False,
+            live_order_id=None,
+        )
+
+    time_remaining_seconds = _get_time_remaining_seconds(market)
+    use_fok = time_remaining_seconds <= 10
+    order_type_label = "FOK" if use_fok else "GTC"
+    size = float(getattr(order, "shares_requested", None) or getattr(order, "shares", 0.0) or 0.0)
+    size = _quantize_live_buy_size_for_amount_precision(submission_limit_price, size)
+    quoted_price_at_entry = snapshot.buy_quote
+    book_depth_at_fill = _get_book_depth_at_fill(snapshot)
+    if size <= 0:
+        return TradeExecutionResult(
+            executed=False,
+            side=getattr(order, "side", None),
+            size=0.0,
+            price=submission_limit_price,
+            token_id=getattr(order, "token_id", None),
+            reason="Unable to reprice unfilled live order: size quantized to zero",
+            live_order_response=None,
+            execution_snapshot=snapshot,
+            quoted_price_at_entry=quoted_price_at_entry,
+            actual_fill_price=None,
+            realized_slippage_bps=None,
+            order_latency_ms=0,
+            book_depth_at_fill=book_depth_at_fill,
+            shares_requested=size,
+            submission_accepted=False,
+            live_order_id=None,
+        )
+
+    min_order_size = _scale_live_size_for_min_notional(
+        0.0,
+        submission_limit_price,
+        cfg.live_min_order_usd,
+    )
+    if size < min_order_size:
+        return TradeExecutionResult(
+            executed=False,
+            side=getattr(order, "side", None),
+            size=0.0,
+            price=submission_limit_price,
+            token_id=getattr(order, "token_id", None),
+            reason=(
+                "Unable to reprice unfilled live order: size below venue minimum "
+                f"(size={size:.4f}; required_min_size={min_order_size:.4f})"
+            ),
+            live_order_response=None,
+            execution_snapshot=snapshot,
+            quoted_price_at_entry=quoted_price_at_entry,
+            actual_fill_price=None,
+            realized_slippage_bps=None,
+            order_latency_ms=0,
+            book_depth_at_fill=book_depth_at_fill,
+            shares_requested=size,
+            submission_accepted=False,
+            live_order_id=None,
+        )
+
+    client = Polymarket()
+    required_cash = _get_required_live_cash(size, submission_limit_price, cfg.live_fee_rate_bps)
+    ensure_live_trade_cash_available(required_cash)
+    submit_started = time.monotonic()
+    response = client.execute_order(
+        price=submission_limit_price,
+        size=size,
+        side="BUY",
+        token_id=getattr(order, "token_id", None),
+        fee_rate_bps=cfg.live_fee_rate_bps,
+        tick_size=snapshot.tick_size,
+        use_fok=use_fok,
+    )
+    order_latency_ms = int(round((time.monotonic() - submit_started) * 1000))
+    new_order_id = _extract_order_id_from_live_response(response)
+    actual_fill_price = _resolve_actual_fill_price(response, getattr(order, "token_id", None))
+    realized_slippage_bps = _compute_realized_slippage_bps(
+        quoted_price_at_entry,
+        actual_fill_price,
+    )
+
+    if actual_fill_price is None:
+        return TradeExecutionResult(
+            executed=False,
+            side=getattr(order, "side", None),
+            size=size,
+            price=submission_limit_price,
+            token_id=getattr(order, "token_id", None),
+            reason=(
+                "Live order re-submitted after unfilled cancel but no fill was confirmed "
+                f"({get_submission_limit_label()}={submission_limit_price:.3f}; "
+                f"size={size:.4f}; order_type={order_type_label}; time_remaining={time_remaining_seconds}s)"
+            ),
+            live_order_response=response,
+            execution_snapshot=snapshot,
+            quoted_price_at_entry=quoted_price_at_entry,
+            actual_fill_price=None,
+            realized_slippage_bps=None,
+            order_latency_ms=order_latency_ms,
+            book_depth_at_fill=book_depth_at_fill,
+            shares_requested=size,
+            submission_accepted=True,
+            live_order_id=new_order_id,
+        )
+
+    return TradeExecutionResult(
+        executed=True,
+        side=getattr(order, "side", None),
+        size=size,
+        price=submission_limit_price,
+        token_id=getattr(order, "token_id", None),
+        reason=(
+            "Live order re-submitted after unfilled cancel and fill confirmed "
+            f"({get_submission_limit_label()}={submission_limit_price:.3f}; "
+            f"size={size:.4f}; order_type={order_type_label}; time_remaining={time_remaining_seconds}s)"
+        ),
+        live_order_response=response,
+        execution_snapshot=snapshot,
+        quoted_price_at_entry=quoted_price_at_entry,
+        actual_fill_price=actual_fill_price,
+        realized_slippage_bps=realized_slippage_bps,
+        order_latency_ms=order_latency_ms,
+        book_depth_at_fill=book_depth_at_fill,
+        shares_requested=size,
+        submission_accepted=True,
+        live_order_id=new_order_id,
+    )
+
+
 def _resolve_actual_fill_price(response: Any, token_id: Optional[str]) -> Optional[float]:
     average_fill = _extract_average_fill_price_from_live_response(response)
     if average_fill is not None:
@@ -1395,18 +1596,31 @@ def _validate_trade_candidate(
             ),
         )
 
+    time_factor = max(min(time_remaining_seconds / 300.0, 1.0), 0.0)
+    dynamic_buffer_multiplier = (
+        float(getattr(cfg, "late_window_buffer_multiplier", 0.15))
+        + time_factor
+        * (
+            float(getattr(cfg, "early_window_buffer_multiplier", 0.50))
+            - float(getattr(cfg, "late_window_buffer_multiplier", 0.15))
+        )
+    )
+    strike_buffer = (
+        None
+        if volatility_5m in (None, 0)
+        else float(volatility_5m) * dynamic_buffer_multiplier
+    )
     if (
         gap_to_target is not None
-        and volatility_5m not in (None, 0)
-        and time_remaining_seconds > 60
-        and abs(gap_to_target) < (float(volatility_5m) * 0.2)
+        and strike_buffer is not None
+        and abs(gap_to_target) < strike_buffer
     ):
         return _reject(
             submission_limit_price,
             (
-                "Too close to call: target gap is inside the victory-margin buffer "
-                f"(gap={gap_to_target:.3f}; volatility_5m={float(volatility_5m):.3f}; "
-                f"buffer={(float(volatility_5m) * 0.2):.3f}; time_remaining={time_remaining_seconds}s)"
+                "Too close to call: gap is inside the dynamic safety buffer "
+                f"(gap={gap_to_target:.3f}; buffer={strike_buffer:.3f}; "
+                f"time_rem={time_remaining_seconds}s)"
             ),
         )
 

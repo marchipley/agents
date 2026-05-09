@@ -38,11 +38,32 @@ from custom.btc_agent.main import (
     resolve_price_to_beat_with_retries,
     wait_for_next_tick_or_quit,
     write_price_to_beat_debug_file,
+    print_active_orders,
 )
 from custom.btc_agent.paper_state import ActivePaperOrder
 
 
 class TestBtcMain(unittest.TestCase):
+    def test_print_active_orders_shows_unfilled_for_pending_live_order(self):
+        order = ActivePaperOrder(
+            market_slug="btc-updown-5m-1770000000",
+            market_title="Bitcoin Up or Down",
+            side="UP",
+            shares=3.0,
+            entry_price=0.67,
+            token_id="up-token",
+            target_btc_price=80000.0,
+            entry_btc_price=80010.0,
+            actual_fill_price=None,
+        )
+
+        with patch("custom.btc_agent.main.get_active_orders", return_value=[order]), patch(
+            "sys.stdout", new_callable=io.StringIO
+        ) as stdout:
+            print_active_orders(80020.0)
+
+        self.assertIn("order_1_position_state = UNFILLED", stdout.getvalue())
+
     TEST_TIMESTAMPS = (
         "1777056000",
         "1777513500",

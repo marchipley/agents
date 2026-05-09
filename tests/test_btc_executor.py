@@ -13,6 +13,7 @@ sys.modules.setdefault(
 )
 
 from custom.btc_agent.executor import (
+    cancel_live_order,
     _extract_minimum_size_from_error,
     _get_order_notional,
     _quantize_live_buy_size_for_amount_precision,
@@ -27,6 +28,7 @@ from custom.btc_agent.executor import (
     get_token_quote_snapshot,
     get_submission_limit_price,
     get_submission_limit_label,
+    retry_unfilled_live_order,
     TokenQuoteSnapshot,
 )
 
@@ -35,7 +37,7 @@ class TestBtcExecutor(unittest.TestCase):
     def test_get_token_quote_snapshot_populates_book_imbalance_fields(self):
         with patch(
             "custom.btc_agent.executor._get_price_from_clob_single",
-            return_value=0.50,
+            side_effect=lambda token_id, side: 0.50 if side == "BUY" else 0.49,
         ), patch(
             "custom.btc_agent.executor._get_midpoint_price",
             return_value=0.50,
@@ -65,8 +67,38 @@ class TestBtcExecutor(unittest.TestCase):
 
         self.assertEqual(snapshot.best_bid_size, 100.0)
         self.assertEqual(snapshot.best_ask_size, 50.0)
+        self.assertEqual(snapshot.best_bid, 0.49)
+        self.assertEqual(snapshot.best_ask, 0.50)
+        self.assertAlmostEqual(snapshot.spread, 0.01, places=6)
         self.assertAlmostEqual(snapshot.top_level_book_imbalance, 240.0 / 360.0, places=6)
         self.assertAlmostEqual(snapshot.imbalance_pressure, (240.0 - 120.0) / 360.0, places=6)
+
+    def test_get_token_quote_snapshot_prefers_quote_pair_over_book_extremes_for_spread(self):
+        with patch(
+            "custom.btc_agent.executor._get_price_from_clob_single",
+            side_effect=lambda token_id, side: 0.68 if side == "BUY" else 0.67,
+        ), patch(
+            "custom.btc_agent.executor._get_midpoint_price",
+            return_value=0.675,
+        ), patch(
+            "custom.btc_agent.executor._get_last_trade_price",
+            return_value=0.675,
+        ), patch(
+            "custom.btc_agent.executor._get_orderbook",
+            return_value={
+                "bids": [{"price": "0.01", "asset_size": "100"}],
+                "asks": [{"price": "0.99", "asset_size": "100"}],
+                "tick_size": "0.01",
+            },
+        ), patch(
+            "custom.btc_agent.executor.get_trading_config",
+            return_value=types.SimpleNamespace(use_recommended_limit=False),
+        ):
+            snapshot = get_token_quote_snapshot("token-1")
+
+        self.assertEqual(snapshot.best_bid, 0.67)
+        self.assertEqual(snapshot.best_ask, 0.68)
+        self.assertAlmostEqual(snapshot.spread, 0.01, places=6)
 
     def test_extract_minimum_size_from_error_parses_exchange_response(self):
         exc = Exception("order abc is invalid. Size (2.88) lower than the minimum: 5")
@@ -929,7 +961,7 @@ class TestBtcExecutor(unittest.TestCase):
             reason="test",
         )
         features = types.SimpleNamespace(
-            price_usd=105.0,
+            price_usd=112.0,
             volatility_5m=20.0,
             rsi_9=60.0,
         )
@@ -1616,6 +1648,71 @@ class TestBtcExecutor(unittest.TestCase):
         self.assertFalse(result.executed)
         self.assertTrue(result.submission_accepted)
         self.assertIsNone(result.actual_fill_price)
+
+    def test_cancel_live_order_uses_client_cancel_order_when_available(self):
+        client = types.SimpleNamespace(cancel_order=unittest.mock.Mock(return_value={"ok": True}))
+        with patch("custom.btc_agent.executor.Polymarket", return_value=types.SimpleNamespace(client=client)):
+            self.assertTrue(cancel_live_order("order-1"))
+        client.cancel_order.assert_called_once_with("order-1")
+
+    def test_retry_unfilled_live_order_cancels_and_resubmits_with_latest_snapshot(self):
+        market = types.SimpleNamespace(end_ts=int(datetime.now(timezone.utc).timestamp()) + 30)
+        order = types.SimpleNamespace(
+            side="UP",
+            token_id="up-token",
+            live_order_id="old-order",
+            actual_fill_price=None,
+            shares=3.0,
+            shares_requested=3.0,
+            quoted_price_at_entry=0.67,
+            book_depth_at_fill=100.0,
+        )
+        snapshot = TokenQuoteSnapshot(
+            token_id="up-token",
+            buy_quote=0.69,
+            midpoint=0.69,
+            last_trade_price=0.69,
+            reference_price=0.69,
+            target_limit_price=0.69,
+            recommended_limit_price=0.69,
+            ok_to_submit=True,
+            submit_reason="ok",
+            best_bid=0.68,
+            best_ask=0.69,
+            tick_size=0.01,
+            spread=0.01,
+        )
+        client = types.SimpleNamespace(execute_order=unittest.mock.Mock(return_value={"ok": True, "orderID": "new-order"}))
+
+        with patch(
+            "custom.btc_agent.executor.get_trading_config",
+            return_value=types.SimpleNamespace(
+                paper_trading=False,
+                live_min_order_usd=1.0,
+                live_fee_rate_bps=1000,
+                use_recommended_limit=False,
+            ),
+        ), patch(
+            "custom.btc_agent.executor.cancel_live_order",
+            return_value=True,
+        ), patch(
+            "custom.btc_agent.executor.get_token_quote_snapshot",
+            return_value=snapshot,
+        ), patch(
+            "custom.btc_agent.executor.ensure_live_trade_cash_available",
+        ), patch(
+            "custom.btc_agent.executor.Polymarket",
+            return_value=client,
+        ), patch(
+            "custom.btc_agent.executor._resolve_actual_fill_price",
+            return_value=0.69,
+        ):
+            result = retry_unfilled_live_order(order, market)
+
+        self.assertTrue(result.executed)
+        self.assertEqual(result.live_order_id, "new-order")
+        self.assertEqual(client.execute_order.call_args.kwargs["price"], 0.69)
+        self.assertEqual(client.execute_order.call_args.kwargs["size"], 3.0)
 
 
 if __name__ == "__main__":
