@@ -17,7 +17,7 @@ DEFAULT_MIN_CONFIDENCE = 0.65
 # mathematically favorable early entries before the market fully trends.
 # Example: raising from 0.10 to 0.25 makes early entries rarer; lowering it
 # further makes the bot more willing to probe early-window setups.
-DISCOVERY_MIN_CONFIDENCE = 0.65
+DISCOVERY_MIN_CONFIDENCE = 0.85
 
 # Fixed number of shares to submit for each paper/live trade.
 # Example: increasing from 5 to 10 doubles position size and PnL variance;
@@ -49,7 +49,7 @@ TREND_RELAXED_MIN_CONFIDENCE = 0.62
 # Harder minimum confidence floor used in the final minute of the period.
 # Example: raising from 0.75 to 0.80 blocks more late-window trades; lowering
 # to 0.70 makes the bot more willing to take last-minute entries.
-FINAL_WINDOW_MIN_CONFIDENCE = 0.85
+FINAL_WINDOW_MIN_CONFIDENCE = 0.70
 
 # Minimum required execution edge above market implied probability for a trade
 # to pass, except for special very-high-confidence override cases.
@@ -125,11 +125,23 @@ PARABOLIC_RSI_SUSPEND_ADX_THRESHOLD = 35.0
 # raising to 35 vetoes more "falling knife" short entries.
 DOWN_RSI_VETO_THRESHOLD = 30.0
 
+# Stricter RSI ceiling for new trades placed early in the window when there is
+# still enough time for mean reversion noise to punish an overextended entry.
+# Example: lowering from 65 to 60 blocks more early momentum chases; raising it
+# to 70 allows more aggressive early trend-following.
+MAX_EARLY_WINDOW_RSI = 65.0
+
 # Divisor used in the required-velocity sanity check.
 # The bot rejects trades when required_velocity_to_win exceeds volatility_5m / divisor.
 # Example: raising from 15 to 20 makes the check stricter and blocks more
 # mathematically difficult trades; lowering to 10 makes it more permissive.
-REQUIRED_VELOCITY_DIVISOR = 5.0
+REQUIRED_VELOCITY_DIVISOR = 7.5
+
+# Early-window volatility-to-strike-gap safety multiplier used to block
+# trades where BTC is too close to the strike relative to current 5m noise.
+# Example: raising from 0.4 to 0.5 requires a larger lead early; lowering to
+# 0.3 allows more early entries near the strike.
+DYNAMIC_STRIKE_BUFFER_MULTIPLIER = 0.4
 
 # When order-book imbalance pressure is strongly positive for the chosen side,
 # shift the reference price toward the ask to favor faster fills.
@@ -255,7 +267,9 @@ class TradingConfig:
     parabolic_rsi_speed_divergence_threshold: float = PARABOLIC_RSI_SPEED_DIVERGENCE_THRESHOLD
     parabolic_rsi_suspend_adx_threshold: float = PARABOLIC_RSI_SUSPEND_ADX_THRESHOLD
     down_rsi_veto_threshold: float = DOWN_RSI_VETO_THRESHOLD
+    max_early_window_rsi: float = MAX_EARLY_WINDOW_RSI
     required_velocity_divisor: float = REQUIRED_VELOCITY_DIVISOR
+    dynamic_strike_buffer_multiplier: float = DYNAMIC_STRIKE_BUFFER_MULTIPLIER
     imbalance_pricing_threshold: float = IMBALANCE_PRICING_THRESHOLD
     imbalance_pricing_strong_threshold: float = IMBALANCE_PRICING_STRONG_THRESHOLD
     early_window_buffer_multiplier: float = EARLY_WINDOW_BUFFER_MULTIPLIER
@@ -424,8 +438,17 @@ def get_trading_config() -> TradingConfig:
         down_rsi_veto_threshold=float(
             os.getenv("BTC_AGENT_DOWN_RSI_VETO_THRESHOLD", str(DOWN_RSI_VETO_THRESHOLD))
         ),
+        max_early_window_rsi=float(
+            os.getenv("BTC_AGENT_MAX_EARLY_WINDOW_RSI", str(MAX_EARLY_WINDOW_RSI))
+        ),
         required_velocity_divisor=float(
             os.getenv("BTC_AGENT_REQUIRED_VELOCITY_DIVISOR", str(REQUIRED_VELOCITY_DIVISOR))
+        ),
+        dynamic_strike_buffer_multiplier=float(
+            os.getenv(
+                "BTC_AGENT_DYNAMIC_STRIKE_BUFFER_MULTIPLIER",
+                str(DYNAMIC_STRIKE_BUFFER_MULTIPLIER),
+            )
         ),
         imbalance_pricing_threshold=float(
             os.getenv("BTC_AGENT_IMBALANCE_PRICING_THRESHOLD", str(IMBALANCE_PRICING_THRESHOLD))

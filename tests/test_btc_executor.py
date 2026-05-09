@@ -224,7 +224,7 @@ class TestBtcExecutor(unittest.TestCase):
         )
         decision = types.SimpleNamespace(
             side="UP",
-            confidence=0.80,
+            confidence=0.90,
             max_price_to_pay=0.20,
             reason="test",
         )
@@ -347,7 +347,7 @@ class TestBtcExecutor(unittest.TestCase):
         self.assertGreater(rejection.shares_requested, 0.0)
         self.assertEqual(rejection.order_latency_ms, 0)
 
-    def test_get_effective_min_confidence_lowers_floor_in_strong_trend(self):
+    def test_get_effective_min_confidence_uses_default_mid_window(self):
         market = types.SimpleNamespace(
             slug="btc-updown-5m-1000000000",
             start_ts=1_000_000_000,
@@ -358,15 +358,15 @@ class TestBtcExecutor(unittest.TestCase):
         with patch("custom.btc_agent.executor.datetime") as mock_datetime, patch(
             "custom.btc_agent.executor.get_trading_config",
             return_value=types.SimpleNamespace(
-                min_confidence=0.70,
-                discovery_min_confidence=0.10,
+                min_confidence=0.65,
+                discovery_min_confidence=0.85,
                 trend_priority_adx_threshold=30.0,
                 trend_relaxed_min_confidence=0.62,
-                final_window_min_confidence=0.75,
+                final_window_min_confidence=0.70,
             ),
         ):
             mock_datetime.now.return_value = fake_now
-            self.assertEqual(get_effective_min_confidence(market, features=features), 0.62)
+            self.assertEqual(get_effective_min_confidence(market, features=features), 0.65)
 
     def test_get_effective_min_confidence_uses_discovery_floor_early(self):
         market = types.SimpleNamespace(
@@ -380,14 +380,14 @@ class TestBtcExecutor(unittest.TestCase):
             "custom.btc_agent.executor.get_trading_config",
             return_value=types.SimpleNamespace(
                 min_confidence=0.65,
-                discovery_min_confidence=0.10,
+                discovery_min_confidence=0.85,
                 trend_priority_adx_threshold=30.0,
                 trend_relaxed_min_confidence=0.62,
-                final_window_min_confidence=0.75,
+                final_window_min_confidence=0.70,
             ),
         ):
             mock_datetime.now.return_value = fake_now
-            self.assertEqual(get_effective_min_confidence(market, features=features), 0.10)
+            self.assertEqual(get_effective_min_confidence(market, features=features), 0.85)
 
     def test_get_effective_min_confidence_raises_floor_in_last_minute(self):
         market = types.SimpleNamespace(
@@ -400,15 +400,15 @@ class TestBtcExecutor(unittest.TestCase):
         with patch("custom.btc_agent.executor.datetime") as mock_datetime, patch(
             "custom.btc_agent.executor.get_trading_config",
             return_value=types.SimpleNamespace(
-                min_confidence=0.70,
-                discovery_min_confidence=0.10,
+                min_confidence=0.65,
+                discovery_min_confidence=0.85,
                 trend_priority_adx_threshold=30.0,
                 trend_relaxed_min_confidence=0.62,
-                final_window_min_confidence=0.75,
+                final_window_min_confidence=0.70,
             ),
         ):
             mock_datetime.now.return_value = fake_now
-            self.assertEqual(get_effective_min_confidence(market, features=features), 0.75)
+            self.assertEqual(get_effective_min_confidence(market, features=features), 0.70)
 
     def test_get_effective_decision_confidence_boosts_when_already_winning_by_half_atr(self):
         market = types.SimpleNamespace(
@@ -452,7 +452,7 @@ class TestBtcExecutor(unittest.TestCase):
         )
         decision = types.SimpleNamespace(
             side="DOWN",
-            confidence=0.80,
+            confidence=0.90,
             max_price_to_pay=1.0,
             reason="test",
         )
@@ -529,7 +529,7 @@ class TestBtcExecutor(unittest.TestCase):
         )
         decision = types.SimpleNamespace(
             side="DOWN",
-            confidence=0.75,
+            confidence=0.90,
             max_price_to_pay=1.0,
             reason="test",
         )
@@ -570,7 +570,7 @@ class TestBtcExecutor(unittest.TestCase):
         )
         decision = types.SimpleNamespace(
             side="DOWN",
-            confidence=0.75,
+            confidence=0.90,
             max_price_to_pay=1.0,
             reason="test",
         )
@@ -990,6 +990,51 @@ class TestBtcExecutor(unittest.TestCase):
 
         self.assertIsNone(validated_snapshot)
         self.assertIn("Quote-price divergence veto", rejection.reason)
+
+    def test_validate_trade_candidate_rejects_up_below_strike_when_rsi_hot(self):
+        market = types.SimpleNamespace(
+            up_token_id="up-token",
+            down_token_id="down-token",
+            settlement_threshold=100.0,
+            end_ts=1_000_000_180,
+            volume=5000.0,
+        )
+        decision = types.SimpleNamespace(
+            side="UP",
+            confidence=0.80,
+            max_price_to_pay=1.0,
+            reason="test",
+        )
+        features = types.SimpleNamespace(
+            price_usd=98.0,
+            volatility_5m=20.0,
+            rsi_9=61.0,
+        )
+        snapshot = TokenQuoteSnapshot(
+            token_id="up-token",
+            buy_quote=0.46,
+            midpoint=0.46,
+            last_trade_price=0.46,
+            reference_price=0.46,
+            target_limit_price=0.46,
+            recommended_limit_price=0.46,
+            ok_to_submit=True,
+            submit_reason="ok",
+            best_bid=0.45,
+            best_ask=0.46,
+            tick_size=0.01,
+            spread=0.01,
+        )
+
+        fake_now = datetime.fromtimestamp(1_000_000_000, tz=timezone.utc)
+        with patch("custom.btc_agent.executor.datetime") as mock_datetime:
+            mock_datetime.now.return_value = fake_now
+            validated_snapshot, rejection = _validate_trade_candidate(
+                market, decision, features=features, snapshot=snapshot
+            )
+
+        self.assertIsNone(validated_snapshot)
+        self.assertIn("Momentum-trap veto blocked UP trade below the strike", rejection.reason)
 
     def test_validate_trade_candidate_rejects_up_rsi_ceiling_above_strike(self):
         market = types.SimpleNamespace(

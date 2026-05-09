@@ -589,6 +589,9 @@ def _build_regime_fingerprint(
     volatility_normalized_gap = None
     if gap_to_target is not None and atr_14 not in (None, 0):
         volatility_normalized_gap = abs(gap_to_target) / atr_14
+    volatility_to_gap_ratio = None
+    if gap_to_target not in (None, 0) and features is not None and getattr(features, "volatility_5m", None) not in (None, 0):
+        volatility_to_gap_ratio = float(getattr(features, "volatility_5m")) / abs(gap_to_target)
     oracle_gap_ratio = None
     if gap_to_target is not None and atr_14 not in (None, 0):
         oracle_gap_ratio = gap_to_target / atr_14
@@ -619,6 +622,28 @@ def _build_regime_fingerprint(
             selected_snapshot = up_snapshot
     else:
         selected_snapshot = up_snapshot or down_snapshot
+
+    llm_veto_flags = []
+    if features is not None:
+        rsi_9 = getattr(features, "rsi_9", None)
+        adx_14 = getattr(features, "adx_14", None)
+        if rsi_9 is not None and rsi_9 >= 60 and gap_to_target is not None and gap_to_target < 0:
+            llm_veto_flags.append("up_below_strike_rsi_hot")
+        if rsi_9 is not None and rsi_9 >= 75 and adx_14 is not None and adx_14 > 50:
+            llm_veto_flags.append("paradoxical_momentum_exhaustion")
+        if rsi_9 is not None and rsi_9 >= 65 and time_remaining_seconds > 200:
+            llm_veto_flags.append("early_window_rsi_hot")
+        if selected_snapshot is not None and getattr(selected_snapshot, "top_level_book_imbalance", None) is not None:
+            llm_veto_flags.append("orderbook_imbalance_snapshot")
+
+    time_decay_confidence = None
+    if time_remaining_seconds is not None:
+        if time_remaining_seconds <= 30:
+            time_decay_confidence = 1.0
+        elif time_remaining_seconds >= 240:
+            time_decay_confidence = 0.5
+        else:
+            time_decay_confidence = 0.5 + ((240 - time_remaining_seconds) / 210.0) * 0.5
 
     return {
         "time_remaining_seconds": time_remaining_seconds,
@@ -657,6 +682,9 @@ def _build_regime_fingerprint(
         "volatility_normalized_gap": None
         if volatility_normalized_gap is None
         else round(volatility_normalized_gap, 4),
+        "volatility_to_gap_ratio": None
+        if volatility_to_gap_ratio is None
+        else round(volatility_to_gap_ratio, 4),
         "window_delta_pct": None
         if features is None or getattr(features, "delta_pct_from_window_open", None) is None
         else round(getattr(features, "delta_pct_from_window_open") * 100, 4),
@@ -681,6 +709,13 @@ def _build_regime_fingerprint(
         "last_10_ticks_direction": None
         if features is None
         else getattr(features, "last_10_ticks_direction", None),
+        "orderbook_imbalance_snapshot": None
+        if selected_snapshot is None
+        else getattr(selected_snapshot, "top_level_book_imbalance", None),
+        "llm_veto_flags": llm_veto_flags,
+        "time_decay_confidence": None
+        if time_decay_confidence is None
+        else round(time_decay_confidence, 4),
     }
 
 

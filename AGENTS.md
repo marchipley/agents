@@ -183,6 +183,11 @@ What the BTC agent does today:
   - under the final 15 seconds, only fade that consensus on a clear reversal
 - The LLM prompt now also treats early-window caution as ADX-aware rather than flat:
   - if `time_remaining_seconds > 240` and `ADX < 15`, stay cautious
+  - if `ADX > 30`, prioritize the trend over the elapsed time
+- The LLM prompt now includes a momentum-trap exhaustion rule:
+  - if `ADX > 50` and `RSI(9) > 75`, treat that as exhaustion rather than fresh breakout strength and avoid opening a new position
+- The LLM prompt now includes an early-window near-strike caution rule:
+  - if `time_remaining_seconds > 180` and `DISTANCE_FROM_STRIKE_USD < 0.5 * volatility_5m`, prefer `NO_TRADE`
   - if `time_remaining_seconds > 240` and `ADX > 30`, prioritize the trend over elapsed time
 - The LLM prompt now includes `momentum_alignment`, which is `True` when `velocity_15s`, `velocity_30s`, and `momentum_1m` all point the same direction; when it is `True`, the model is encouraged to treat clarity as high and trade with the trend.
 - The LLM prompt now includes an in-the-money confidence boost rule: if `DISTANCE_FROM_STRIKE_USD` is beyond `0.5 * ATR` in the chosen direction, the model may raise confidence by `0.15`.
@@ -207,21 +212,21 @@ What the BTC agent does today:
 - Rejects live submissions cleanly when the configured `SHARES_PER_TRADE` cannot satisfy the venue minimum order size instead of silently scaling or overriding size.
 - Applies a regime-aware execution-side market-win-chance veto before submission, using Gamma probability first and falling back to CLOB quote only if Gamma is unavailable:
   - if the chosen side `MARKET_WIN_CHANCE < 0.15` and `15 <= time_remaining_seconds < 120`, the trade is rejected as a low-probability reversal attempt
-- Applies a velocity/volatility sanity veto before submission only when the chosen side is currently out of the money versus the strike: if that OTM trade requires `required_velocity_to_win > volatility_5m / 5`, it is rejected as a mathematically implausible move. If the chosen side is already in the money, the velocity veto is skipped.
+- Applies a velocity/volatility sanity veto before submission only when the chosen side is currently out of the money versus the strike: if that OTM trade requires `required_velocity_to_win > volatility_5m / 7.5`, it is rejected as a mathematically implausible move. If the chosen side is already in the money, the velocity veto is skipped.
 - Applies a Gamma/CLOB consensus-gap veto before submission: if `abs(effective_confidence - market_implied_probability) > 0.50`, the trade is rejected as a hallucinated edge against market consensus.
 - Applies a regime-aware minimum-confidence veto before submission:
   - base floor now defaults to `DEFAULT_MIN_CONFIDENCE` through the top-level tuning defaults in `custom/btc_agent/config.py`, while still allowing a `BTC_AGENT_MIN_CONFIDENCE` env override
-  - in the Discovery Phase with more than 180 seconds remaining, the operational floor now uses `DISCOVERY_MIN_CONFIDENCE`, currently `0.65`
-  - in the mid-window band with `60 < time_remaining_seconds < 240` and `ADX(14) > 30`, the operational floor is relaxed to `0.62`
-  - in the final 60 seconds, the operational floor is tightened to `0.85`
+  - in the Discovery Phase with more than 180 seconds remaining, the operational floor now uses `DISCOVERY_MIN_CONFIDENCE`, currently `0.85`
+  - in the mid-window band, the operational floor now falls back to the base configured minimum-confidence value instead of using the older ADX-based relaxed floor
+  - in the final 60 seconds, the operational floor is tightened to `0.70`
 - The execution layer now computes an `effective_confidence` before gating:
   - if the chosen side is already winning against the strike by more than `0.5 * ATR(14)` in the chosen direction
   - the confidence is boosted by `+0.15` before floor / edge / consensus-gap checks
 - Execution timing now also prefers the canonical slug timestamp plus 300 seconds over stale upstream `start_ts` / `end_ts`, so late-window vetoes and FOK logic use the same boundary the logs print in `mm:ss`.
 - Applies a configured spread veto before thin-liquidity checks: if `snapshot.spread > max_spread`, the trade is rejected. The repo default is now `0.10`, which is intentionally looser than the earlier `0.06` setting.
 - Applies a dynamic “too close to call” strike buffer before submission instead of a flat `0.2 * volatility_5m` rule:
-  - early in the 5-minute window the buffer is larger, using `EARLY_WINDOW_BUFFER_MULTIPLIER`, currently `0.50 * volatility_5m`
-  - near expiry it decays toward `LATE_WINDOW_BUFFER_MULTIPLIER`, currently `0.15 * volatility_5m`
+  - during the first 180 seconds the buffer uses `DYNAMIC_STRIKE_BUFFER_MULTIPLIER`, currently `0.40 * volatility_5m`
+  - after that it decays using the existing early/late window buffer multipliers
   - this is intended to reduce early near-strike chop losses without over-blocking stronger late-window entries
 - Applies a Phase 2.7 quote-price divergence veto for `UP`: if the bot wants `UP` but the `UP` quote is below `0.45`, the trade is rejected because the market is not confirming the breakout.
 - Applies a Phase 2.7 RSI ceiling veto for `UP`: if `RSI(9) > 85` while BTC is already above the strike, the trade is rejected as an exhaustion-risk breakout chase.
@@ -229,6 +234,9 @@ What the BTC agent does today:
   - if `RSI(9) < 30`, `DOWN` is rejected as bottom-chasing
   - if `RSI(9) > 70`, `UP` is rejected unless `ADX > 30`
   - if `RSI(9) > 85` while BTC is already above the strike, `UP` is rejected as an exhaustion-risk breakout chase
+- Applies momentum-trap RSI vetoes before submission:
+  - if the bot wants `UP` while BTC is still below the strike and `RSI(9) > 60`, the trade is rejected as a late breakout chase below the settlement line
+  - if the bot wants `UP` with more than 200 seconds remaining and `RSI(9) > MAX_EARLY_WINDOW_RSI`, currently `65`, the trade is rejected as an early-window momentum trap
 - Suspends the normal `UP` RSI veto during parabolic continuation only when both of these are true:
   - `rsi_speed_divergence > 5`
   - `ADX(14) > 35`
@@ -367,6 +375,10 @@ Current status:
   - `consecutive_flat_ticks`
   - `consecutive_directional_ticks`
   - `required_velocity_to_win`
+  - `volatility_to_gap_ratio`
+  - `orderbook_imbalance_snapshot`
+  - `llm_veto_flags`
+  - `time_decay_confidence`
 - Deterministic regime labeling now includes `PARABOLIC_UP` / `PARABOLIC_DOWN` so extreme RSI in strong momentum is treated as trend continuation context rather than automatic mean-reversion.
 - Even when `USE_RECOMMENDED_LIMIT=false`, the agent still fetches internal `UP` / `DOWN` book context for logging and LLM reasoning, while continuing to suppress the old pre-trade quote snapshot console output.
 - The `consecutive_directional_ticks` counter now ignores short flat-tick interruptions, near-duplicate same-price samples, and small counter-moves below a 0.01% BTC-price reversal threshold, so it better reflects real one-way streaks for falling-knife / exhaustion detection.
@@ -403,6 +415,10 @@ Data required:
 - `consecutive_flat_ticks`
 - `consecutive_directional_ticks`
 - `required_velocity_to_win`
+- `volatility_to_gap_ratio`
+- `orderbook_imbalance_snapshot`
+- `llm_veto_flags`
+- `time_decay_confidence`
 - final order outcome classification using the resolved closing price
 
 Completion criteria:

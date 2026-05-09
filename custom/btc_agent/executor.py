@@ -1339,18 +1339,10 @@ def get_effective_min_confidence(
     cfg = cfg or get_trading_config()
     base_confidence = float(getattr(cfg, "min_confidence", 0.7))
     time_remaining_seconds = _get_time_remaining_seconds(market)
-    adx_14 = None if features is None else getattr(features, "adx_14", None)
-
     if time_remaining_seconds > 180:
-        return min(base_confidence, float(getattr(cfg, "discovery_min_confidence", 0.10)))
+        return max(base_confidence, float(getattr(cfg, "discovery_min_confidence", 0.85)))
     if time_remaining_seconds < 60:
-        return max(base_confidence, float(getattr(cfg, "final_window_min_confidence", 0.75)))
-    if (
-        60 < time_remaining_seconds < 240
-        and adx_14 is not None
-        and adx_14 > float(getattr(cfg, "trend_priority_adx_threshold", 30.0))
-    ):
-        return min(base_confidence, float(getattr(cfg, "trend_relaxed_min_confidence", 0.62)))
+        return max(base_confidence, float(getattr(cfg, "final_window_min_confidence", 0.70)))
     return base_confidence
 
 
@@ -1504,6 +1496,36 @@ def _validate_trade_candidate(
             ),
         )
 
+    if (
+        decision.side == "UP"
+        and gap_to_target is not None
+        and gap_to_target < 0
+        and rsi_9 is not None
+        and rsi_9 > 60.0
+    ):
+        return _reject(
+            submission_limit_price,
+            (
+                "Momentum-trap veto blocked UP trade below the strike "
+                f"(gap_to_target={gap_to_target:.3f}; rsi_9={rsi_9:.3f}; threshold=60.000)"
+            ),
+        )
+
+    if (
+        decision.side == "UP"
+        and time_remaining_seconds > 200
+        and rsi_9 is not None
+        and rsi_9 > float(getattr(cfg, "max_early_window_rsi", 65.0))
+    ):
+        return _reject(
+            submission_limit_price,
+            (
+                "Early-window RSI veto blocked UP trade "
+                f"(rsi_9={rsi_9:.3f}; threshold={float(getattr(cfg, 'max_early_window_rsi', 65.0)):.3f}; "
+                f"time_remaining={time_remaining_seconds}s)"
+            ),
+        )
+
     up_rsi_threshold = (
         float(getattr(cfg, "up_rsi_veto_trend_threshold", 85.0))
         if adx_14 is not None and adx_14 > float(getattr(cfg, "up_rsi_veto_adx_threshold", 30.0))
@@ -1597,14 +1619,16 @@ def _validate_trade_candidate(
         )
 
     time_factor = max(min(time_remaining_seconds / 300.0, 1.0), 0.0)
-    dynamic_buffer_multiplier = (
-        float(getattr(cfg, "late_window_buffer_multiplier", 0.15))
-        + time_factor
-        * (
-            float(getattr(cfg, "early_window_buffer_multiplier", 0.50))
-            - float(getattr(cfg, "late_window_buffer_multiplier", 0.15))
+    dynamic_buffer_multiplier = float(getattr(cfg, "dynamic_strike_buffer_multiplier", 0.4))
+    if time_remaining_seconds <= 180:
+        dynamic_buffer_multiplier = (
+            float(getattr(cfg, "late_window_buffer_multiplier", 0.15))
+            + time_factor
+            * (
+                float(getattr(cfg, "early_window_buffer_multiplier", 0.50))
+                - float(getattr(cfg, "late_window_buffer_multiplier", 0.15))
+            )
         )
-    )
     strike_buffer = (
         None
         if volatility_5m in (None, 0)
