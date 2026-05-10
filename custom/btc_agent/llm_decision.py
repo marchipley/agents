@@ -7,10 +7,14 @@ import time
 import threading
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import Literal, Optional
+from urllib.parse import urlsplit
 
 import requests
 import websocket
+from requests.exceptions import ProxyError as RequestsProxyError
 from .config import get_llm_config, get_trading_config
 from .indicators import BtcFeatures
 from .market_lookup import BtcUpDownMarket
@@ -106,74 +110,70 @@ def _momentum_alignment_text(features: BtcFeatures) -> str:
     return "True" if signs[0] == signs[1] == signs[2] else "False"
 
 
-def _build_system_prompt() -> str:
-    cfg = get_trading_config()
+def _cfg_number(cfg, name: str, default, caster=float):
+    try:
+        raw_value = getattr(cfg, name)
+    except Exception:
+        return default
+    if raw_value is None:
+        return default
+    try:
+        return _coerce_config_value(raw_value, caster, default)
+    except Exception:
+        return default
+
+
+def _build_policy_system_suffix(cfg) -> str:
     return (
-        "You are an automated trading decision assistant for a 5-minute Bitcoin "
-        "up/down prediction market on Polymarket.\n"
-        "You MUST respond with a single JSON object and nothing else.\n"
-        "Schema:\n"
-        "{\n"
-        '  "decision": "UP" | "DOWN" | "NO_TRADE",\n'
-        '  "confidence": number between 0 and 1,\n'
-        '  "max_price_to_pay": number between 0 and 1,\n'
-        '  "reason": string\n'
-        "}\n"
-        "Keep the reason concise, ideally under 120 characters.\n"
-        'Be conservative and prefer "NO_TRADE" when signals are weak.\n'
-        "Your job is regime detection and directional confidence, not price-capping.\n"
-        "Interpret confidence as the direct mathematical probability that your chosen side wins. 1.0 means near-certainty and 0.5 means a coin flip.\n"
-        "time_remaining_seconds is authoritative. Do not infer time from any other number.\n"
-        "Final 10 seconds means time_remaining_seconds < 15.\n"
-        f"If time_remaining_seconds > 240, you are in the Discovery Phase. If ADX < {cfg.discovery_adx_caution_threshold:.0f}, stay cautious. If ADX > {cfg.trend_priority_adx_threshold:.0f}, prioritize the trend over the time elapsed.\n"
-        "Use DISTANCE_FROM_STRIKE_PCT to determine whether UP or DOWN is currently winning versus the price to beat. A positive value means BTC is above the strike; a negative value means BTC is below the strike.\n"
-        "Do not confuse DISTANCE_FROM_STRIKE_USD or DISTANCE_FROM_STRIKE_PCT with MARKET_WIN_CHANCE_UP / MARKET_WIN_CHANCE_DOWN. Distance fields are price gaps; market win chance fields are market-implied probabilities.\n"
-        "A MARKET_WIN_CHANCE of 65% is an aggressive signal. DO NOT confuse this with DISTANCE_FROM_STRIKE. A distance of $1.00 USD is sufficient for 95% confidence if time remaining is less than 15 seconds.\n"
-        "Treat Window Delta as a recent-drift confidence signal only in the final 10 seconds.\n"
-        "Window Delta means the percent change from the market window open price only. Do not confuse it with DISTANCE_FROM_STRIKE_PCT, DISTANCE_FROM_STRIKE_USD, oracle_gap_ratio, or any ATR-normalized value.\n"
-        "window_delta_pct is not the settlement baseline. velocity_30s is micro-momentum for entry timing only, not side selection.\n"
-        "If Window Delta is below 0.005% near T-10, ignore TA noise and prefer NO_TRADE.\n"
-        "If Window Delta is above 0.15% near T-10, confidence should usually be 0.95 or higher.\n"
-        "If confidence is above 0.90, treat it as a directive to get in rather than demanding extra edge buffer.\n"
-        "If time remaining is under 5 seconds and confidence is above 0.70, avoid NO_TRADE unless the signal is clearly invalid.\n"
-        "CRITICAL EXECUTION RULE: If the trade is currently IN-THE-MONEY (Price > Strike for UP, Price < Strike for DOWN) and there is less than 60 seconds remaining, ignore RSI overbought/oversold exhaustion signals. In this state, momentum is less important than position maintenance. Only veto late-window ITM trades if a massive counter-trend spike is actively occurring.\n"
-        "Paradoxical Momentum rule: If ADX is above 50 and RSI is above 75, treat this as Exhaustion rather than Strength. Do not enter new positions; only maintain existing ones.\n"
-        f"Respect market consensus. If the chosen side market win chance is below {cfg.market_win_chance_veto_threshold:.2f} and 15 <= time_remaining_seconds < {cfg.market_win_chance_veto_end_seconds}, prefer NO_TRADE. Under 15 seconds, only fade consensus on a clear reversal.\n"
-        "If momentum_alignment is TRUE, clarity is HIGH and you are encouraged to trade with the trend.\n"
-        f"If DISTANCE_FROM_STRIKE_USD is beyond 0.5 * ATR in the chosen direction, you may raise confidence by {cfg.itm_confidence_boost_amount:.2f}.\n"
-        "If time_remaining_seconds > 180 and DISTANCE_FROM_STRIKE_USD is less than 0.5 * current 5-minute volatility, prefer NO_TRADE.\n"
-        "If time_remaining_seconds > 240 and DISTANCE_FROM_STRIKE_USD is less than 0.2 * ATR, prefer NO_TRADE unless momentum alignment is strong and trend intensity is at maximum.\n"
-        "If RSI speed divergence is negative while price is still moving up, treat the move as weakening and lower confidence.\n"
-        "If DISTANCE_FROM_STRIKE_PCT is positive and you choose DOWN, confidence must be below 0.50 unless trend exhaustion is clear. If DISTANCE_FROM_STRIKE_PCT is negative and you choose UP, confidence must be below 0.50 unless trend exhaustion is clear.\n"
-        "`max_price_to_pay` is informational only and is not used by execution.\n"
-        "For directional trades, set `max_price_to_pay` to 1.0 unless you have a strong reason not to.\n"
-        "If Window Delta is above 0.15% near T-10, you may set `max_price_to_pay` as high as 0.97."
+        f"t_gt_240_adx_lt_{_cfg_number(cfg, 'discovery_adx_caution_threshold', 20.0, float):.0f}_caution; "
+        f"t_gt_240_adx_gt_{_cfg_number(cfg, 'trend_priority_adx_threshold', 30.0, float):.0f}_trend; "
+        "t_lt_15_aggressive; "
+        "dist_pct_positive_up_winning; "
+        "dist_fields_are_prices_not_probs; "
+        "market_win_chance_fields_are_probs; "
+        "market_win_chance_65_aggressive; "
+        f"t_15_to_{_cfg_number(cfg, 'market_win_chance_veto_end_seconds', 120, int)}_and_mwch_lt_{_cfg_number(cfg, 'market_win_chance_veto_threshold', 0.15, float):.2f}_no_trade; "
+        f"otm_reqv_gt_vol5m_div_{_cfg_number(cfg, 'required_velocity_divisor', 7.5, float):.0f}_no_trade; "
+        "itm_ignore_reqv; "
+        f"dist_gt_0.5_ATR_may_add_{_cfg_number(cfg, 'itm_confidence_boost_amount', 0.15, float):.2f}_confidence; "
+        "momentum_alignment_true_trade_with_trend; "
+        "t_gt_180_and_dist_lt_0.5_vol5m_no_trade; "
+        "t_gt_240_and_abs_dist_lt_0.2_ATR_no_trade_unless_ma_and_strong_trend; "
+        f"rsi9_lt_{_cfg_number(cfg, 'down_rsi_veto_threshold', 30.0, float):.0f}_no_down; "
+        f"rsi9_gt_{_cfg_number(cfg, 'up_rsi_veto_base_threshold', 70.0, float):.0f}_no_up_unless_adx_gt_{_cfg_number(cfg, 'up_rsi_veto_adx_threshold', 30.0, float):.0f}; "
+        "rsi_speed_divergence_negative_while_up_lower_confidence; "
+        "adx_gt_50_and_rsi_gt_75_exhaustion; "
+        "dist_pct_positive_and_down_conf_lt_0.50_unless_exhaustion; "
+        "dist_pct_negative_and_up_conf_lt_0.50_unless_exhaustion; "
+        "window_delta_only_if_t_lt_15; "
+        "max_price_to_pay_is_informational; "
+        "directional_trades_use_1.0"
     )
 
 
-def _build_openai_realtime_system_prompt() -> str:
-    cfg = get_trading_config()
+def _build_system_prompt(cfg=None) -> str:
+    if cfg is None:
+        cfg = get_trading_config()
     return (
         "Return one JSON object only: decision, confidence, max_price_to_pay, reason. "
         "decision=UP|DOWN|NO_TRADE. confidence is win probability 0..1. "
-        "Use DISTANCE_FROM_STRIKE_USD and DISTANCE_FROM_STRIKE_PCT as the settlement baseline: positive means above strike, negative means below strike. "
-        "Use MARKET_WIN_CHANCE_UP and MARKET_WIN_CHANCE_DOWN as crowd consensus and velocity_30s only for entry timing, not side selection. "
-        "Do not confuse strike-distance fields with market-win-chance fields. "
-        "A MARKET_WIN_CHANCE of 65% is aggressive consensus, not physical distance. A $1.00 DISTANCE_FROM_STRIKE_USD can justify ~95% confidence when time_remaining_seconds<15. "
-        f"If time_remaining_seconds>240 and adx<{cfg.discovery_adx_caution_threshold:.0f}, stay cautious; if adx>{cfg.trend_priority_adx_threshold:.0f}, prioritize the trend over elapsed time. "
-        "If trade is ITM and time_remaining_seconds<60, ignore RSI exhaustion and focus on position maintenance unless a massive counter-trend spike is active. "
-        "If adx>50 and rsi>75, treat that as exhaustion rather than strength and avoid new entries. "
-        f"If chosen market win chance<{cfg.market_win_chance_veto_threshold:.2f} and 15<=time_remaining_seconds<{cfg.market_win_chance_veto_end_seconds}, prefer NO_TRADE. "
-        "If momentum_alignment is TRUE, clarity is HIGH and you are encouraged to trade with the trend. "
-        f"If DISTANCE_FROM_STRIKE_USD is beyond 0.5 * ATR in the chosen direction, you may raise confidence by {cfg.itm_confidence_boost_amount:.2f}. "
-        "If time_remaining_seconds>180 and DISTANCE_FROM_STRIKE_USD<0.5*vol5m, prefer NO_TRADE. "
-        "If time_remaining_seconds>240 and abs(DISTANCE_FROM_STRIKE_USD)<0.2*ATR, prefer NO_TRADE unless momentum_alignment is TRUE and ADX is at maximum trend strength. "
-        f"If chosen side is OTM and reqv>vol5m/{cfg.required_velocity_divisor:.0f}, prefer NO_TRADE; if chosen side is ITM, ignore reqv. "
-        "If confidence differs from market implied probability by more than 0.50, prefer NO_TRADE. "
-        f"If rsi9<{cfg.down_rsi_veto_threshold:.0f}, do not choose DOWN. If rsi9>{cfg.up_rsi_veto_base_threshold:.0f}, do not choose UP unless adx>{cfg.up_rsi_veto_adx_threshold:.0f} and continuation remains strong up to rsi9>{cfg.up_rsi_veto_trend_threshold:.0f}. "
-        "If RSI speed divergence is negative while price is moving up, lower confidence and treat the move as weakening. "
-        "If DISTANCE_FROM_STRIKE_PCT>0 and choosing DOWN, confidence must stay below 0.50 unless exhaustion is clear; symmetric for UP when DISTANCE_FROM_STRIKE_PCT<0. "
-        "Use 1.0 for max_price_to_pay on directional trades."
+        "Keep reason short and concrete. "
+        "Use the user prompt fields as the source of truth. "
+        "Treat the following policy rules as permanent constraints: "
+        f"{_build_policy_system_suffix(cfg)}"
+    )
+
+
+def _build_openai_realtime_system_prompt(cfg=None) -> str:
+    if cfg is None:
+        cfg = get_trading_config()
+    return (
+        "Return one JSON object only: decision, confidence, max_price_to_pay, reason. "
+        "decision=UP|DOWN|NO_TRADE. confidence is win probability 0..1. "
+        "Keep reason short and concrete. "
+        "Use the user prompt fields as the source of truth. "
+        "Treat the following policy rules as permanent constraints: "
+        f"{_build_policy_system_suffix(cfg)}"
     )
 
 
@@ -396,7 +396,6 @@ def _build_compact_user_prompt(features: BtcFeatures, market: BtcUpDownMarket, u
 
 
 def _build_minimal_user_prompt(features: BtcFeatures, market: BtcUpDownMarket, up_snapshot=None, down_snapshot=None) -> str:
-    cfg = get_trading_config()
     time_remaining_seconds = _get_time_remaining_seconds(market, int(features.as_of.timestamp()))
     implied_oracle_price = _compute_implied_oracle_price(features, market, up_snapshot, down_snapshot)
     effective_current_price = (
@@ -422,47 +421,29 @@ def _build_minimal_user_prompt(features: BtcFeatures, market: BtcUpDownMarket, u
         "None" if strike_delta_pct is None else f"{strike_delta_pct * 100:.4f}"
     )
     return (
-        f"beat={market.settlement_threshold}\n"
-        f"t={time_remaining_seconds}\n"
-        f"btc_raw={features.price_usd:.2f}\n"
-        f"btc_eff={effective_current_price:.2f}\n"
-        f"DISTANCE_FROM_STRIKE_USD={strike_delta_usd}\n"
-        f"DISTANCE_FROM_STRIKE_PCT={strike_delta_pct_display}\n"
-        f"MARKET_WIN_CHANCE_UP={market.up_market_probability}\n"
-        f"MARKET_WIN_CHANCE_DOWN={market.down_market_probability}\n"
-        f"up_ask={getattr(up_snapshot, 'buy_quote', None)}\n"
-        f"down_ask={getattr(down_snapshot, 'buy_quote', None)}\n"
-        f"rsi9={features.rsi_9}\n"
-        f"rsi_speed_divergence={features.rsi_speed_divergence}\n"
-        f"mom1m={features.momentum_1m}\n"
-        f"v30={features.velocity_30s}\n"
-        f"acc={features.momentum_acceleration}\n"
-        f"adx14={features.adx_14}\n"
-        f"vol5m={features.volatility_5m}\n"
-        f"reqv={required_velocity_to_win}\n"
-        f"dir_ticks={features.consecutive_directional_ticks}\n"
-        f"momentum_alignment={_momentum_alignment_text(features)}\n"
-        "UP above beat. DOWN below beat.\n"
-        f"t is authoritative; final 10 seconds means t<15; if t>240 and adx14<{cfg.discovery_adx_caution_threshold:.0f} stay cautious, if adx14>{cfg.trend_priority_adx_threshold:.0f} prioritize trend over elapsed time.\n"
-        "DISTANCE_FROM_STRIKE_USD and DISTANCE_FROM_STRIKE_PCT are the settlement baseline; positive means above strike, negative means below strike.\n"
-        "MARKET_WIN_CHANCE_UP and MARKET_WIN_CHANCE_DOWN are market-implied probabilities, not price distances.\n"
-        "Do not confuse DISTANCE_FROM_STRIKE values with MARKET_WIN_CHANCE values.\n"
-        "Use btc_eff as the true current price for strike-gap reasoning.\n"
-        "Ignore window-open drift. v30 is entry timing only.\n"
-        "MARKET_WIN_CHANCE_UP and MARKET_WIN_CHANCE_DOWN come from Gamma. Do not bet against them lightly.\n"
-        f"No fade of parabolic trend; no chase if dir_ticks>=8; if adx14>35 follow trend; if adx14>45 expect exhaustion; if chosen side is OTM and reqv>(vol5m/{cfg.required_velocity_divisor:.0f}) prefer NO_TRADE, if ITM ignore reqv.\n"
-        f"If chosen side MARKET_WIN_CHANCE <{cfg.market_win_chance_veto_threshold:.2f} and 15<=t<{cfg.market_win_chance_veto_end_seconds}, prefer NO_TRADE.\n"
-        "If momentum_alignment is TRUE, clarity is HIGH and you are encouraged to trade with the trend.\n"
-        "If t>240 and abs(DISTANCE_FROM_STRIKE_USD)<0.2*ATR, prefer NO_TRADE unless momentum_alignment is TRUE and ADX is at maximum trend strength.\n"
-        f"If DISTANCE_FROM_STRIKE_USD is beyond 0.5 * ATR in the chosen direction, you may raise confidence by {cfg.itm_confidence_boost_amount:.2f}.\n"
-        "If t>60 and abs(btc-beat) < 0.2*vol5m, prefer NO_TRADE.\n"
-        "If choosing UP and up_ask<0.45, prefer NO_TRADE.\n"
-        f"If rsi9>{cfg.up_rsi_veto_trend_threshold:.0f} and btc>beat, do not choose UP unless t<15 and continuation is exceptionally clear.\n"
-        f"If rsi9<{cfg.down_rsi_veto_threshold:.0f}, do not choose DOWN. If rsi9>{cfg.up_rsi_veto_base_threshold:.0f}, do not choose UP unless adx14>{cfg.up_rsi_veto_adx_threshold:.0f}.\n"
-        "If rsi_speed_divergence is negative while btc is still moving up, lower confidence and treat the move as weakening.\n"
-        "If DISTANCE_FROM_STRIKE_PCT>0 and choosing DOWN, confidence must stay below 0.50 unless exhaustion is clear; same symmetrically for UP when DISTANCE_FROM_STRIKE_PCT<0.\n"
-        "Return direction + confidence as win probability.\n"
-        'Return one JSON object with keys: decision, confidence, max_price_to_pay, reason.'
+        f"beat={market.settlement_threshold};"
+        f"t={time_remaining_seconds};"
+        f"btc_eff={effective_current_price:.2f};"
+        f"DISTANCE_FROM_STRIKE_USD={strike_delta_usd};"
+        f"DISTANCE_FROM_STRIKE_PCT={strike_delta_pct_display};"
+        f"MARKET_WIN_CHANCE_UP={market.up_market_probability};"
+        f"MARKET_WIN_CHANCE_DOWN={market.down_market_probability};"
+        f"up_ask={getattr(up_snapshot, 'buy_quote', None)};"
+        f"down_ask={getattr(down_snapshot, 'buy_quote', None)};"
+        f"rsi9={features.rsi_9};"
+        f"rsi14={features.rsi_14};"
+        f"rsi_speed_divergence={features.rsi_speed_divergence};"
+        f"mom1m={features.momentum_1m};"
+        f"v15={features.velocity_15s};"
+        f"v30={features.velocity_30s};"
+        f"acc={features.momentum_acceleration};"
+        f"adx14={features.adx_14};"
+        f"atr14={features.atr_14};"
+        f"vol5m={features.volatility_5m};"
+        f"reqv={required_velocity_to_win};"
+        f"dir_ticks={features.consecutive_directional_ticks};"
+        f"ticks10={features.last_10_ticks_direction};"
+        f"momentum_alignment={_momentum_alignment_text(features)}"
     )
 
 
@@ -472,7 +453,6 @@ def _build_openai_realtime_user_prompt(
     up_snapshot=None,
     down_snapshot=None,
 ) -> str:
-    cfg = get_trading_config()
     time_remaining_seconds = _get_time_remaining_seconds(market, int(features.as_of.timestamp()))
     implied_oracle_price = _compute_implied_oracle_price(features, market, up_snapshot, down_snapshot)
     effective_current_price = (
@@ -508,35 +488,19 @@ def _build_openai_realtime_user_prompt(
         f"u={getattr(up_snapshot, 'buy_quote', None)};"
         f"dn={getattr(down_snapshot, 'buy_quote', None)};"
         f"r9={features.rsi_9};"
+        f"r14={features.rsi_14};"
         f"rsid={features.rsi_speed_divergence};"
         f"m1={features.momentum_1m};"
+        f"v15={features.velocity_15s};"
         f"v30={features.velocity_30s};"
         f"acc={features.momentum_acceleration};"
         f"adx={features.adx_14};"
+        f"atr={features.atr_14};"
         f"v5={features.volatility_5m};"
         f"reqv={required_velocity_to_win};"
         f"dt={features.consecutive_directional_ticks};"
-        f"ma={_momentum_alignment_text(features)};"
-        "t_is_authoritative;"
-        f"if_t_gt_240_and_adx_lt_{cfg.discovery_adx_caution_threshold:.0f}_discovery_caution_if_adx_gt_{cfg.trend_priority_adx_threshold:.0f}_prioritize_trend;"
-        "DISTANCE_FROM_STRIKE_fields_are_settlement_baseline_positive_means_above_strike_negative_means_below_strike;"
-        "MARKET_WIN_CHANCE_fields_are_market_probabilities_not_price_distance;"
-        "do_not_confuse_distance_from_strike_with_market_win_chance;"
-        "btc_eff_is_true_current_price_for_strike_gap;"
-        "ignore_window_open_drift_v30_is_entry_timing_only;"
-        "MARKET_WIN_CHANCE_UP_and_MARKET_WIN_CHANCE_DOWN_are_gamma_market_probabilities;"
-        f"if_chosen_market_win_chance_lt_{cfg.market_win_chance_veto_threshold:.2f}_and_15_lte_t_lt_{cfg.market_win_chance_veto_end_seconds}_prefer_no_trade;"
-        "if_ma_true_clarity_high_trade_with_trend;"
-        f"if_DISTANCE_FROM_STRIKE_USD_beyond_0.5_ATR_in_chosen_direction_may_add_{cfg.itm_confidence_boost_amount:.2f}_confidence;"
-        f"if_chosen_side_otm_and_reqv_gt_vol5m_div_{cfg.required_velocity_divisor:.0f}_prefer_no_trade_if_itm_ignore_reqv;"
-        "if_t_gt_240_and_abs_DISTANCE_FROM_STRIKE_USD_lt_0.2_ATR_prefer_no_trade_unless_ma_true_and_adx_max;"
-        "if_t_gt_60_and_abs_btc_minus_beat_lt_0.2_vol5m_prefer_no_trade;"
-        "if_choose_up_and_u_lt_0.45_prefer_no_trade;"
-        f"if_r9_gt_{cfg.up_rsi_veto_trend_threshold:.0f}_and_btc_gt_beat_no_up_unless_t_lt_15;"
-        f"if_r9_lt_{cfg.down_rsi_veto_threshold:.0f}_no_down_if_r9_gt_{cfg.up_rsi_veto_base_threshold:.0f}_no_up_unless_adx_gt_{cfg.up_rsi_veto_adx_threshold:.0f};"
-        "if_rsi_speed_divergence_negative_while_price_up_lower_confidence;"
-        "if_DISTANCE_FROM_STRIKE_PCT_positive_and_choose_down_confidence_lt_0.50_unless_exhaustion;"
-        "json only"
+        f"ticks10={features.last_10_ticks_direction};"
+        f"ma={_momentum_alignment_text(features)}"
     )
 
 
@@ -609,6 +573,52 @@ def _truncate_log_text(text: str, limit: int = 240) -> str:
     return condensed[:limit]
 
 
+def _estimate_prompt_tokens_from_payload(payload: object) -> int:
+    try:
+        serialized = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+    except Exception:
+        serialized = str(payload)
+    return max(int(len(serialized) / 4), 1)
+
+
+def _maybe_log_llm_request_payload(label: str, payload: object) -> None:
+    try:
+        cfg = get_trading_config()
+    except Exception:
+        return
+    if not getattr(cfg, "llm_connection_debug", False):
+        return
+    try:
+        serialized = json.dumps(payload, indent=2, ensure_ascii=False)
+    except Exception:
+        serialized = str(payload)
+    print(f"{label} request payload:")
+    print(serialized)
+
+
+def _maybe_log_llm_prompt_text(label: str, system_prompt: str, user_prompt: str) -> None:
+    try:
+        cfg = get_trading_config()
+    except Exception:
+        return
+    if not getattr(cfg, "debug", False):
+        return
+    print(f"{label} prompt:")
+    print("SYSTEM PROMPT:")
+    print(system_prompt)
+    print()
+    print("USER PROMPT:")
+    print(user_prompt)
+
+
+def _retry_delay_seconds(base_delay: float, attempt_number: int, *, use_backoff: bool) -> float:
+    if base_delay <= 0:
+        return 0.0
+    if not use_backoff:
+        return base_delay
+    return base_delay * (2 ** max(attempt_number - 1, 0))
+
+
 def _print_llm_attempt_result(
     engine: str,
     model: str,
@@ -622,35 +632,76 @@ def _print_llm_attempt_result(
     phase_suffix = "" if phase == "primary" else f" [{phase}]"
     print(
         f"LLM attempt {attempt_number}/{total_attempts} "
-        f"({engine}/{model}){phase_suffix} {outcome}: {_truncate_log_text(detail)}"
+        f"({engine}/{model}){phase_suffix} {outcome}: {_truncate_log_text(detail, limit=2000)}"
     )
 
 
 def _print_llm_connection_config(
     engine: str,
     model: str,
-    timeout_seconds: float,
+    connect_timeout_seconds: float,
+    read_timeout_seconds: float,
     proxy_url: Optional[str],
 ) -> None:
     print("LLM connection:")
     print(f"  engine            = {engine}")
     print(f"  model             = {model}")
-    print(f"  timeout_seconds   = {timeout_seconds:.1f}")
+    print(f"  connect_timeout_s = {connect_timeout_seconds:.1f}")
+    print(f"  read_timeout_s    = {read_timeout_seconds:.1f}")
     print(f"  proxy             = {mask_proxy_url(proxy_url)}")
 
 
+def _build_requests_proxy_dict(proxy_url: Optional[str]) -> Optional[dict[str, str]]:
+    if not proxy_url:
+        return None
+    return {"http": proxy_url, "https": proxy_url}
+
+
+def _build_websocket_proxy_kwargs(proxy_url: Optional[str]) -> dict[str, object]:
+    if not proxy_url:
+        return {}
+    try:
+        parts = urlsplit(proxy_url)
+    except Exception:
+        return {}
+    if not parts.hostname:
+        return {}
+
+    proxy_kwargs: dict[str, object] = {
+        "proxy_type": parts.scheme or "http",
+        "http_proxy_host": parts.hostname,
+        "http_proxy_port": parts.port or (80 if (parts.scheme or "http") == "http" else 443),
+    }
+    if parts.username is not None:
+        proxy_kwargs["http_proxy_auth"] = (
+            parts.username,
+            parts.password or "",
+        )
+    return proxy_kwargs
+
+
 def _check_connectivity_after_llm_failure() -> None:
-    is_connected, detail = check_internet_connectivity()
-    print(f"Internet connectivity check: {detail}")
-    if not is_connected:
-        raise ConnectivityCheckFailed(detail)
+    direct_ok, direct_detail = check_internet_connectivity()
+    vpn_ok, vpn_detail = check_internet_connectivity(use_proxy=True)
+    print(f"Internet connectivity check (direct): {direct_detail}")
+    print(f"Internet connectivity check (vpn): {vpn_detail}")
+    if direct_ok and vpn_ok:
+        return
+    raise ConnectivityCheckFailed(
+        "Connectivity check failed after LLM error: "
+        f"direct={direct_detail}; vpn={vpn_detail}"
+    )
 
 
-def _direct_http_post(url: str, **kwargs) -> requests.Response:
+def _direct_http_post(url: str, proxy_url: Optional[str] = None, **kwargs) -> requests.Response:
+    request_kwargs = dict(kwargs)
+    proxies = request_kwargs.pop("proxies", None)
+    if proxies is None:
+        proxies = _build_requests_proxy_dict(proxy_url)
     session = requests.Session()
     session.trust_env = False
     try:
-        return session.post(url, **kwargs)
+        return session.post(url, proxies=proxies, **request_kwargs)
     finally:
         session.close()
 
@@ -665,10 +716,19 @@ def _get_openai_realtime_model(configured_model: str) -> str:
 
 
 class OpenAIRealtimeClient:
-    def __init__(self, api_key: str, model: str, timeout_seconds: float) -> None:
+    def __init__(
+        self,
+        api_key: str,
+        model: str,
+        connect_timeout_seconds: float,
+        read_timeout_seconds: float,
+        proxy_url: Optional[str] = None,
+    ) -> None:
         self.api_key = api_key
         self.model = model
-        self.timeout_seconds = timeout_seconds
+        self.connect_timeout_seconds = connect_timeout_seconds
+        self.read_timeout_seconds = read_timeout_seconds
+        self.proxy_url = proxy_url
         self.ws = None
         self._lock = threading.Lock()
         self._request_count = 0
@@ -689,10 +749,11 @@ class OpenAIRealtimeClient:
                 f"Authorization: Bearer {self.api_key}",
                 "OpenAI-Beta: realtime=v1",
             ],
-            timeout=self.timeout_seconds,
+            timeout=self.connect_timeout_seconds,
             enable_multithread=True,
+            **_build_websocket_proxy_kwargs(self.proxy_url),
         )
-        self.ws.settimeout(self.timeout_seconds)
+        self.ws.settimeout(self.read_timeout_seconds)
 
     def _ensure_connected(self) -> None:
         if self.ws is None:
@@ -773,21 +834,46 @@ class OpenAIRealtimeClient:
                 raise
 
 
-def _get_openai_realtime_client(api_key: str, model: str, timeout_seconds: float) -> OpenAIRealtimeClient:
+def _get_openai_realtime_client(
+    api_key: str,
+    model: str,
+    connect_timeout_seconds: Optional[float] = None,
+    read_timeout_seconds: Optional[float] = None,
+    timeout_seconds: Optional[float] = None,
+    proxy_url: Optional[str] = None,
+) -> OpenAIRealtimeClient:
     global _OPENAI_REALTIME_CLIENT
     realtime_model = _get_openai_realtime_model(model)
+    if connect_timeout_seconds is None:
+        connect_timeout_seconds = timeout_seconds if timeout_seconds is not None else 10.0
+    if read_timeout_seconds is None:
+        read_timeout_seconds = timeout_seconds if timeout_seconds is not None else 20.0
+
+    cached_client_dict = getattr(_OPENAI_REALTIME_CLIENT, "__dict__", {}) or {}
+    cached_connect_timeout = cached_client_dict.get(
+        "connect_timeout_seconds",
+        connect_timeout_seconds,
+    )
+    cached_read_timeout = cached_client_dict.get(
+        "read_timeout_seconds",
+        read_timeout_seconds,
+    )
     with _OPENAI_REALTIME_CLIENT_LOCK:
         if (
             _OPENAI_REALTIME_CLIENT is None
             or _OPENAI_REALTIME_CLIENT.api_key != api_key
             or _OPENAI_REALTIME_CLIENT.model != realtime_model
+            or cached_connect_timeout != connect_timeout_seconds
+            or cached_read_timeout != read_timeout_seconds
         ):
             if _OPENAI_REALTIME_CLIENT is not None:
                 _OPENAI_REALTIME_CLIENT.close()
             _OPENAI_REALTIME_CLIENT = OpenAIRealtimeClient(
                 api_key=api_key,
                 model=realtime_model,
-                timeout_seconds=timeout_seconds,
+                connect_timeout_seconds=connect_timeout_seconds,
+                read_timeout_seconds=read_timeout_seconds,
+                proxy_url=proxy_url,
             )
         return _OPENAI_REALTIME_CLIENT
 
@@ -798,9 +884,11 @@ def _stream_openai_chat_completion(
     system_prompt: str,
     user_prompt: str,
     timeout_seconds: float,
+    proxy_url: Optional[str] = None,
 ) -> str:
     session = requests.Session()
     session.trust_env = False
+    proxies = _build_requests_proxy_dict(proxy_url)
     try:
         with session.post(
             "https://api.openai.com/v1/chat/completions",
@@ -821,6 +909,7 @@ def _stream_openai_chat_completion(
             },
             timeout=timeout_seconds,
             stream=True,
+            proxies=proxies,
         ) as response:
             response.raise_for_status()
             chunks = []
@@ -853,19 +942,31 @@ def _request_openai_once(
     api_key: str,
     system_prompt: str,
     user_prompt: str,
-    timeout_seconds: float,
+    connect_timeout_seconds: float,
+    read_timeout_seconds: float,
+    proxy_url: Optional[str] = None,
 ) -> str:
-    proxy_url = None
+    payload = {
+        "model": _get_openai_realtime_model(model),
+        "system_prompt": system_prompt,
+        "user_prompt": user_prompt,
+    }
     _print_llm_connection_config(
         "openai",
         model,
-        timeout_seconds,
+        connect_timeout_seconds,
+        read_timeout_seconds,
         proxy_url,
     )
+    print(f"  prompt_token_estimate = {_estimate_prompt_tokens_from_payload(payload)}")
+    _maybe_log_llm_request_payload("OpenAI", payload)
+    _maybe_log_llm_prompt_text("OpenAI", system_prompt, user_prompt)
     realtime_client = _get_openai_realtime_client(
         api_key=api_key,
         model=model,
-        timeout_seconds=timeout_seconds,
+        connect_timeout_seconds=connect_timeout_seconds,
+        read_timeout_seconds=read_timeout_seconds,
+        proxy_url=proxy_url,
     )
     return realtime_client.request(system_prompt=system_prompt, user_prompt=user_prompt)
 
@@ -876,9 +977,11 @@ def _request_openai_decision(
     system_prompt: str,
     user_prompt: str,
     fallback_user_prompt: Optional[str] = None,
-    timeout_seconds: float = 10.0,
+    connect_timeout_seconds: float = 10.0,
+    read_timeout_seconds: float = 20.0,
     retry_attempts: int = 3,
     retry_timer_seconds: float = 2.0,
+    proxy_url: Optional[str] = None,
 ) -> str:
     last_error = None
 
@@ -890,7 +993,9 @@ def _request_openai_decision(
                 api_key=api_key,
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
-                timeout_seconds=timeout_seconds,
+                connect_timeout_seconds=connect_timeout_seconds,
+                read_timeout_seconds=read_timeout_seconds,
+                proxy_url=proxy_url,
             )
             _print_llm_attempt_result(
                 "openai",
@@ -903,6 +1008,38 @@ def _request_openai_decision(
             return raw_text
         except Exception as exc:
             last_error = exc
+            if proxy_url and _is_proxy_route_error(exc):
+                _print_llm_attempt_result(
+                    "openai",
+                    model,
+                    attempt_number,
+                    retry_attempts,
+                    False,
+                    f"{exc} (proxy route failed; retrying direct)",
+                    phase="proxy-fallback",
+                )
+                try:
+                    raw_text = _request_openai_once(
+                        model=model,
+                        api_key=api_key,
+                        system_prompt=system_prompt,
+                        user_prompt=user_prompt,
+                        connect_timeout_seconds=connect_timeout_seconds,
+                        read_timeout_seconds=read_timeout_seconds,
+                        proxy_url=None,
+                    )
+                    _print_llm_attempt_result(
+                        "openai",
+                        model,
+                        attempt_number,
+                        retry_attempts,
+                        True,
+                        raw_text or "{}",
+                        phase="direct-fallback",
+                    )
+                    return raw_text
+                except Exception as direct_exc:
+                    last_error = direct_exc
             try:
                 _check_connectivity_after_llm_failure()
             except ConnectivityCheckFailed as connectivity_exc:
@@ -931,7 +1068,9 @@ def _request_openai_decision(
                         api_key=api_key,
                         system_prompt=system_prompt,
                         user_prompt=fallback_user_prompt,
-                        timeout_seconds=timeout_seconds,
+                        connect_timeout_seconds=connect_timeout_seconds,
+                        read_timeout_seconds=read_timeout_seconds,
+                        proxy_url=proxy_url,
                     )
                     _print_llm_attempt_result(
                         "openai",
@@ -965,7 +1104,7 @@ def _request_openai_decision(
                 )
             if attempt_number >= retry_attempts:
                 raise RuntimeError(f"OpenAI request failed: {last_error}") from last_error
-            time.sleep(retry_timer_seconds)
+            time.sleep(_retry_delay_seconds(retry_timer_seconds, attempt_number, use_backoff=False))
 
     raise RuntimeError(f"OpenAI request failed: {last_error}")
 
@@ -975,15 +1114,17 @@ def _request_gemini_decision(
     api_key: str,
     system_prompt: str,
     user_prompt: str,
-    timeout_seconds: float = 10.0,
+    connect_timeout_seconds: float = 10.0,
+    read_timeout_seconds: float = 20.0,
     attempt_number: int = 1,
     total_attempts: int = 3,
+    proxy_url: Optional[str] = None,
 ) -> str:
-    proxy_url = None
     _print_llm_connection_config(
         "gemini",
         model,
-        timeout_seconds,
+        connect_timeout_seconds,
+        read_timeout_seconds,
         proxy_url,
     )
 
@@ -1020,12 +1161,16 @@ def _request_gemini_decision(
             },
         },
     }
+    print(f"  prompt_token_estimate = {_estimate_prompt_tokens_from_payload(payload)}")
+    _maybe_log_llm_request_payload("Gemini", payload)
+    _maybe_log_llm_prompt_text("Gemini", system_prompt, user_prompt)
     try:
         response = _direct_http_post(
             url,
             params={"key": api_key},
             json=payload,
-            timeout=timeout_seconds,
+            timeout=(connect_timeout_seconds, read_timeout_seconds),
+            proxy_url=proxy_url,
         )
         detail = response.text.strip() or response.reason or "empty response"
         response.raise_for_status()
@@ -1050,6 +1195,49 @@ def _request_gemini_decision(
         )
         return raw_text
     except requests.RequestException as exc:
+        if proxy_url and _is_proxy_route_error(exc):
+            _print_llm_attempt_result(
+                "gemini",
+                model,
+                attempt_number,
+                total_attempts,
+                False,
+                f"{exc} (proxy route failed; retrying direct)",
+                phase="proxy-fallback",
+            )
+            try:
+                response = _direct_http_post(
+                    url,
+                    params={"key": api_key},
+                    json=payload,
+                    timeout=(connect_timeout_seconds, read_timeout_seconds),
+                    proxy_url=None,
+                )
+                detail = response.text.strip() or response.reason or "empty response"
+                response.raise_for_status()
+                response_payload = response.json()
+                candidates = response_payload.get("candidates") or []
+                if not candidates:
+                    raise RuntimeError("Gemini returned no candidates")
+
+                content = candidates[0].get("content") or {}
+                parts = content.get("parts") or []
+                text_parts = [str(part.get("text", "")) for part in parts if part.get("text")]
+                if not text_parts:
+                    raise RuntimeError("Gemini returned no text content")
+                raw_text = "\n".join(text_parts)
+                _print_llm_attempt_result(
+                    "gemini",
+                    model,
+                    attempt_number,
+                    total_attempts,
+                    True,
+                    raw_text or detail,
+                    phase="direct-fallback",
+                )
+                return raw_text
+            except Exception as direct_exc:
+                exc = direct_exc
         _print_llm_attempt_result(
             "gemini",
             model,
@@ -1080,9 +1268,11 @@ def _request_gemini_decision_with_parse_retry(
     api_key: str,
     system_prompt: str,
     user_prompt: str,
-    timeout_seconds: float = 10.0,
+    connect_timeout_seconds: float = 10.0,
+    read_timeout_seconds: float = 20.0,
     retry_attempts: int = 3,
     retry_timer_seconds: float = 2.0,
+    proxy_url: Optional[str] = None,
 ) -> tuple[dict, str]:
     last_error = None
 
@@ -1094,9 +1284,11 @@ def _request_gemini_decision_with_parse_retry(
                 api_key=api_key,
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
-                timeout_seconds=timeout_seconds,
+                connect_timeout_seconds=connect_timeout_seconds,
+                read_timeout_seconds=read_timeout_seconds,
                 attempt_number=attempt_number,
                 total_attempts=retry_attempts,
+                proxy_url=proxy_url,
             )
             return _extract_json_payload(raw_text), raw_text
         except ValueError as exc:
@@ -1112,14 +1304,15 @@ def _request_gemini_decision_with_parse_retry(
             )
             if attempt_number >= retry_attempts:
                 raise RuntimeError(f"Gemini request failed: {exc}") from exc
-            time.sleep(retry_timer_seconds)
+            time.sleep(_retry_delay_seconds(retry_timer_seconds, attempt_number, use_backoff=False))
         except RuntimeError as exc:
             last_error = exc
             if isinstance(exc, ConnectivityCheckFailed):
                 raise RuntimeError(f"Gemini request failed: {exc}") from exc
             if attempt_number >= retry_attempts:
                 raise
-            time.sleep(retry_timer_seconds)
+            use_backoff = "read timed out" in str(exc).lower() or "read timeout" in str(exc).lower()
+            time.sleep(_retry_delay_seconds(retry_timer_seconds, attempt_number, use_backoff=use_backoff))
 
     raise RuntimeError(f"Gemini request failed: {last_error}")
 
@@ -1129,6 +1322,20 @@ def _coerce_config_value(raw_value: object, caster, default):
         return caster(raw_value)
     except (TypeError, ValueError):
         return default
+
+
+def _normalize_proxy_url(proxy_url: object) -> Optional[str]:
+    if not isinstance(proxy_url, str):
+        return None
+    proxy_url = proxy_url.strip()
+    return proxy_url or None
+
+
+def _is_proxy_route_error(exc: Exception) -> bool:
+    if isinstance(exc, RequestsProxyError):
+        return True
+    text = str(exc).lower()
+    return "proxyerror" in text or "unable to connect to proxy" in text or "proxy" in text and "connect" in text
 
 
 def _build_debug_prompt_text(system_prompt: str, user_prompt: str) -> Optional[str]:
@@ -1141,17 +1348,95 @@ def _build_debug_prompt_text(system_prompt: str, user_prompt: str) -> Optional[s
     return f"SYSTEM PROMPT:\n{system_prompt}\n\nUSER PROMPT:\n{user_prompt}"
 
 
-def test_llm_connection() -> tuple[bool, str]:
-    cfg = get_llm_config()
-    system_prompt = (
-        "You are a connection test for an automated trading agent. "
-        'Respond with a single JSON object: {"status":"ok"}.'
+def _is_valid_trade_decision_probe_payload(data: dict) -> bool:
+    side = str(data.get("decision", "")).upper()
+    if side not in {"UP", "DOWN", "NO_TRADE"}:
+        return False
+    try:
+        float(data.get("confidence", 0.0))
+        float(data.get("max_price_to_pay", 0.0))
+    except Exception:
+        return False
+    return True
+
+
+def _build_startup_trade_prompt_probe_inputs() -> tuple[BtcFeatures, BtcUpDownMarket, object, object]:
+    as_of = datetime.now(timezone.utc)
+    market = BtcUpDownMarket(
+        event_id="startup-probe-event",
+        market_id="startup-probe-market",
+        up_token_id="startup-up-token",
+        down_token_id="startup-down-token",
+        title="Startup Probe BTC Up or Down",
+        question="Will Bitcoin finish above the price to beat?",
+        slug="btc-updown-5m-9999999900",
+        start_ts=9_999_999_900,
+        end_ts=10_000_000_200,
+        settlement_threshold=80000.0,
+        volume=5000.0,
+        up_market_probability=0.62,
+        down_market_probability=0.38,
     )
-    user_prompt = 'Return exactly {"status":"ok"} and nothing else.'
+    features = BtcFeatures(
+        as_of=as_of,
+        price_usd=80042.0,
+        window_open_price=80010.0,
+        trailing_5m_open_price=79992.0,
+        delta_pct_from_window_open=0.0004,
+        delta_pct_from_trailing_5m_open=0.000625,
+        delta_from_previous_tick=3.5,
+        rsi_9=64.0,
+        rsi_14=58.0,
+        rsi_speed_divergence=6.0,
+        momentum_1m=18.0,
+        momentum_5m=44.0,
+        velocity_15s=7.0,
+        velocity_30s=10.0,
+        momentum_acceleration=-3.0,
+        ema_9=80020.0,
+        ema_21=79990.0,
+        ema_alignment=True,
+        ema_cross_direction="bullish",
+        adx_14=34.0,
+        atr_14=12.0,
+        volatility_5m=18.0,
+        consecutive_flat_ticks=0,
+        consecutive_directional_ticks=5,
+        last_10_ticks_direction="UUDUDUU",
+        retained_sample_count=30,
+        window_sample_count=12,
+        trailing_5m_sample_count=21,
+        live_sample_count=12,
+    )
+    up_snapshot = SimpleNamespace(
+        buy_quote=0.61,
+        top_level_book_imbalance=0.54,
+        imbalance_pressure=0.08,
+    )
+    down_snapshot = SimpleNamespace(
+        buy_quote=0.39,
+        top_level_book_imbalance=0.46,
+        imbalance_pressure=-0.08,
+    )
+    return features, market, up_snapshot, down_snapshot
+
+
+def _run_llm_connection_probe(
+    *,
+    system_prompt: str,
+    user_prompt: str,
+    mode_label: str,
+    cfg,
+):
     api_connection_timeout_seconds = _coerce_config_value(
         getattr(cfg, "api_connection_timeout_seconds", 10.0),
         float,
         10.0,
+    )
+    api_read_timeout_seconds = _coerce_config_value(
+        getattr(cfg, "api_read_timeout_seconds", 20.0),
+        float,
+        20.0,
     )
     api_connection_retry_timer_seconds = _coerce_config_value(
         getattr(cfg, "api_connection_retry_timer_seconds", 2.0),
@@ -1162,46 +1447,86 @@ def test_llm_connection() -> tuple[bool, str]:
         _coerce_config_value(getattr(cfg, "api_connection_retry_attempts", 3), int, 3),
         1,
     )
+    proxy_url = _normalize_proxy_url(getattr(cfg, "proxy_url", None))
 
     try:
-        raw_response_text = None
         if cfg.engine == "openai":
             raw_text = _request_openai_decision(
                 model=cfg.model,
                 api_key=cfg.api_key,
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
-                timeout_seconds=api_connection_timeout_seconds,
+                connect_timeout_seconds=api_connection_timeout_seconds,
+                read_timeout_seconds=api_read_timeout_seconds,
                 retry_attempts=api_connection_retry_attempts,
                 retry_timer_seconds=max(api_connection_retry_timer_seconds, 0.0),
+                proxy_url=proxy_url,
             )
             data = _extract_json_payload(raw_text)
         elif cfg.engine == "gemini":
-            data = _request_gemini_decision_with_parse_retry(
+            data, _ = _request_gemini_decision_with_parse_retry(
                 model=cfg.model,
                 api_key=cfg.api_key,
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
-                timeout_seconds=api_connection_timeout_seconds,
+                connect_timeout_seconds=api_connection_timeout_seconds,
+                read_timeout_seconds=api_read_timeout_seconds,
                 retry_attempts=api_connection_retry_attempts,
                 retry_timer_seconds=max(api_connection_retry_timer_seconds, 0.0),
+                proxy_url=proxy_url,
             )
         else:
             raise RuntimeError(f"Unsupported AI engine: {cfg.engine}")
     except Exception as exc:
+        raise RuntimeError(f"{mode_label} probe failed: {exc}") from exc
+
+    return data
+
+
+def test_llm_connection() -> tuple[bool, str]:
+    cfg = get_llm_config()
+    basic_system_prompt = (
+        "You are a connection test for an automated trading agent. "
+        'Respond with a single JSON object: {"status":"ok"}.'
+    )
+    basic_user_prompt = 'Return exactly {"status":"ok"} and nothing else.'
+    full_system_prompt = (
+        "You are a startup connectivity test for an automated trading agent. "
+        "Respond with a single JSON object only and nothing else. "
+        'Use this exact schema: {"decision":"UP|DOWN|NO_TRADE","confidence":0.0,"max_price_to_pay":1.0,"reason":"short string"}.'
+    )
+    basic_data = None
+
+    try:
+        basic_data = _run_llm_connection_probe(
+            system_prompt=basic_system_prompt,
+            user_prompt=basic_user_prompt,
+            mode_label="Basic connectivity",
+            cfg=cfg,
+        )
+        if (
+            str(basic_data.get("status", "")).lower() != "ok"
+            and not _is_valid_trade_decision_probe_payload(basic_data)
+        ):
+            return False, f"Unexpected basic LLM connection test payload: {basic_data}"
+    except Exception as exc:
         return False, str(exc)
 
-    if str(data.get("status", "")).lower() != "ok":
-        return False, f"Unexpected LLM connection test payload: {data}"
-
-    return True, f"LLM connection test succeeded ({cfg.engine}/{cfg.model})"
+    return (
+        True,
+        (
+            "LLM connection test succeeded "
+            f"({cfg.engine}/{cfg.model}; basic probe passed)"
+        ),
+    )
 
 
 def decide_trade(features: BtcFeatures, market: BtcUpDownMarket, up_snapshot=None, down_snapshot=None) -> LlmDecision:
     cfg = get_llm_config()
-    system_prompt = _build_openai_realtime_system_prompt()
+    proxy_url = _normalize_proxy_url(getattr(cfg, "proxy_url", None))
+    system_prompt = _build_system_prompt(cfg)
     minimal_user_prompt = _build_minimal_user_prompt(features, market, up_snapshot=up_snapshot, down_snapshot=down_snapshot)
-    openai_system_prompt = _build_openai_realtime_system_prompt()
+    openai_system_prompt = _build_openai_realtime_system_prompt(cfg)
     openai_user_prompt = _build_openai_realtime_user_prompt(
         features,
         market,
@@ -1212,6 +1537,11 @@ def decide_trade(features: BtcFeatures, market: BtcUpDownMarket, up_snapshot=Non
         getattr(cfg, "api_connection_timeout_seconds", 10.0),
         float,
         10.0,
+    )
+    api_read_timeout_seconds = _coerce_config_value(
+        getattr(cfg, "api_read_timeout_seconds", 20.0),
+        float,
+        20.0,
     )
     api_connection_retry_timer_seconds = _coerce_config_value(
         getattr(cfg, "api_connection_retry_timer_seconds", 2.0),
@@ -1237,9 +1567,11 @@ def decide_trade(features: BtcFeatures, market: BtcUpDownMarket, up_snapshot=Non
                 system_prompt=openai_system_prompt,
                 user_prompt=openai_user_prompt,
                 fallback_user_prompt=None,
-                timeout_seconds=api_connection_timeout_seconds,
+                connect_timeout_seconds=api_connection_timeout_seconds,
+                read_timeout_seconds=api_read_timeout_seconds,
                 retry_attempts=api_connection_retry_attempts,
                 retry_timer_seconds=api_connection_retry_timer_seconds,
+                proxy_url=proxy_url,
             )
             raw_response_text = raw_text
             data = _extract_json_payload(raw_text)
@@ -1249,9 +1581,11 @@ def decide_trade(features: BtcFeatures, market: BtcUpDownMarket, up_snapshot=Non
                 api_key=cfg.api_key,
                 system_prompt=system_prompt,
                 user_prompt=minimal_user_prompt,
-                timeout_seconds=api_connection_timeout_seconds,
+                connect_timeout_seconds=api_connection_timeout_seconds,
+                read_timeout_seconds=api_read_timeout_seconds,
                 retry_attempts=api_connection_retry_attempts,
                 retry_timer_seconds=api_connection_retry_timer_seconds,
+                proxy_url=proxy_url,
             )
         else:
             raise RuntimeError(f"Unsupported AI engine: {cfg.engine}")

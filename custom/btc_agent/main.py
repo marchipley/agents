@@ -16,25 +16,27 @@ import json
 from . import config as config_module
 from .config import get_trading_config
 from .market_lookup import (
-    build_price_to_beat_debug_reports,
+    BtcUpDownMarket,
     fetch_btc_resolution_price_for_slug,
     find_current_btc_updown_market,
     get_btc_updown_market_by_slug,
 )
 from .indicators import (
+    BtcFeatures,
     build_btc_features,
     estimate_market_window_reference_price,
     fetch_btc_spot_price,
     get_feature_readiness,
 )
-from .llm_decision import decide_trade, test_llm_connection
-from .network import describe_proxy_configuration
+from .llm_decision import LlmDecision, decide_trade, test_llm_connection
+from .network import describe_proxy_configuration, mask_proxy_url
 from .executor import (
     AccountBalanceSnapshot,
     TokenQuoteSnapshot,
     compute_recommended_limit_price,
     compute_target_limit_price,
     evaluate_ok_to_submit,
+    evaluate_pre_llm_hard_veto,
     get_effective_decision_confidence,
     get_effective_min_confidence,
     get_submission_limit_price,
@@ -63,8 +65,100 @@ from scripts.python.check_public_ip_indonesia import (
 
 
 _FIRST_LOOP = True
-_DEBUG_WRITTEN_SLUGS = set()
 _SESSION_LOSS_TRADES = 0
+
+
+def _build_llm_response_debug_probe_inputs() -> tuple[BtcUpDownMarket, BtcFeatures, TokenQuoteSnapshot, TokenQuoteSnapshot]:
+    observed_at = datetime.fromtimestamp(1770000300, tz=timezone.utc)
+    market = BtcUpDownMarket(
+        event_id="response-debug-event",
+        market_id="response-debug-market",
+        up_token_id="response-debug-up-token",
+        down_token_id="response-debug-down-token",
+        title="BTC Response Debug Probe",
+        question="Synthetic BTC response debug probe",
+        slug="btc-updown-5m-1770000000",
+        start_ts=1770000000,
+        end_ts=1770000300,
+        settlement_threshold=80818.80297729779,
+        volume=0.0,
+        up_market_probability=1.0,
+        down_market_probability=0.01,
+    )
+    features = BtcFeatures(
+        as_of=observed_at,
+        price_usd=80823.16,
+        window_open_price=80823.16,
+        trailing_5m_open_price=80823.16,
+        delta_pct_from_window_open=0.0,
+        delta_pct_from_trailing_5m_open=0.0,
+        delta_from_previous_tick=0.0,
+        rsi_9=37.31201219544613,
+        rsi_14=46.585563674512606,
+        rsi_speed_divergence=-9.273551479066477,
+        momentum_1m=-2.3299999900045805,
+        momentum_5m=-2.3299999900045805,
+        velocity_15s=2.940000009999494,
+        velocity_30s=-2.3299999900045805,
+        momentum_acceleration=5.2700000000040745,
+        ema_9=80822.0,
+        ema_21=80820.0,
+        ema_alignment=False,
+        ema_cross_direction="bearish",
+        adx_14=6.828872650974774,
+        atr_14=4.403571429286136,
+        volatility_5m=7.401005737845983,
+        consecutive_flat_ticks=0,
+        consecutive_directional_ticks=3,
+        last_10_ticks_direction="UUUUDDUUDU",
+        retained_sample_count=21,
+        window_sample_count=21,
+        trailing_5m_sample_count=21,
+        live_sample_count=21,
+    )
+    up_snapshot = TokenQuoteSnapshot(
+        token_id=market.up_token_id,
+        buy_quote=0.99,
+        midpoint=0.99,
+        last_trade_price=0.99,
+        reference_price=0.99,
+        target_limit_price=0.99,
+        recommended_limit_price=0.99,
+        ok_to_submit=True,
+        submit_reason="response debug probe",
+        best_bid=0.98,
+        best_ask=0.99,
+        tick_size=0.01,
+        spread=0.01,
+        best_bid_size=100.0,
+        best_ask_size=100.0,
+        spread_bps=101.0,
+        top_level_book_imbalance=0.99,
+        imbalance_pressure=0.0,
+        order_book_pressure=1.0,
+    )
+    down_snapshot = TokenQuoteSnapshot(
+        token_id=market.down_token_id,
+        buy_quote=0.01,
+        midpoint=0.01,
+        last_trade_price=0.01,
+        reference_price=0.01,
+        target_limit_price=0.01,
+        recommended_limit_price=0.01,
+        ok_to_submit=True,
+        submit_reason="response debug probe",
+        best_bid=0.00,
+        best_ask=0.01,
+        tick_size=0.01,
+        spread=0.01,
+        best_bid_size=100.0,
+        best_ask_size=100.0,
+        spread_bps=10.0,
+        top_level_book_imbalance=0.01,
+        imbalance_pressure=0.0,
+        order_book_pressure=1.0,
+    )
+    return market, features, up_snapshot, down_snapshot
 
 
 class QuitKeyMonitor:
@@ -252,9 +346,10 @@ def _completed_order_final_log_path(
     completed_orders_dir = os.path.join(os.getcwd(), "completed_orders")
     os.makedirs(completed_orders_dir, exist_ok=True)
     if not_filled:
+        side_suffix = f"_{str(side).lower()}" if side else ""
         return os.path.join(
             completed_orders_dir,
-            f"completed_order_unfilled_{_extract_slug_timestamp(market_slug)}{_trade_number_suffix(trade_number_in_period)}.txt",
+            f"completed_order_unfilled{side_suffix}_{_extract_slug_timestamp(market_slug)}{_trade_number_suffix(trade_number_in_period)}.txt",
         )
     side_suffix = f"_{str(side).lower()}" if side else ""
     return os.path.join(
@@ -361,6 +456,7 @@ def _snapshot_summary(prefix: str, snapshot: TokenQuoteSnapshot) -> list[str]:
         f"{prefix}_spread_bps={_fmt(getattr(snapshot, 'spread_bps', None))}",
         f"{prefix}_top_level_book_imbalance={_fmt(getattr(snapshot, 'top_level_book_imbalance', None))}",
         f"{prefix}_imbalance_pressure={_fmt(getattr(snapshot, 'imbalance_pressure', None))}",
+        f"{prefix}_order_book_pressure={_fmt(getattr(snapshot, 'order_book_pressure', None))}",
     ]
 
 
@@ -370,7 +466,9 @@ def _execution_microstructure_lines(
     actual_fill_price=None,
     realized_slippage_bps=None,
     order_latency_ms=None,
+    fill_duration_ms=None,
     book_depth_at_fill=None,
+    order_book_pressure=None,
     shares_requested=None,
 ) -> list[str]:
     return [
@@ -378,7 +476,9 @@ def _execution_microstructure_lines(
         f"actual_fill_price={_fmt(actual_fill_price)}",
         f"realized_slippage_bps={_fmt(realized_slippage_bps)}",
         f"order_latency_ms={_fmt(order_latency_ms)}",
+        f"fill_duration_ms={_fmt(fill_duration_ms)}",
         f"book_depth_at_fill={_fmt(book_depth_at_fill)}",
+        f"order_book_pressure={_fmt(order_book_pressure)}",
         f"shares_requested={_fmt(shares_requested)}",
     ]
 
@@ -631,8 +731,14 @@ def _build_regime_fingerprint(
             llm_veto_flags.append("up_below_strike_rsi_hot")
         if rsi_9 is not None and rsi_9 >= 75 and adx_14 is not None and adx_14 > 50:
             llm_veto_flags.append("paradoxical_momentum_exhaustion")
-        if rsi_9 is not None and rsi_9 >= 65 and time_remaining_seconds > 200:
+        if rsi_9 is not None and time_remaining_seconds is not None and rsi_9 >= 65 and time_remaining_seconds > 200:
             llm_veto_flags.append("early_window_rsi_hot")
+        if rsi_9 is not None and time_remaining_seconds is not None and rsi_9 >= 80 and time_remaining_seconds < 45:
+            llm_veto_flags.append("late_window_up_exhaustion")
+        if rsi_9 is not None and time_remaining_seconds is not None and rsi_9 <= 20 and time_remaining_seconds < 45:
+            llm_veto_flags.append("late_window_down_exhaustion")
+        if gap_to_target is not None and time_remaining_seconds is not None and abs(gap_to_target) < 5 and time_remaining_seconds < 30:
+            llm_veto_flags.append("late_window_thin_cushion")
         if selected_snapshot is not None and getattr(selected_snapshot, "top_level_book_imbalance", None) is not None:
             llm_veto_flags.append("orderbook_imbalance_snapshot")
 
@@ -694,6 +800,9 @@ def _build_regime_fingerprint(
         "imbalance_pressure": None
         if selected_snapshot is None
         else getattr(selected_snapshot, "imbalance_pressure", None),
+        "order_book_pressure": None
+        if selected_snapshot is None
+        else getattr(selected_snapshot, "order_book_pressure", None),
         "velocity_15s": None
         if features is None
         else getattr(features, "velocity_15s", None),
@@ -937,6 +1046,7 @@ def append_completed_order_tick(
         else 0.0
     )
     btc_gap_to_target = current_btc_price - order.target_btc_price
+    exit_price_delta = btc_gap_to_target
     if is_unfilled:
         status = "UNFILLED"
         outcome_label = "unfilled"
@@ -990,6 +1100,7 @@ def append_completed_order_tick(
                     f"btc_move_from_entry={btc_move_from_entry:.2f}",
                     f"btc_move_from_entry_pct={btc_move_from_entry_pct:.4f}%",
                     f"btc_gap_to_target={btc_gap_to_target:.2f}",
+                    f"exit_price_delta={exit_price_delta:.2f}",
                     f"market_time_remaining_seconds={_fmt(regime_fingerprint.get('time_remaining_seconds'))}",
                     f"market_time_remaining_mmss={_fmt_mmss_from_seconds(regime_fingerprint.get('time_remaining_seconds'))}",
                     f"position_state={status}",
@@ -1002,7 +1113,9 @@ def append_completed_order_tick(
                         actual_fill_price=getattr(order, "actual_fill_price", None),
                         realized_slippage_bps=getattr(order, "realized_slippage_bps", None),
                         order_latency_ms=getattr(order, "order_latency_ms", None),
+                        fill_duration_ms=getattr(order, "fill_duration_ms", None),
                         book_depth_at_fill=getattr(order, "book_depth_at_fill", None),
+                        order_book_pressure=getattr(order, "order_book_pressure", None),
                         shares_requested=getattr(order, "shares_requested", None),
                     ),
                     "",
@@ -1066,7 +1179,7 @@ def append_completed_order_tick(
         final_path = _completed_order_final_log_path(
             order.market_slug,
             outcome_label,
-            side=period_direction,
+            side=order.side if is_unfilled else period_direction,
             not_filled=is_unfilled,
             trade_number_in_period=getattr(order, "trade_number_in_period", None),
         )
@@ -1120,8 +1233,12 @@ def maintain_unfilled_live_orders(active_orders, market):
             order.entry_price = getattr(result, "price", order.entry_price) or order.entry_price
             order.quoted_price_at_entry = getattr(result, "quoted_price_at_entry", None)
             order.order_latency_ms = getattr(result, "order_latency_ms", None)
+            order.fill_duration_ms = getattr(result, "fill_duration_ms", None)
             order.book_depth_at_fill = getattr(result, "book_depth_at_fill", None)
+            order.order_book_pressure = getattr(result, "order_book_pressure", None)
             order.shares_requested = getattr(result, "shares_requested", None)
+            if getattr(result, "submission_accepted", False):
+                order.placed_at = datetime.now(timezone.utc)
             if getattr(result, "actual_fill_price", None) is not None:
                 order.actual_fill_price = result.actual_fill_price
                 order.realized_slippage_bps = getattr(result, "realized_slippage_bps", None)
@@ -1239,7 +1356,9 @@ def append_failed_order_attempt(
                 actual_fill_price=getattr(result, "actual_fill_price", None),
                 realized_slippage_bps=getattr(result, "realized_slippage_bps", None),
                 order_latency_ms=getattr(result, "order_latency_ms", None),
+                fill_duration_ms=getattr(result, "fill_duration_ms", None),
                 book_depth_at_fill=getattr(result, "book_depth_at_fill", None),
+                order_book_pressure=getattr(result, "order_book_pressure", None),
                 shares_requested=getattr(result, "shares_requested", None),
             ),
         ]
@@ -1389,6 +1508,7 @@ def append_unfilled_live_order(
     log_path = _completed_order_final_log_path(
         market.slug,
         outcome_label="unfilled",
+        side=getattr(decision, "side", None),
         not_filled=True,
         trade_number_in_period=trade_number_in_period,
     )
@@ -1423,7 +1543,9 @@ def append_unfilled_live_order(
                 actual_fill_price=getattr(result, "actual_fill_price", None),
                 realized_slippage_bps=getattr(result, "realized_slippage_bps", None),
                 order_latency_ms=getattr(result, "order_latency_ms", None),
+                fill_duration_ms=getattr(result, "fill_duration_ms", None),
                 book_depth_at_fill=getattr(result, "book_depth_at_fill", None),
+                order_book_pressure=getattr(result, "order_book_pressure", None),
                 shares_requested=getattr(result, "shares_requested", None),
             ),
         ]
@@ -1502,44 +1624,11 @@ def _get_losing_active_orders(current_btc_price: float) -> list[ActivePaperOrder
 
 
 def write_price_to_beat_debug_file(slug: str, force: bool = False) -> None:
-    if not force and slug in _DEBUG_WRITTEN_SLUGS:
-        return
-
-    try:
-        reports = build_price_to_beat_debug_reports(slug)
-        for index, report in enumerate(reports, start=1):
-            if index == 1:
-                debug_path = os.path.join(os.getcwd(), "logs", "priceToBeatDebug.txt")
-                print(f"price_to_beat_debug_file: {debug_path}")
-            else:
-                debug_path = os.path.join(
-                    os.getcwd(),
-                    "logs",
-                    f"priceToBeatDebugPg{index}.txt",
-                )
-                print(f"price_to_beat_debug_file_pg{index}: {debug_path}")
-            with open(debug_path, "w", encoding="utf-8") as debug_file:
-                debug_file.write(report)
-        _DEBUG_WRITTEN_SLUGS.add(slug)
-    except Exception as exc:
-        print(f"price_to_beat_debug_file_error: {exc}")
+    return None
 
 
 def clear_price_to_beat_debug_files() -> None:
-    logs_dir = os.path.join(os.getcwd(), "logs")
-    try:
-        for name in os.listdir(logs_dir):
-            if not (
-                name == "priceToBeatDebug.txt"
-                or (name.startswith("priceToBeatDebugPg") and name.endswith(".txt"))
-            ):
-                continue
-            try:
-                os.remove(os.path.join(logs_dir, name))
-            except FileNotFoundError:
-                pass
-    except FileNotFoundError:
-        return
+    return None
 
 
 def resolve_price_to_beat_with_retries(market, retry_attempts: int = 2, retry_delay_seconds: int = 3):
@@ -1547,10 +1636,6 @@ def resolve_price_to_beat_with_retries(market, retry_attempts: int = 2, retry_de
         return market
 
     cfg = get_trading_config()
-    if cfg.debug_price_to_beat:
-        print("price_to_beat_retry: skipped because DEBUG_PRICE_TO_BEAT=true")
-        return market
-
     for attempt in range(1, retry_attempts + 1):
         print(
             "price_to_beat_retry: "
@@ -1807,6 +1892,8 @@ def print_market_context(
     print(f"  down_market_probability = {_fmt(getattr(market, 'down_market_probability', None))}")
     print(f"  up_spread             = {_fmt(getattr(up_snapshot, 'spread', None))}")
     print(f"  down_spread           = {_fmt(getattr(down_snapshot, 'spread', None))}")
+    print(f"  up_order_book_pressure = {_fmt(getattr(up_snapshot, 'order_book_pressure', None))}")
+    print(f"  down_order_book_pressure = {_fmt(getattr(down_snapshot, 'order_book_pressure', None))}")
     if not debug:
         return
 
@@ -1853,15 +1940,26 @@ def print_trade_execution_result(result, debug: bool) -> None:
     print(f"  size     = {result.size:.4f}")
     print(f"  price    = {_fmt(result.price)}")
     print(f"  token_id = {result.token_id}")
+    if getattr(result, "fill_duration_ms", None) is not None:
+        print(f"  fill_duration_ms = {_fmt(getattr(result, 'fill_duration_ms', None))}")
+    if getattr(result, "order_book_pressure", None) is not None:
+        print(f"  order_book_pressure = {_fmt(getattr(result, 'order_book_pressure', None))}")
     print(f"  reason   = {result.reason}")
 
 
-def run_once() -> None:
+def run_once(response_debug: bool = False) -> None:
     global _FIRST_LOOP
     global _SESSION_LOSS_TRADES
     cfg = get_trading_config()
     use_recommended_limit = getattr(cfg, "use_recommended_limit", True)
+    if response_debug:
+        market, features, up_snapshot, down_snapshot = _build_llm_response_debug_probe_inputs()
+        decision = decide_trade(features, market, up_snapshot=up_snapshot, down_snapshot=down_snapshot)
+        print_llm_decision(decision, market=market, features=features, debug=cfg.debug)
+        return
     enforce_session_loss_trade_limit(cfg)
+    if cfg.debug:
+        print("ADVISORY: BTC_AGENT_DEBUG=true forces paper trading; live trades are disabled for this loop.")
     if cfg.debug:
         print(f"[{datetime.now(timezone.utc).isoformat()}] BTC up/down agent tick")
 
@@ -1911,15 +2009,9 @@ def run_once() -> None:
         if previous_market_slug:
             finalize_pending_period_log(previous_market_slug, final_resolution_btc_price)
         print(f"New 5-minute market period detected: {market.slug}")
-        clear_price_to_beat_debug_files()
-        _DEBUG_WRITTEN_SLUGS.clear()
         enforce_session_loss_trade_limit(cfg)
-    if cfg.debug:
-        write_price_to_beat_debug_file(market.slug)
     if not has_valid_price_to_beat(market.settlement_threshold):
         print_market_context(market, debug=cfg.debug)
-        if not cfg.debug:
-            write_price_to_beat_debug_file(market.slug, force=True)
         print(
             "ERROR: Invalid period_open_price_to_beat for current market. "
             "Aborting BTC agent execution."
@@ -2039,7 +2131,10 @@ def run_once() -> None:
 
     features = build_btc_features(window_start_ts=market.start_ts)
     print_features(features, debug=cfg.debug)
-    features_ready, feature_skip_reason = get_feature_readiness(features)
+    if cfg.debug:
+        features_ready, feature_skip_reason = True, None
+    else:
+        features_ready, feature_skip_reason = get_feature_readiness(features)
     if not features_ready:
         append_pending_period_tick_analysis(
             market,
@@ -2082,7 +2177,28 @@ def run_once() -> None:
                 print("-" * 80)
             return
 
-    decision = decide_trade(features, market, up_snapshot=up_snapshot, down_snapshot=down_snapshot)
+    if response_debug:
+        decision = decide_trade(features, market, up_snapshot=up_snapshot, down_snapshot=down_snapshot)
+        print_llm_decision(decision, market=market, features=features, debug=cfg.debug)
+        return
+
+    hard_veto_result = evaluate_pre_llm_hard_veto(
+        market,
+        features,
+        up_snapshot=up_snapshot,
+        down_snapshot=down_snapshot,
+    )
+    if hard_veto_result is not None:
+        decision = LlmDecision(
+            side="NO_TRADE",
+            confidence=0.0,
+            max_price_to_pay=1.0,
+            reason=hard_veto_result.reason,
+        )
+        print_llm_skip_reason(hard_veto_result.reason)
+    else:
+        decision = decide_trade(features, market, up_snapshot=up_snapshot, down_snapshot=down_snapshot)
+        print_llm_decision(decision, market=market, features=features, debug=cfg.debug)
     append_pending_period_tick_analysis(
         market,
         up_snapshot=up_snapshot,
@@ -2091,7 +2207,6 @@ def run_once() -> None:
         decision=decision,
         observed_at=features.as_of,
     )
-    print_llm_decision(decision, market=market, features=features, debug=cfg.debug)
 
     decision_snapshot = None
     if decision.side == "UP":
@@ -2191,7 +2306,9 @@ def run_once() -> None:
             actual_fill_price=getattr(result, "actual_fill_price", None),
             realized_slippage_bps=getattr(result, "realized_slippage_bps", None),
             order_latency_ms=getattr(result, "order_latency_ms", None),
+            fill_duration_ms=getattr(result, "fill_duration_ms", None),
             book_depth_at_fill=getattr(result, "book_depth_at_fill", None),
+            order_book_pressure=getattr(result, "order_book_pressure", None),
             shares_requested=getattr(result, "shares_requested", None),
             live_order_id=getattr(result, "live_order_id", None),
             llm_prompt_text=getattr(decision, "prompt_text", None),
@@ -2235,8 +2352,8 @@ def run_once() -> None:
 
 def enforce_allowed_ip_location() -> None:
     cfg = get_trading_config()
-    if cfg.llm_connection_debug:
-        print("Skipping public IP geolocation check because LLM_CONNECTION_DEBUG=true")
+    if getattr(cfg, "llm_connection_debug", False) or getattr(cfg, "llm_response_debug", False):
+        print("Skipping public IP geolocation check because an LLM debug mode is enabled")
         return
 
     print("Checking public IP geolocation...")
@@ -2251,11 +2368,29 @@ def enforce_allowed_ip_location() -> None:
         sys.exit(1)
 
 
+def enforce_llm_startup_connectivity() -> None:
+    print("Testing LLM connectivity before startup warmup...")
+    success, detail = test_llm_connection()
+    if success:
+        print(f"LLM startup connectivity test: {detail}")
+        return
+    print(f"ERROR: LLM startup connectivity test failed: {detail}")
+    sys.exit(1)
+
+
 def main() -> None:
     cfg = get_trading_config()
     print(f"Network proxy: {describe_proxy_configuration()}")
+    print(f"LLM proxy: {mask_proxy_url(getattr(cfg, 'llm_proxy_url', None))}")
     if cfg.debug:
         print(f"Starting BTC agent (paper_trading={cfg.paper_trading})")
+
+    if getattr(cfg, "llm_response_debug", False):
+        print("LLM response debug mode enabled.")
+        enforce_llm_startup_connectivity()
+        run_once(response_debug=True)
+        print("LLM response debug run complete. Exiting BTC agent.")
+        return
 
     if cfg.llm_connection_debug:
         print("LLM connection debug mode enabled.")
@@ -2267,6 +2402,7 @@ def main() -> None:
         sys.exit(1)
 
     enforce_allowed_ip_location()
+    enforce_llm_startup_connectivity()
 
     startup_account = get_account_balance_snapshot()
     enforce_minimum_wallet_balance(startup_account)

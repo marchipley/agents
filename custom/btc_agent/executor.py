@@ -31,7 +31,9 @@ class TradeExecutionResult:
     actual_fill_price: Optional[float] = None
     realized_slippage_bps: Optional[float] = None
     order_latency_ms: Optional[int] = None
+    fill_duration_ms: Optional[int] = None
     book_depth_at_fill: Optional[float] = None
+    order_book_pressure: Optional[float] = None
     shares_requested: Optional[float] = None
     submission_accepted: bool = False
     live_order_id: Optional[str] = None
@@ -57,6 +59,7 @@ class TokenQuoteSnapshot:
     spread_bps: Optional[float] = None
     top_level_book_imbalance: Optional[float] = None
     imbalance_pressure: Optional[float] = None
+    order_book_pressure: Optional[float] = None
 
 
 @dataclass
@@ -582,6 +585,9 @@ def get_token_quote_snapshot(
     if total_top_three_size > 0:
         top_level_book_imbalance = top_three_bid_size / total_top_three_size
         imbalance_pressure = (top_three_bid_size - top_three_ask_size) / total_top_three_size
+    order_book_pressure = None
+    if top_three_ask_size not in (None, 0):
+        order_book_pressure = top_three_bid_size / top_three_ask_size
 
     reference_price = compute_reference_price(
         buy_quote=buy_quote,
@@ -637,6 +643,7 @@ def get_token_quote_snapshot(
         spread_bps=spread_bps,
         top_level_book_imbalance=top_level_book_imbalance,
         imbalance_pressure=imbalance_pressure,
+        order_book_pressure=order_book_pressure,
     )
 
 
@@ -657,7 +664,9 @@ def _build_rejected_trade_result(
     actual_fill_price: Optional[float] = None,
     realized_slippage_bps: Optional[float] = None,
     order_latency_ms: Optional[int] = None,
+    fill_duration_ms: Optional[int] = None,
     book_depth_at_fill: Optional[float] = None,
+    order_book_pressure: Optional[float] = None,
     shares_requested: Optional[float] = None,
 ) -> TradeExecutionResult:
     return TradeExecutionResult(
@@ -673,9 +682,110 @@ def _build_rejected_trade_result(
         actual_fill_price=actual_fill_price,
         realized_slippage_bps=realized_slippage_bps,
         order_latency_ms=order_latency_ms,
+        fill_duration_ms=fill_duration_ms,
         book_depth_at_fill=book_depth_at_fill,
+        order_book_pressure=order_book_pressure,
         shares_requested=shares_requested,
     )
+
+
+def evaluate_pre_llm_hard_veto(
+    market: BtcUpDownMarket,
+    features: Optional[BtcFeatures],
+    up_snapshot: Optional[TokenQuoteSnapshot] = None,
+    down_snapshot: Optional[TokenQuoteSnapshot] = None,
+) -> Optional[TradeExecutionResult]:
+    """
+    Return a no-trade result for simple Python-evaluable guardrails so the
+    agent can skip the LLM entirely when the setup is obviously poor.
+    """
+    cfg = get_trading_config()
+    if features is None or getattr(features, "price_usd", None) is None:
+        return None
+    if market.settlement_threshold in (None, 0):
+        return None
+
+    time_remaining_seconds = _get_time_remaining_seconds(market)
+    current_price = float(features.price_usd)
+    strike_price = float(market.settlement_threshold)
+    gap_to_target = current_price - strike_price
+    atr_14 = getattr(features, "atr_14", None)
+    rsi_9 = getattr(features, "rsi_9", None)
+
+    if (
+        time_remaining_seconds > 240
+        and atr_14 not in (None, 0)
+        and abs(gap_to_target) < 0.2 * float(atr_14)
+    ):
+        return _build_rejected_trade_result(
+            side=None,
+            size=0.0,
+            price=current_price,
+            token_id=None,
+            reason=(
+                "Hard veto skipped LLM call: BTC is too close to the strike "
+                f"for the early-window buffer (gap_to_target={gap_to_target:.3f}; "
+                f"atr_14={float(atr_14):.3f}; time_remaining={time_remaining_seconds}s)"
+            ),
+            snapshot=None,
+        )
+
+    if (
+        time_remaining_seconds < int(getattr(cfg, "late_window_exhaustion_seconds", 45))
+        and rsi_9 is not None
+        and gap_to_target > 0
+        and rsi_9 > float(getattr(cfg, "late_window_up_exhaustion_rsi", 80.0))
+    ):
+        return _build_rejected_trade_result(
+            side=None,
+            size=0.0,
+            price=current_price,
+            token_id=None,
+            reason=(
+                "Hard veto skipped LLM call: late-window UP exhaustion risk "
+                f"(gap_to_target={gap_to_target:.3f}; rsi_9={float(rsi_9):.3f}; "
+                f"time_remaining={time_remaining_seconds}s)"
+            ),
+            snapshot=None,
+        )
+
+    if (
+        time_remaining_seconds < int(getattr(cfg, "late_window_exhaustion_seconds", 45))
+        and rsi_9 is not None
+        and gap_to_target < 0
+        and rsi_9 < float(getattr(cfg, "late_window_down_exhaustion_rsi", 20.0))
+    ):
+        return _build_rejected_trade_result(
+            side=None,
+            size=0.0,
+            price=current_price,
+            token_id=None,
+            reason=(
+                "Hard veto skipped LLM call: late-window DOWN exhaustion risk "
+                f"(gap_to_target={gap_to_target:.3f}; rsi_9={float(rsi_9):.3f}; "
+                f"time_remaining={time_remaining_seconds}s)"
+            ),
+            snapshot=None,
+        )
+
+    if (
+        time_remaining_seconds < int(getattr(cfg, "final_window_min_strike_gap_seconds", 30))
+        and abs(gap_to_target) < float(getattr(cfg, "final_window_min_strike_gap_usd", 5.0))
+    ):
+        return _build_rejected_trade_result(
+            side=None,
+            size=0.0,
+            price=current_price,
+            token_id=None,
+            reason=(
+                "Hard veto skipped LLM call: final-window strike buffer rejected the setup "
+                f"(gap_to_target={gap_to_target:.3f}; threshold={float(getattr(cfg, 'final_window_min_strike_gap_usd', 5.0)):.3f}; "
+                f"time_remaining={time_remaining_seconds}s)"
+            ),
+            snapshot=None,
+        )
+
+    return None
 
 
 def _get_book_depth_at_fill(snapshot: Optional[TokenQuoteSnapshot]) -> Optional[float]:
@@ -692,6 +802,28 @@ def _get_book_depth_at_fill(snapshot: Optional[TokenQuoteSnapshot]) -> Optional[
         except (TypeError, ValueError):
             continue
     return None
+
+
+def _get_order_book_pressure(snapshot: Optional[TokenQuoteSnapshot]) -> Optional[float]:
+    if snapshot is None:
+        return None
+    try:
+        value = getattr(snapshot, "order_book_pressure", None)
+        if value is None:
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _compute_fill_duration_ms_from_order(order) -> Optional[int]:
+    placed_at = getattr(order, "placed_at", None)
+    if placed_at is None:
+        return None
+    if placed_at.tzinfo is None:
+        placed_at = placed_at.replace(tzinfo=timezone.utc)
+    now = datetime.now(timezone.utc)
+    return max(int(round((now - placed_at).total_seconds() * 1000)), 0)
 
 
 def _compute_realized_slippage_bps(
@@ -989,6 +1121,7 @@ def refresh_live_order_fill_status(order) -> bool:
         getattr(order, "quoted_price_at_entry", None),
         actual_fill_price,
     )
+    order.fill_duration_ms = _compute_fill_duration_ms_from_order(order)
     return True
 
 
@@ -1038,7 +1171,9 @@ def retry_unfilled_live_order(order, market: BtcUpDownMarket) -> Optional[TradeE
             actual_fill_price=None,
             realized_slippage_bps=None,
             order_latency_ms=0,
+            fill_duration_ms=None,
             book_depth_at_fill=getattr(order, "book_depth_at_fill", None),
+            order_book_pressure=getattr(order, "order_book_pressure", None),
             shares_requested=getattr(order, "shares_requested", None),
             submission_accepted=True,
             live_order_id=order_id,
@@ -1060,7 +1195,9 @@ def retry_unfilled_live_order(order, market: BtcUpDownMarket) -> Optional[TradeE
             actual_fill_price=None,
             realized_slippage_bps=None,
             order_latency_ms=0,
+            fill_duration_ms=None,
             book_depth_at_fill=_get_book_depth_at_fill(snapshot),
+            order_book_pressure=_get_order_book_pressure(snapshot),
             shares_requested=getattr(order, "shares_requested", None),
             submission_accepted=False,
             live_order_id=None,
@@ -1073,6 +1210,7 @@ def retry_unfilled_live_order(order, market: BtcUpDownMarket) -> Optional[TradeE
     size = _quantize_live_buy_size_for_amount_precision(submission_limit_price, size)
     quoted_price_at_entry = snapshot.buy_quote
     book_depth_at_fill = _get_book_depth_at_fill(snapshot)
+    order_book_pressure = _get_order_book_pressure(snapshot)
     if size <= 0:
         return TradeExecutionResult(
             executed=False,
@@ -1087,7 +1225,9 @@ def retry_unfilled_live_order(order, market: BtcUpDownMarket) -> Optional[TradeE
             actual_fill_price=None,
             realized_slippage_bps=None,
             order_latency_ms=0,
+            fill_duration_ms=None,
             book_depth_at_fill=book_depth_at_fill,
+            order_book_pressure=order_book_pressure,
             shares_requested=size,
             submission_accepted=False,
             live_order_id=None,
@@ -1115,7 +1255,9 @@ def retry_unfilled_live_order(order, market: BtcUpDownMarket) -> Optional[TradeE
             actual_fill_price=None,
             realized_slippage_bps=None,
             order_latency_ms=0,
+            fill_duration_ms=None,
             book_depth_at_fill=book_depth_at_fill,
+            order_book_pressure=order_book_pressure,
             shares_requested=size,
             submission_accepted=False,
             live_order_id=None,
@@ -1160,7 +1302,9 @@ def retry_unfilled_live_order(order, market: BtcUpDownMarket) -> Optional[TradeE
             actual_fill_price=None,
             realized_slippage_bps=None,
             order_latency_ms=order_latency_ms,
+            fill_duration_ms=None,
             book_depth_at_fill=book_depth_at_fill,
+            order_book_pressure=order_book_pressure,
             shares_requested=size,
             submission_accepted=True,
             live_order_id=new_order_id,
@@ -1183,7 +1327,9 @@ def retry_unfilled_live_order(order, market: BtcUpDownMarket) -> Optional[TradeE
         actual_fill_price=actual_fill_price,
         realized_slippage_bps=realized_slippage_bps,
         order_latency_ms=order_latency_ms,
+        fill_duration_ms=order_latency_ms,
         book_depth_at_fill=book_depth_at_fill,
+        order_book_pressure=order_book_pressure,
         shares_requested=size,
         submission_accepted=True,
         live_order_id=new_order_id,
@@ -1485,6 +1631,21 @@ def _validate_trade_candidate(
     if (
         decision.side == "DOWN"
         and rsi_9 is not None
+        and time_remaining_seconds < int(getattr(cfg, "late_window_exhaustion_seconds", 45))
+        and rsi_9 < float(getattr(cfg, "late_window_down_exhaustion_rsi", 20.0))
+    ):
+        return _reject(
+            submission_limit_price,
+            (
+                "Late-window exhaustion veto blocked DOWN trade "
+                f"(rsi_9={rsi_9:.3f}; threshold={float(getattr(cfg, 'late_window_down_exhaustion_rsi', 20.0)):.3f}; "
+                f"time_remaining={time_remaining_seconds}s)"
+            ),
+        )
+
+    if (
+        decision.side == "DOWN"
+        and rsi_9 is not None
         and rsi_9 < float(getattr(cfg, "down_rsi_veto_threshold", 30.0))
     ):
         down_rsi_threshold = float(getattr(cfg, "down_rsi_veto_threshold", 30.0))
@@ -1508,6 +1669,21 @@ def _validate_trade_candidate(
             (
                 "Momentum-trap veto blocked UP trade below the strike "
                 f"(gap_to_target={gap_to_target:.3f}; rsi_9={rsi_9:.3f}; threshold=60.000)"
+            ),
+        )
+
+    if (
+        decision.side == "UP"
+        and rsi_9 is not None
+        and time_remaining_seconds < int(getattr(cfg, "late_window_exhaustion_seconds", 45))
+        and rsi_9 > float(getattr(cfg, "late_window_up_exhaustion_rsi", 80.0))
+    ):
+        return _reject(
+            submission_limit_price,
+            (
+                "Late-window exhaustion veto blocked UP trade "
+                f"(rsi_9={rsi_9:.3f}; threshold={float(getattr(cfg, 'late_window_up_exhaustion_rsi', 80.0)):.3f}; "
+                f"time_remaining={time_remaining_seconds}s)"
             ),
         )
 
@@ -1636,6 +1812,21 @@ def _validate_trade_candidate(
     )
     if (
         gap_to_target is not None
+        and time_remaining_seconds < int(getattr(cfg, "final_window_min_strike_gap_seconds", 30))
+        and abs(gap_to_target) < float(getattr(cfg, "final_window_min_strike_gap_usd", 5.0))
+    ):
+        return _reject(
+            submission_limit_price,
+            (
+                "Final-window safety cushion veto blocked near-strike trade "
+                f"(gap={gap_to_target:.3f}; "
+                f"min_gap={float(getattr(cfg, 'final_window_min_strike_gap_usd', 5.0)):.3f}; "
+                f"time_remaining={time_remaining_seconds}s)"
+            ),
+        )
+
+    if (
+        gap_to_target is not None
         and strike_buffer is not None
         and abs(gap_to_target) < strike_buffer
     ):
@@ -1736,6 +1927,7 @@ def _execute_paper_trade(
         actual_fill_price,
     )
     book_depth_at_fill = _get_book_depth_at_fill(snapshot)
+    order_book_pressure = _get_order_book_pressure(snapshot)
     order_notional = _get_order_notional(size, submission_limit_price)
     if size <= 0 or order_notional <= 0:
         return TradeExecutionResult(
@@ -1754,7 +1946,9 @@ def _execute_paper_trade(
             actual_fill_price=actual_fill_price,
             realized_slippage_bps=realized_slippage_bps,
             order_latency_ms=0,
+            fill_duration_ms=0,
             book_depth_at_fill=book_depth_at_fill,
+            order_book_pressure=order_book_pressure,
             shares_requested=size,
         )
 
@@ -1781,7 +1975,9 @@ def _execute_paper_trade(
         actual_fill_price=actual_fill_price,
         realized_slippage_bps=realized_slippage_bps,
         order_latency_ms=0,
+        fill_duration_ms=0,
         book_depth_at_fill=book_depth_at_fill,
+        order_book_pressure=order_book_pressure,
         shares_requested=size,
     )
 
@@ -1849,7 +2045,9 @@ def _get_rejection_intent_context(
         "actual_fill_price": None,
         "realized_slippage_bps": None,
         "order_latency_ms": 0,
+        "fill_duration_ms": None,
         "book_depth_at_fill": book_depth_at_fill,
+        "order_book_pressure": _get_order_book_pressure(snapshot),
         "shares_requested": shares_requested,
     }
 
@@ -1937,6 +2135,7 @@ def _execute_live_trade(
     size = _quantize_live_buy_size_for_amount_precision(submission_limit_price, size)
     quoted_price_at_entry = snapshot.buy_quote
     book_depth_at_fill = _get_book_depth_at_fill(snapshot)
+    order_book_pressure = _get_order_book_pressure(snapshot)
     min_order_size = _scale_live_size_for_min_notional(
         0.0,
         submission_limit_price,
@@ -1957,7 +2156,9 @@ def _execute_live_trade(
             execution_snapshot=snapshot,
             quoted_price_at_entry=quoted_price_at_entry,
             order_latency_ms=0,
+            fill_duration_ms=None,
             book_depth_at_fill=book_depth_at_fill,
+            order_book_pressure=order_book_pressure,
             shares_requested=size,
         )
     if size < min_order_size:
@@ -1976,7 +2177,9 @@ def _execute_live_trade(
             execution_snapshot=snapshot,
             quoted_price_at_entry=quoted_price_at_entry,
             order_latency_ms=0,
+            fill_duration_ms=None,
             book_depth_at_fill=book_depth_at_fill,
+            order_book_pressure=order_book_pressure,
             shares_requested=size,
         )
     client = Polymarket()
@@ -2052,7 +2255,9 @@ def _execute_live_trade(
                     execution_snapshot=snapshot,
                     quoted_price_at_entry=quoted_price_at_entry,
                     order_latency_ms=0,
+                    fill_duration_ms=None,
                     book_depth_at_fill=book_depth_at_fill,
+                    order_book_pressure=order_book_pressure,
                     shares_requested=size,
                 )
         else:
@@ -2082,7 +2287,9 @@ def _execute_live_trade(
             actual_fill_price=None,
             realized_slippage_bps=None,
             order_latency_ms=order_latency_ms,
+            fill_duration_ms=None,
             book_depth_at_fill=book_depth_at_fill,
+            order_book_pressure=order_book_pressure,
             shares_requested=size,
             submission_accepted=True,
             live_order_id=order_id,
@@ -2121,7 +2328,9 @@ def _execute_live_trade(
         actual_fill_price=actual_fill_price,
         realized_slippage_bps=realized_slippage_bps,
         order_latency_ms=order_latency_ms,
+        fill_duration_ms=order_latency_ms,
         book_depth_at_fill=book_depth_at_fill,
+        order_book_pressure=order_book_pressure,
         shares_requested=size,
         submission_accepted=True,
         live_order_id=order_id,

@@ -25,7 +25,6 @@ from custom.btc_agent.main import (
     append_failed_order_attempt,
     append_failed_live_order,
     append_pending_period_tick_analysis,
-    clear_price_to_beat_debug_files,
     finalize_current_period_logs_on_exit,
     finalize_pending_period_log,
     enforce_session_loss_trade_limit,
@@ -37,13 +36,287 @@ from custom.btc_agent.main import (
     print_llm_decision,
     resolve_price_to_beat_with_retries,
     wait_for_next_tick_or_quit,
-    write_price_to_beat_debug_file,
     print_active_orders,
 )
 from custom.btc_agent.paper_state import ActivePaperOrder
 
 
 class TestBtcMain(unittest.TestCase):
+    def test_run_once_prints_debug_paper_trading_advisory_each_loop(self):
+        cfg = SimpleNamespace(
+            debug=True,
+            use_recommended_limit=True,
+            max_losses_per_run=99,
+        )
+
+        with patch("custom.btc_agent.main.get_trading_config", return_value=cfg), patch(
+            "custom.btc_agent.main.enforce_session_loss_trade_limit"
+        ), patch(
+            "custom.btc_agent.main.find_current_btc_updown_market",
+            return_value=None,
+        ), patch(
+            "custom.btc_agent.main.print_account_snapshot"
+        ), patch(
+            "sys.stdout",
+            new_callable=io.StringIO,
+        ) as stdout:
+            run_once()
+
+        self.assertIn(
+            "ADVISORY: BTC_AGENT_DEBUG=true forces paper trading; live trades are disabled for this loop.",
+            stdout.getvalue(),
+        )
+
+    def test_run_once_skips_llm_when_pre_llm_hard_veto_triggers(self):
+        cfg = SimpleNamespace(
+            debug=False,
+            use_recommended_limit=True,
+            max_trades_per_period=1,
+            max_losses_per_run=99,
+            paper_trading=True,
+            minimum_wallet_balance=0.0,
+        )
+        market = SimpleNamespace(
+            slug="btc-updown-5m-1777513500",
+            title="Bitcoin Up or Down",
+            question="Bitcoin Up or Down?",
+            event_id="event-1",
+            market_id="market-1",
+            up_token_id="up-token",
+            down_token_id="down-token",
+            settlement_threshold=80000.0,
+            start_ts=1777513500,
+            end_ts=1777513800,
+            up_market_probability=0.5,
+            down_market_probability=0.5,
+        )
+        features = SimpleNamespace(
+            as_of=datetime.fromtimestamp(1777513510, tz=timezone.utc),
+            price_usd=80001.0,
+            window_open_price=79999.0,
+            trailing_5m_open_price=79995.0,
+            delta_pct_from_window_open=0.0001,
+            delta_pct_from_trailing_5m_open=0.0002,
+            delta_from_previous_tick=1.0,
+            rsi_9=85.0,
+            rsi_14=78.0,
+            rsi_speed_divergence=7.0,
+            momentum_1m=2.0,
+            momentum_5m=4.0,
+            velocity_15s=1.0,
+            velocity_30s=1.0,
+            momentum_acceleration=0.0,
+            ema_9=80000.0,
+            ema_21=79998.0,
+            ema_alignment=True,
+            ema_cross_direction="bullish",
+            adx_14=40.0,
+            atr_14=10.0,
+            volatility_5m=20.0,
+            consecutive_flat_ticks=0,
+            consecutive_directional_ticks=3,
+            last_10_ticks_direction="UUU",
+            retained_sample_count=25,
+            window_sample_count=12,
+            trailing_5m_sample_count=21,
+            live_sample_count=5,
+        )
+
+        with ExitStack() as stack:
+            stack.enter_context(patch("custom.btc_agent.main.get_trading_config", return_value=cfg))
+            stack.enter_context(
+                patch(
+                    "custom.btc_agent.main.find_current_btc_updown_market",
+                    return_value=market,
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "custom.btc_agent.main.build_btc_features",
+                    return_value=features,
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "custom.btc_agent.main.get_feature_readiness",
+                    return_value=(True, None),
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "custom.btc_agent.main.get_token_quote_snapshot",
+                    return_value=SimpleNamespace(
+                        buy_quote=0.5,
+                        top_level_book_imbalance=0.5,
+                        imbalance_pressure=0.0,
+                        ok_to_submit=True,
+                        submit_reason="ok",
+                    ),
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "custom.btc_agent.main.evaluate_pre_llm_hard_veto",
+                    return_value=SimpleNamespace(reason="Hard veto skipped LLM call"),
+                )
+            )
+            mock_decide_trade = stack.enter_context(
+                patch("custom.btc_agent.main.decide_trade")
+            )
+            stack.enter_context(
+                patch(
+                    "custom.btc_agent.main.maybe_execute_trade",
+                    return_value=SimpleNamespace(
+                        executed=False,
+                        side=None,
+                        size=0.0,
+                        price=0.0,
+                        token_id=None,
+                        reason="NO_TRADE from hard veto",
+                        submission_accepted=False,
+                        execution_snapshot=None,
+                    ),
+                )
+            )
+            stack.enter_context(patch("custom.btc_agent.main.enforce_session_loss_trade_limit"))
+            stack.enter_context(patch("custom.btc_agent.main.print_account_snapshot"))
+            stack.enter_context(patch("custom.btc_agent.main.print_llm_skip_reason"))
+            stack.enter_context(patch("custom.btc_agent.main.print_market_context"))
+            stack.enter_context(patch("custom.btc_agent.main.print_features"))
+            stack.enter_context(patch("custom.btc_agent.main.print_trade_execution_result"))
+            stack.enter_context(patch("custom.btc_agent.main.update_active_order_logs"))
+            stack.enter_context(
+                patch(
+                    "custom.btc_agent.main.refresh_active_live_order_fills",
+                    return_value=[],
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "custom.btc_agent.main.maintain_unfilled_live_orders",
+                    return_value=[],
+                )
+            )
+            stack.enter_context(patch("custom.btc_agent.main.print_quote_snapshot_from_snapshot"))
+            stack.enter_context(patch("custom.btc_agent.main.append_pending_period_tick_analysis"))
+            stack.enter_context(patch("custom.btc_agent.main.record_executed_trade"))
+            stack.enter_context(patch("custom.btc_agent.main.promote_pending_period_log_to_completed"))
+            stack.enter_context(
+                patch(
+                    "custom.btc_agent.main.get_active_orders",
+                    return_value=[],
+                )
+            )
+            stack.enter_context(patch("custom.btc_agent.main.sync_period_state"))
+            stack.enter_context(
+                patch(
+                    "custom.btc_agent.main.get_state",
+                    return_value=SimpleNamespace(trades_executed=0),
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "custom.btc_agent.main.get_trade_cooldown_remaining",
+                    return_value=0,
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "custom.btc_agent.main.consume_trade_cooldown_loop",
+                    return_value=0,
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "custom.btc_agent.main.wait_for_next_tick_or_quit",
+                    return_value=False,
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "custom.btc_agent.main.get_btc_updown_market_by_slug",
+                    return_value=market,
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "custom.btc_agent.main.resolve_price_to_beat_with_retries",
+                    return_value=market,
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "custom.btc_agent.main.fetch_btc_spot_price",
+                    return_value=80001.0,
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "custom.btc_agent.main.describe_proxy_configuration",
+                    return_value="disabled",
+                )
+            )
+            stack.enter_context(patch("custom.btc_agent.main.print_ip_location"))
+            stack.enter_context(
+                patch(
+                    "custom.btc_agent.main.check_current_public_ip_location",
+                    return_value=("1.2.3.4", "Indonesia", True),
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "custom.btc_agent.main.test_llm_connection",
+                    return_value=(True, "ok"),
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "custom.btc_agent.main.get_account_balance_snapshot",
+                    return_value=SimpleNamespace(
+                        signer_address="0x1",
+                        balance_address="0x1",
+                        proxy_address=None,
+                        cash_balance=100.0,
+                        legacy_usdc_balance=0.0,
+                        portfolio_balance=0.0,
+                        total_account_value=100.0,
+                        error=None,
+                    ),
+                )
+            )
+            stack.enter_context(patch("sys.stdout", new_callable=io.StringIO))
+            run_once()
+
+        mock_decide_trade.assert_not_called()
+
+    def test_run_once_response_debug_uses_predefined_probe_without_live_market_lookup(self):
+        cfg = SimpleNamespace(
+            debug=False,
+            use_recommended_limit=True,
+            max_losses_per_run=99,
+            paper_trading=True,
+            minimum_wallet_balance=0.0,
+        )
+
+        with patch("custom.btc_agent.main.get_trading_config", return_value=cfg), patch(
+            "custom.btc_agent.main.find_current_btc_updown_market",
+        ) as mock_find_market, patch(
+            "custom.btc_agent.main.decide_trade",
+            return_value=SimpleNamespace(
+                side="NO_TRADE",
+                confidence=0.0,
+                max_price_to_pay=0.0,
+                reason="debug probe",
+            ),
+        ) as mock_decide_trade, patch(
+            "custom.btc_agent.main.print_llm_decision"
+        ) as mock_print_llm_decision:
+            run_once(response_debug=True)
+
+        mock_find_market.assert_not_called()
+        mock_decide_trade.assert_called_once()
+        mock_print_llm_decision.assert_called_once()
+
     def test_print_active_orders_shows_unfilled_for_pending_live_order(self):
         order = ActivePaperOrder(
             market_slug="btc-updown-5m-1770000000",
@@ -96,11 +369,7 @@ class TestBtcMain(unittest.TestCase):
 
     @classmethod
     def _cleanup_test_artifacts(cls):
-        paths = [
-            "/appl/agents/logs/priceToBeatDebug.txt",
-            "/appl/agents/logs/priceToBeatDebugPg2.txt",
-            "/appl/agents/logs/priceToBeatDebugPg3.txt",
-        ]
+        paths = []
         for timestamp in cls.TEST_TIMESTAMPS:
             paths.extend(glob.glob(f"/appl/agents/completed_orders/*{timestamp}*.txt"))
 
@@ -670,6 +939,9 @@ class TestBtcMain(unittest.TestCase):
             token_id="up-token",
             target_btc_price=77763.01,
             entry_btc_price=77760.00,
+            actual_fill_price=0.45,
+            fill_duration_ms=250,
+            order_book_pressure=1.23,
         )
         features = SimpleNamespace(
             price_usd=77959.60,
@@ -728,6 +1000,9 @@ class TestBtcMain(unittest.TestCase):
             content = order_file.read()
 
         self.assertIn("phase=ACTIVE", content)
+        self.assertIn("exit_price_delta=", content)
+        self.assertIn("fill_duration_ms=250", content)
+        self.assertIn("order_book_pressure=1.230", content)
         self.assertIn("feature_btc_price=77959.600", content)
         self.assertIn("market_time_remaining_mmss=", content)
         self.assertIn("feature_momentum_1m=-12.5", content)
@@ -740,6 +1015,7 @@ class TestBtcMain(unittest.TestCase):
         self.assertIn("feature_consecutive_directional_ticks=4", content)
         self.assertIn("feature_last_10_ticks_direction=", content)
         self.assertIn("active_up_buy_quote=0.250", content)
+        self.assertIn("active_up_order_book_pressure=None", content)
         self.assertIn("active_down_buy_quote=0.700", content)
         self.assertIn("\"liquidity_regime\"", content)
         self.assertIn("\"next_slug_proximity\"", content)
@@ -947,63 +1223,6 @@ class TestBtcMain(unittest.TestCase):
         ) as completed_file:
             self.assertEqual(completed_file.read(), "pre-order analysis\n")
 
-    def test_write_price_to_beat_debug_file_writes_report(self):
-        with patch(
-            "custom.btc_agent.main.build_price_to_beat_debug_reports",
-            return_value=["page debug report\n", "next data debug report\n", "third page debug report\n"],
-        ), patch(
-            "custom.btc_agent.main.os.getcwd",
-            return_value="/appl/agents",
-        ), patch(
-            "custom.btc_agent.main._DEBUG_WRITTEN_SLUGS",
-            set(),
-        ):
-            write_price_to_beat_debug_file("btc-updown-5m-1776983100")
-
-        with open("/appl/agents/logs/priceToBeatDebug.txt", encoding="utf-8") as debug_file:
-            self.assertEqual(debug_file.read(), "page debug report\n")
-        with open("/appl/agents/logs/priceToBeatDebugPg2.txt", encoding="utf-8") as debug_file:
-            self.assertEqual(debug_file.read(), "next data debug report\n")
-        with open("/appl/agents/logs/priceToBeatDebugPg3.txt", encoding="utf-8") as debug_file:
-            self.assertEqual(debug_file.read(), "third page debug report\n")
-
-    def test_write_price_to_beat_debug_file_writes_only_once_per_slug_without_force(self):
-        with patch(
-            "custom.btc_agent.main.build_price_to_beat_debug_reports",
-            return_value=["page debug report\n", "next data debug report\n"],
-        ) as mock_build_reports, patch(
-            "custom.btc_agent.main.os.getcwd",
-            return_value="/appl/agents",
-        ), patch(
-            "custom.btc_agent.main._DEBUG_WRITTEN_SLUGS",
-            set(),
-        ):
-            write_price_to_beat_debug_file("btc-updown-5m-1776983100")
-            write_price_to_beat_debug_file("btc-updown-5m-1776983100")
-
-        mock_build_reports.assert_called_once_with("btc-updown-5m-1776983100")
-
-    def test_clear_price_to_beat_debug_files_removes_only_price_to_beat_logs(self):
-        with patch(
-            "custom.btc_agent.main.os.getcwd",
-            return_value="/appl/agents",
-        ), patch(
-            "custom.btc_agent.main.os.listdir",
-            return_value=[
-                "priceToBeatDebug.txt",
-                "priceToBeatDebugPg2.txt",
-                "unrelated.log",
-            ],
-        ), patch(
-            "custom.btc_agent.main.os.remove",
-        ) as mock_remove:
-            clear_price_to_beat_debug_files()
-
-        removed_paths = [call.args[0] for call in mock_remove.call_args_list]
-        self.assertIn("/appl/agents/logs/priceToBeatDebug.txt", removed_paths)
-        self.assertIn("/appl/agents/logs/priceToBeatDebugPg2.txt", removed_paths)
-        self.assertNotIn("/appl/agents/logs/unrelated.log", removed_paths)
-
     def test_resolve_price_to_beat_with_retries_refreshes_same_slug(self):
         initial_market = SimpleNamespace(slug="btc-updown-5m-1777056000", settlement_threshold=None)
         refreshed_market = SimpleNamespace(
@@ -1022,39 +1241,84 @@ class TestBtcMain(unittest.TestCase):
         self.assertEqual(market.settlement_threshold, 77560.75)
         mock_get_by_slug.assert_called_once_with("btc-updown-5m-1777056000")
 
-    def test_resolve_price_to_beat_with_retries_skips_retries_when_debug_price_to_beat_enabled(self):
+    def test_resolve_price_to_beat_with_retries_still_retries_in_debug_mode(self):
         initial_market = SimpleNamespace(slug="btc-updown-5m-1777056000", settlement_threshold=None)
+        refreshed_market = SimpleNamespace(
+            slug="btc-updown-5m-1777056000",
+            settlement_threshold=77560.75,
+        )
 
         with patch(
-            "custom.btc_agent.main.get_trading_config",
-            return_value=SimpleNamespace(debug_price_to_beat=True),
-        ), patch(
             "custom.btc_agent.main.get_btc_updown_market_by_slug",
+            return_value=refreshed_market,
         ) as mock_get_by_slug, patch(
             "custom.btc_agent.main.time.sleep",
         ):
             market = resolve_price_to_beat_with_retries(initial_market, retry_attempts=2, retry_delay_seconds=1)
 
-        self.assertIsNone(market.settlement_threshold)
-        mock_get_by_slug.assert_not_called()
+        self.assertEqual(market.settlement_threshold, 77560.75)
+        mock_get_by_slug.assert_called_once_with("btc-updown-5m-1777056000")
 
-    def test_run_once_writes_price_to_beat_debug_file_when_debug_enabled(self):
+    def test_run_once_debug_bypasses_feature_warmup(self):
         market = SimpleNamespace(
             slug="btc-updown-5m-1777056000",
             title="Bitcoin Up or Down",
+            question="Will BTC finish above the strike?",
+            event_id="event-1",
+            market_id="market-1",
             settlement_threshold=77560.75,
             up_token_id="up-token",
             down_token_id="down-token",
+            start_ts=1777056000,
         )
-        state = SimpleNamespace(trades_executed=1)
+        state = SimpleNamespace(trades_executed=0)
+        features = SimpleNamespace(
+            price_usd=77560.75,
+            as_of=datetime.now(timezone.utc),
+            delta_from_previous_tick=1.0,
+            momentum_1m=1.0,
+            momentum_5m=2.0,
+            velocity_15s=0.5,
+            velocity_30s=1.0,
+            momentum_acceleration=-0.5,
+            volatility_5m=3.0,
+            consecutive_flat_ticks=0,
+            consecutive_directional_ticks=2,
+            rsi_9=55.0,
+            rsi_14=50.0,
+            rsi_speed_divergence=5.0,
+            ema_9=77561.0,
+            ema_21=77559.0,
+            ema_alignment=True,
+            ema_cross_direction="bullish",
+            adx_14=35.0,
+            atr_14=4.0,
+            last_10_ticks_direction="UUDD",
+            window_open_price=77550.0,
+            trailing_5m_open_price=77540.0,
+            delta_pct_from_window_open=0.001,
+            delta_pct_from_trailing_5m_open=0.002,
+            retained_sample_count=21,
+            window_sample_count=5,
+            trailing_5m_sample_count=21,
+            live_sample_count=2,
+        )
+        no_trade_decision = SimpleNamespace(
+            side="NO_TRADE",
+            confidence=0.4,
+            max_price_to_pay=1.0,
+            reason="debug bypass test",
+            raw_response_text='{"decision":"NO_TRADE"}',
+            prompt_text=None,
+        )
 
         with patch(
             "custom.btc_agent.main.get_trading_config",
             return_value=SimpleNamespace(
                 debug=True,
-                debug_price_to_beat=False,
                 max_trades_per_period=1,
                 minimum_wallet_balance=0.0,
+                use_recommended_limit=False,
             ),
         ), patch(
             "custom.btc_agent.main.find_current_btc_updown_market",
@@ -1069,6 +1333,91 @@ class TestBtcMain(unittest.TestCase):
             "custom.btc_agent.main.resolve_price_to_beat_with_retries",
             return_value=market,
         ), patch(
+            "custom.btc_agent.main.build_btc_features",
+            return_value=features,
+        ), patch(
+            "custom.btc_agent.main.get_feature_readiness",
+            return_value=(False, "not ready"),
+        ), patch(
+            "custom.btc_agent.main.decide_trade",
+            return_value=no_trade_decision,
+        ), patch(
+            "custom.btc_agent.main.maybe_execute_trade",
+            return_value=SimpleNamespace(
+                executed=False,
+                side=None,
+                size=0.0,
+                price=0.0,
+                token_id=None,
+                reason="NO_TRADE from LLM: debug bypass test",
+                execution_snapshot=None,
+            ),
+        ), patch(
+            "custom.btc_agent.main.get_token_quote_snapshot",
+            return_value=SimpleNamespace(
+                buy_quote=0.5,
+                ok_to_submit=True,
+                token_id="token",
+                top_level_book_imbalance=0.5,
+                imbalance_pressure=0.0,
+                spread=0.01,
+                spread_bps=100.0,
+                best_bid=0.49,
+                best_ask=0.50,
+                bid_size=10.0,
+                ask_size=10.0,
+                order_book_pressure=1.0,
+                reference_price=0.5,
+                target_limit_price=0.5,
+                recommended_limit_price=0.5,
+                reference_price_reason="test",
+                ok_to_submit_reason="test",
+            ),
+        ), patch(
+            "custom.btc_agent.main.print_account_snapshot_from_snapshot",
+        ), patch(
+            "custom.btc_agent.main.get_account_balance_snapshot",
+            return_value=SimpleNamespace(cash_balance=100.0),
+        ), patch(
+            "custom.btc_agent.main.enforce_minimum_wallet_balance",
+        ), patch(
+            "custom.btc_agent.main.append_pending_period_tick_analysis",
+        ):
+            run_once()
+
+    def test_run_once_no_longer_uses_price_to_beat_debug_file_hooks(self):
+        market = SimpleNamespace(
+            slug="btc-updown-5m-1777056000",
+            title="Bitcoin Up or Down",
+            settlement_threshold=77560.75,
+            up_token_id="up-token",
+            down_token_id="down-token",
+        )
+        state = SimpleNamespace(trades_executed=1)
+
+        with patch(
+            "custom.btc_agent.main.get_trading_config",
+            return_value=SimpleNamespace(
+                debug=True,
+                max_trades_per_period=1,
+                minimum_wallet_balance=0.0,
+                use_recommended_limit=True,
+            ),
+        ), patch(
+            "custom.btc_agent.main.find_current_btc_updown_market",
+            return_value=market,
+        ), patch(
+            "custom.btc_agent.main.sync_period_state",
+            return_value=True,
+        ), patch(
+            "custom.btc_agent.main.get_state",
+            return_value=state,
+        ), patch(
+            "custom.btc_agent.main.resolve_price_to_beat_with_retries",
+            return_value=market,
+        ), patch(
+            "custom.btc_agent.main.clear_price_to_beat_debug_files",
+        ) as mock_clear_debug, patch(
             "custom.btc_agent.main.write_price_to_beat_debug_file",
         ) as mock_write_debug, patch(
             "custom.btc_agent.main.fetch_btc_spot_price",
@@ -1085,61 +1434,8 @@ class TestBtcMain(unittest.TestCase):
         ):
             run_once()
 
-        mock_write_debug.assert_called_once_with("btc-updown-5m-1777056000")
-
-    def test_run_once_clears_price_to_beat_debug_files_on_new_slug(self):
-        market = SimpleNamespace(
-            slug="btc-updown-5m-1777056000",
-            title="Bitcoin Up or Down",
-            settlement_threshold=77560.75,
-            up_token_id="up-token",
-            down_token_id="down-token",
-        )
-        state = SimpleNamespace(trades_executed=1)
-
-        with patch(
-            "custom.btc_agent.main.get_trading_config",
-            return_value=SimpleNamespace(
-                debug=True,
-                debug_price_to_beat=False,
-                max_trades_per_period=1,
-                minimum_wallet_balance=0.0,
-            ),
-        ), patch(
-            "custom.btc_agent.main.find_current_btc_updown_market",
-            return_value=market,
-        ), patch(
-            "custom.btc_agent.main.sync_period_state",
-            return_value=True,
-        ), patch(
-            "custom.btc_agent.main.get_state",
-            return_value=state,
-        ), patch(
-            "custom.btc_agent.main.resolve_price_to_beat_with_retries",
-            return_value=market,
-        ), patch(
-            "custom.btc_agent.main.write_price_to_beat_debug_file",
-        ), patch(
-            "custom.btc_agent.main.clear_price_to_beat_debug_files",
-        ) as mock_clear_debug, patch(
-            "custom.btc_agent.main.fetch_btc_spot_price",
-            return_value=77560.75,
-        ), patch(
-            "custom.btc_agent.main.print_active_orders",
-        ), patch(
-            "custom.btc_agent.main.print_account_snapshot_from_snapshot",
-        ), patch(
-            "custom.btc_agent.main.get_account_balance_snapshot",
-            return_value=SimpleNamespace(cash_balance=100.0),
-        ), patch(
-            "custom.btc_agent.main.enforce_minimum_wallet_balance",
-        ), patch(
-            "custom.btc_agent.main._DEBUG_WRITTEN_SLUGS",
-            {"old-slug"},
-        ):
-            run_once()
-
-        mock_clear_debug.assert_called_once_with()
+        mock_clear_debug.assert_not_called()
+        mock_write_debug.assert_not_called()
 
     def test_run_once_finalizes_no_trade_previous_period_with_directional_price(self):
         market = SimpleNamespace(
@@ -1159,7 +1455,6 @@ class TestBtcMain(unittest.TestCase):
             "custom.btc_agent.main.get_trading_config",
             return_value=SimpleNamespace(
                 debug=False,
-                debug_price_to_beat=False,
                 max_trades_per_period=1,
                 minimum_wallet_balance=0.0,
                 llm_connection_debug=False,
@@ -1188,8 +1483,6 @@ class TestBtcMain(unittest.TestCase):
         ), patch(
             "custom.btc_agent.main.get_feature_readiness",
             return_value=(False, "not ready"),
-        ), patch(
-            "custom.btc_agent.main.clear_price_to_beat_debug_files",
         ), patch(
             "custom.btc_agent.main.fetch_btc_spot_price",
             return_value=77560.75,
@@ -1411,11 +1704,9 @@ class TestBtcMain(unittest.TestCase):
 
             run_once()
 
-        self.assertEqual(mock_get_token_quote_snapshot.call_count, 3)
+        self.assertEqual(mock_get_token_quote_snapshot.call_count, 2)
         self.assertEqual(mock_get_token_quote_snapshot.call_args_list[0].args, ("up-token",))
         self.assertEqual(mock_get_token_quote_snapshot.call_args_list[1].args, ("down-token",))
-        self.assertEqual(mock_get_token_quote_snapshot.call_args_list[2].args, ("up-token",))
-        self.assertEqual(mock_get_token_quote_snapshot.call_args_list[2].kwargs, {"decision": decision})
         mock_print_quote_snapshot.assert_not_called()
 
     def test_run_once_skips_new_trade_during_post_execution_cooldown(self):
@@ -1699,7 +1990,7 @@ class TestBtcMain(unittest.TestCase):
         self.assertIn("current_btc_price=77710.00", content)
         self.assertIn("outcome_label=win", content)
 
-    def test_run_once_finalizes_previous_not_filled_orders_with_neutral_unfilled_filename(self):
+    def test_run_once_finalizes_previous_not_filled_orders_with_side_specific_unfilled_filename(self):
         previous_order = ActivePaperOrder(
             market_slug="btc-updown-5m-1777513500",
             market_title="Prior Period",
@@ -1767,11 +2058,11 @@ class TestBtcMain(unittest.TestCase):
 
         self.assertTrue(
             os.path.exists(
-                "/appl/agents/completed_orders/completed_order_unfilled_1777513500.txt"
+                "/appl/agents/completed_orders/completed_order_unfilled_down_1777513500.txt"
             )
         )
         with open(
-            "/appl/agents/completed_orders/completed_order_unfilled_1777513500.txt",
+            "/appl/agents/completed_orders/completed_order_unfilled_down_1777513500.txt",
             encoding="utf-8",
         ) as order_file:
             content = order_file.read()
@@ -1920,7 +2211,7 @@ class TestBtcMain(unittest.TestCase):
         )
         self.assertFalse(
             os.path.exists(
-                "/appl/agents/completed_orders/completed_order_unfilled_1778208300.txt"
+                "/appl/agents/completed_orders/completed_order_unfilled_up_1778208300.txt"
             )
         )
 
@@ -2149,6 +2440,37 @@ class TestBtcMain(unittest.TestCase):
         self.assertEqual(exc.exception.code, 1)
         mock_enforce_allowed_ip_location.assert_not_called()
 
+    def test_main_llm_response_debug_runs_one_live_tick_and_exits_after_startup_probe(self):
+        with patch(
+            "custom.btc_agent.main.get_trading_config",
+            return_value=SimpleNamespace(
+                debug=False,
+                paper_trading=True,
+                llm_connection_debug=False,
+                llm_response_debug=True,
+            ),
+        ), patch(
+            "custom.btc_agent.main.describe_proxy_configuration",
+            return_value="disabled via USE_PROXY=false",
+        ), patch(
+            "custom.btc_agent.main.test_llm_connection",
+            return_value=(True, "LLM connection test succeeded (gemini/gemini-3.1-flash-lite-preview)"),
+        ) as mock_test_llm_connection, patch(
+            "custom.btc_agent.main.enforce_allowed_ip_location",
+        ) as mock_enforce_allowed_ip_location, patch(
+            "custom.btc_agent.main.run_once",
+        ) as mock_run_once, patch(
+            "builtins.print",
+        ) as mock_print:
+            main()
+
+        printed_lines = [" ".join(str(arg) for arg in call.args) for call in mock_print.call_args_list]
+        self.assertTrue(any("LLM response debug mode enabled." in line for line in printed_lines))
+        self.assertTrue(any("LLM response debug run complete. Exiting BTC agent." in line for line in printed_lines))
+        mock_test_llm_connection.assert_called_once()
+        mock_enforce_allowed_ip_location.assert_not_called()
+        mock_run_once.assert_called_once_with(response_debug=True)
+
     def test_main_exits_cleanly_when_quit_requested_during_sleep(self):
         fake_monitor = SimpleNamespace(poll_quit_requested=lambda: True)
 
@@ -2164,6 +2486,9 @@ class TestBtcMain(unittest.TestCase):
             return_value="disabled via USE_PROXY=false",
         ), patch(
             "custom.btc_agent.main.enforce_allowed_ip_location",
+        ), patch(
+            "custom.btc_agent.main.test_llm_connection",
+            return_value=(True, "LLM connection test succeeded (openai/gpt-4.1-mini)"),
         ), patch(
             "custom.btc_agent.main.get_account_balance_snapshot",
             return_value=SimpleNamespace(cash_balance=10.0),
@@ -2184,6 +2509,79 @@ class TestBtcMain(unittest.TestCase):
         self.assertTrue(any("Press q to quit." in line for line in printed_lines))
         self.assertTrue(any("Quit requested via keyboard. Exiting BTC agent." in line for line in printed_lines))
         mock_run_once.assert_not_called()
+
+    def test_main_runs_llm_startup_connectivity_check_after_geolocation(self):
+        fake_monitor = SimpleNamespace(poll_quit_requested=lambda: True)
+
+        with patch(
+            "custom.btc_agent.main.get_trading_config",
+            return_value=SimpleNamespace(
+                debug=False,
+                paper_trading=True,
+                llm_connection_debug=False,
+            ),
+        ), patch(
+            "custom.btc_agent.main.describe_proxy_configuration",
+            return_value="disabled via USE_PROXY=false",
+        ), patch(
+            "custom.btc_agent.main.enforce_allowed_ip_location",
+        ) as mock_geo, patch(
+            "custom.btc_agent.main.test_llm_connection",
+            return_value=(True, "LLM connection test succeeded (gemini/gemini-3.1-flash-lite-preview)"),
+        ) as mock_test_llm_connection, patch(
+            "custom.btc_agent.main.get_account_balance_snapshot",
+            return_value=SimpleNamespace(cash_balance=10.0),
+        ) as mock_balance, patch(
+            "custom.btc_agent.main.enforce_minimum_wallet_balance",
+        ), patch(
+            "custom.btc_agent.main.run_once",
+        ) as mock_run_once, patch(
+            "custom.btc_agent.main.QuitKeyMonitor",
+        ) as mock_quit_key_monitor, patch(
+            "builtins.print",
+        ) as mock_print:
+            mock_quit_key_monitor.return_value.__enter__.return_value = fake_monitor
+            mock_quit_key_monitor.return_value.__exit__.return_value = None
+            main()
+
+        printed_lines = [" ".join(str(arg) for arg in call.args) for call in mock_print.call_args_list]
+        self.assertTrue(any("Testing LLM connectivity before startup warmup..." in line for line in printed_lines))
+        self.assertTrue(any("LLM startup connectivity test:" in line for line in printed_lines))
+        mock_geo.assert_called_once()
+        mock_test_llm_connection.assert_called_once()
+        mock_balance.assert_called_once()
+        mock_run_once.assert_not_called()
+
+    def test_main_exits_before_warmup_when_llm_startup_connectivity_fails(self):
+        with patch(
+            "custom.btc_agent.main.get_trading_config",
+            return_value=SimpleNamespace(
+                debug=False,
+                paper_trading=True,
+                llm_connection_debug=False,
+            ),
+        ), patch(
+            "custom.btc_agent.main.describe_proxy_configuration",
+            return_value="disabled via USE_PROXY=false",
+        ), patch(
+            "custom.btc_agent.main.enforce_allowed_ip_location",
+        ) as mock_geo, patch(
+            "custom.btc_agent.main.test_llm_connection",
+            return_value=(False, "Gemini request failed: read timed out"),
+        ) as mock_test_llm_connection, patch(
+            "custom.btc_agent.main.get_account_balance_snapshot",
+        ) as mock_balance, patch(
+            "builtins.print",
+        ) as mock_print:
+            with self.assertRaises(SystemExit) as exc:
+                main()
+
+        self.assertEqual(exc.exception.code, 1)
+        printed_lines = [" ".join(str(arg) for arg in call.args) for call in mock_print.call_args_list]
+        self.assertTrue(any("ERROR: LLM startup connectivity test failed:" in line for line in printed_lines))
+        mock_geo.assert_called_once()
+        mock_test_llm_connection.assert_called_once()
+        mock_balance.assert_not_called()
 
 
 if __name__ == "__main__":

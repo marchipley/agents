@@ -20,7 +20,9 @@ class ActivePaperOrder:
     actual_fill_price: Optional[float] = None
     realized_slippage_bps: Optional[float] = None
     order_latency_ms: Optional[int] = None
+    fill_duration_ms: Optional[int] = None
     book_depth_at_fill: Optional[float] = None
+    order_book_pressure: Optional[float] = None
     shares_requested: Optional[float] = None
     live_order_id: Optional[str] = None
     live_reprice_attempts: int = 0

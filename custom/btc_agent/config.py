@@ -24,6 +24,25 @@ DISCOVERY_MIN_CONFIDENCE = 0.85
 # lowering to 3 reduces exposure per order.
 SHARES_PER_TRADE = 5
 
+# Default read timeout for LLM API calls. This should stay short enough to
+# fail fast when a provider is slow, while still allowing the live BTC prompt
+# to complete under normal load.
+# Example: lowering from 20 to 10 makes the bot more aggressive about aborting
+# slow model calls; raising to 30 tolerates longer provider latency.
+LLM_API_READ_TIMEOUT = 20.0
+
+# Default Windows host IP for the explicit LLM-only proxy path when the bot is
+# running inside WSL. This is used to reach the Windows-hosted proxy.py bridge
+# when no explicit LLM proxy URL is provided.
+# Example: changing this to your WSL gateway IP lets the LLM route through a
+# different Windows-host proxy endpoint without affecting Polymarket traffic.
+LLM_WINDOWS_HOST_IP="127.0.0.1"
+
+# Default port for the Windows-hosted proxy.py bridge used only by LLM calls.
+# Example: changing this from 8888 to 8890 lets you run a different local proxy
+# listener without changing the rest of the agent networking.
+LLM_PROXY_PORT = 8888
+
 # Maximum spread allowed by configuration for a trade candidate.
 # Example: raising from 0.06 to 0.10 allows participation in wider, more
 # volatile books; lowering it makes the bot stricter about entry quality.
@@ -131,6 +150,32 @@ DOWN_RSI_VETO_THRESHOLD = 30.0
 # to 70 allows more aggressive early trend-following.
 MAX_EARLY_WINDOW_RSI = 65.0
 
+# Final-window RSI ceiling for blocking fresh UP trades very late in the period.
+# Example: lowering from 80 to 75 blocks more last-minute continuation chases;
+# raising it to 85 allows more aggressive late breakout entries.
+LATE_WINDOW_UP_EXHAUSTION_RSI = 80.0
+
+# Final-window RSI floor for blocking fresh DOWN trades very late in the period.
+# Example: raising from 20 to 25 blocks more late downside chases; lowering it
+# to 15 allows more aggressive short-side continuation in the final seconds.
+LATE_WINDOW_DOWN_EXHAUSTION_RSI = 20.0
+
+# Number of seconds remaining where the late-window exhaustion veto becomes active.
+# Example: raising from 45 to 60 makes the bot cautious earlier; lowering it to
+# 30 reserves the veto for only the very end of the period.
+LATE_WINDOW_EXHAUSTION_SECONDS = 45
+
+# In the final seconds, require a minimum absolute BTC lead over the strike
+# regardless of the current volatility regime.
+# Example: raising from 5 to 8 demands a wider late cushion; lowering it to 3
+# allows more late near-strike trades that can be flipped by small reversals.
+FINAL_WINDOW_MIN_STRIKE_GAP_USD = 5.0
+
+# Time-remaining boundary for the absolute final-window strike-gap cushion.
+# Example: raising from 30 to 45 keeps the hard $5 cushion active longer;
+# lowering it to 20 narrows the window where that absolute-gap rule applies.
+FINAL_WINDOW_MIN_STRIKE_GAP_SECONDS = 30
+
 # Divisor used in the required-velocity sanity check.
 # The bot rejects trades when required_velocity_to_win exceeds volatility_5m / divisor.
 # Example: raising from 15 to 20 makes the check stricter and blocks more
@@ -188,6 +233,17 @@ LIVE_ORDER_STATUS_POLL_ATTEMPTS = 4
 # the loop; lowering to 0.25s checks faster but can miss slower confirmations.
 LIVE_ORDER_STATUS_POLL_INTERVAL_SECONDS = 0.75
 
+# Add more window output for analysis and debugging. This also enables paper trades
+# User is notified that live trades are disabled to BTC_AGENT_DEBUG=true via an advisory 
+# message on each loop
+BTC_AGENT_DEBUG=True
+
+# When enabled, it bypasses the geolocation check, runs the connection test,
+# sends a predefined synthetic full-payload probe to the LLM, then exits.
+# This is so we can test without the VPN to see if it is causing issues
+# receiving the LLM responses without touching market data.
+LLM_RESPONSE_DEBUG=False
+
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 load_dotenv(os.path.join(REPO_ROOT, ".env"))
 
@@ -228,7 +284,9 @@ class LlmConfig:
     engine: str
     api_key: str
     model: str
+    proxy_url: Optional[str] = None
     api_connection_timeout_seconds: float = 10.0
+    api_read_timeout_seconds: float = LLM_API_READ_TIMEOUT
     api_connection_retry_timer_seconds: float = 2.0
     api_connection_retry_attempts: int = 3
 
@@ -238,6 +296,7 @@ class TradingConfig:
     debug: bool = False
     debug_price_to_beat: bool = False
     llm_connection_debug: bool = False
+    llm_response_debug: bool = False
     minimum_wallet_balance: float = 0.0
     live_fee_rate_bps: int = 1000
     live_min_order_usd: float = 1.0
@@ -268,6 +327,11 @@ class TradingConfig:
     parabolic_rsi_suspend_adx_threshold: float = PARABOLIC_RSI_SUSPEND_ADX_THRESHOLD
     down_rsi_veto_threshold: float = DOWN_RSI_VETO_THRESHOLD
     max_early_window_rsi: float = MAX_EARLY_WINDOW_RSI
+    late_window_up_exhaustion_rsi: float = LATE_WINDOW_UP_EXHAUSTION_RSI
+    late_window_down_exhaustion_rsi: float = LATE_WINDOW_DOWN_EXHAUSTION_RSI
+    late_window_exhaustion_seconds: int = LATE_WINDOW_EXHAUSTION_SECONDS
+    final_window_min_strike_gap_usd: float = FINAL_WINDOW_MIN_STRIKE_GAP_USD
+    final_window_min_strike_gap_seconds: int = FINAL_WINDOW_MIN_STRIKE_GAP_SECONDS
     required_velocity_divisor: float = REQUIRED_VELOCITY_DIVISOR
     dynamic_strike_buffer_multiplier: float = DYNAMIC_STRIKE_BUFFER_MULTIPLIER
     imbalance_pricing_threshold: float = IMBALANCE_PRICING_THRESHOLD
@@ -297,6 +361,12 @@ def get_llm_config() -> LlmConfig:
     if raw_timeout is None:
         raw_timeout = os.getenv("API_CONNECTION_TMEOUT", "10")
     api_connection_timeout_seconds = max(float(raw_timeout), 0.1)
+    raw_read_timeout = os.getenv("LLM_API_READ_TIMEOUT")
+    if raw_read_timeout is None:
+        raw_read_timeout = os.getenv("API_READ_TIMEOUT")
+    if raw_read_timeout is None:
+        raw_read_timeout = str(LLM_API_READ_TIMEOUT)
+    api_read_timeout_seconds = max(float(raw_read_timeout), 0.1)
     api_connection_retry_timer_seconds = max(
         float(os.getenv("API_CONNECTION_RETRY_TIMER", "2.0")),
         0.0,
@@ -305,6 +375,13 @@ def get_llm_config() -> LlmConfig:
         int(os.getenv("API_CONNECTION_RETRY_ATTEMPTS", "3")),
         1,
     )
+    raw_llm_proxy_url = os.getenv("LLM_PROXY_URL", "").strip()
+    if raw_llm_proxy_url:
+        llm_proxy_url = raw_llm_proxy_url
+    else:
+        llm_windows_host_ip = os.getenv("LLM_WINDOWS_HOST_IP", LLM_WINDOWS_HOST_IP).strip() or LLM_WINDOWS_HOST_IP
+        llm_proxy_port = os.getenv("LLM_PROXY_PORT", str(LLM_PROXY_PORT)).strip() or str(LLM_PROXY_PORT)
+        llm_proxy_url = f"http://{llm_windows_host_ip}:{llm_proxy_port}"
 
     if raw_engine == "openai":
         api_key = os.getenv("OPENAI_API_KEY")
@@ -315,7 +392,9 @@ def get_llm_config() -> LlmConfig:
             engine="openai",
             api_key=api_key,
             model=model,
+            proxy_url=llm_proxy_url,
             api_connection_timeout_seconds=api_connection_timeout_seconds,
+            api_read_timeout_seconds=api_read_timeout_seconds,
             api_connection_retry_timer_seconds=api_connection_retry_timer_seconds,
             api_connection_retry_attempts=api_connection_retry_attempts,
         )
@@ -329,7 +408,9 @@ def get_llm_config() -> LlmConfig:
             engine="gemini",
             api_key=api_key,
             model=model,
+            proxy_url=llm_proxy_url,
             api_connection_timeout_seconds=api_connection_timeout_seconds,
+            api_read_timeout_seconds=api_read_timeout_seconds,
             api_connection_retry_timer_seconds=api_connection_retry_timer_seconds,
             api_connection_retry_attempts=api_connection_retry_attempts,
         )
@@ -350,11 +431,14 @@ def get_polymarket_config() -> PolymarketConfig:
     )
 
 def get_trading_config() -> TradingConfig:
+    debug_enabled = bool(BTC_AGENT_DEBUG)
+    paper_trading = True if debug_enabled else _parse_bool_env("USE_PAPER_TRADES", True)
     return TradingConfig(
-        paper_trading=_parse_bool_env("USE_PAPER_TRADES", True),
-        debug=_parse_bool_env("BTC_AGENT_DEBUG", False),
+        paper_trading=paper_trading,
+        debug=debug_enabled,
         debug_price_to_beat=_parse_bool_env("DEBUG_PRICE_TO_BEAT", False),
         llm_connection_debug=_parse_bool_env("LLM_CONNECTION_DEBUG", False),
+        llm_response_debug=bool(LLM_RESPONSE_DEBUG),
         minimum_wallet_balance=float(os.getenv("MINIMUM_WALLET_BALANCE", "0")),
         live_fee_rate_bps=int(os.getenv("BTC_AGENT_LIVE_FEE_RATE_BPS", "1000")),
         live_min_order_usd=float(os.getenv("BTC_AGENT_LIVE_MIN_ORDER_USD", "1")),
@@ -440,6 +524,42 @@ def get_trading_config() -> TradingConfig:
         ),
         max_early_window_rsi=float(
             os.getenv("BTC_AGENT_MAX_EARLY_WINDOW_RSI", str(MAX_EARLY_WINDOW_RSI))
+        ),
+        late_window_up_exhaustion_rsi=float(
+            os.getenv(
+                "BTC_AGENT_LATE_WINDOW_UP_EXHAUSTION_RSI",
+                str(LATE_WINDOW_UP_EXHAUSTION_RSI),
+            )
+        ),
+        late_window_down_exhaustion_rsi=float(
+            os.getenv(
+                "BTC_AGENT_LATE_WINDOW_DOWN_EXHAUSTION_RSI",
+                str(LATE_WINDOW_DOWN_EXHAUSTION_RSI),
+            )
+        ),
+        late_window_exhaustion_seconds=max(
+            int(
+                os.getenv(
+                    "BTC_AGENT_LATE_WINDOW_EXHAUSTION_SECONDS",
+                    str(LATE_WINDOW_EXHAUSTION_SECONDS),
+                )
+            ),
+            0,
+        ),
+        final_window_min_strike_gap_usd=float(
+            os.getenv(
+                "BTC_AGENT_FINAL_WINDOW_MIN_STRIKE_GAP_USD",
+                str(FINAL_WINDOW_MIN_STRIKE_GAP_USD),
+            )
+        ),
+        final_window_min_strike_gap_seconds=max(
+            int(
+                os.getenv(
+                    "BTC_AGENT_FINAL_WINDOW_MIN_STRIKE_GAP_SECONDS",
+                    str(FINAL_WINDOW_MIN_STRIKE_GAP_SECONDS),
+                )
+            ),
+            0,
         ),
         required_velocity_divisor=float(
             os.getenv("BTC_AGENT_REQUIRED_VELOCITY_DIVISOR", str(REQUIRED_VELOCITY_DIVISOR))

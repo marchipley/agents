@@ -28,18 +28,19 @@ Execution flow per loop tick:
 1. Load env/config from [custom/btc_agent/config.py](/appl/agents/custom/btc_agent/config.py:1).
 2. Run the public-IP geolocation check from [scripts/python/check_public_ip_indonesia.py](/appl/agents/scripts/python/check_public_ip_indonesia.py:1).
 3. Abort startup immediately if the public IP does not resolve to an allowed location, currently Indonesia or Mexico.
-4. Print wallet/account balances via helpers in [custom/btc_agent/executor.py](/appl/agents/custom/btc_agent/executor.py:1).
-5. Resolve the active BTC Up/Down market slug in [custom/btc_agent/market_lookup.py](/appl/agents/custom/btc_agent/market_lookup.py:1).
-6. Fetch current quotes for both outcome tokens.
-7. Build BTC features in [custom/btc_agent/indicators.py](/appl/agents/custom/btc_agent/indicators.py:1).
-8. Request an LLM trade decision in [custom/btc_agent/llm_decision.py](/appl/agents/custom/btc_agent/llm_decision.py:1).
-9. If the configured per-period paper-trade limit has already been reached for the current 5-minute market slug, skip quote snapshots and LLM decisioning, print active paper-order status only, and wait for the next loop tick.
-10. Otherwise, fetch a decision-time quote snapshot for the selected token, print it, and reuse that same snapshot for paper-trade evaluation within the tick.
-11. If a trade executes, record an in-memory active order for the current market window using the configured share size.
-12. In non-debug mode, print only compact operational output for geolocation, balances, quotes, features, the LLM decision, and the final execution result; in debug mode, print the fuller diagnostic output.
-13. Execute a paper trade when `USE_PAPER_TRADES=true`, or submit a live Polymarket buy order through the upstream client when `USE_PAPER_TRADES=false`.
-14. For live mode, abort the process immediately if the required live trade cash, including the estimated taker-fee buffer, exceeds the available `cash_balance_pusd`, or if the flow cannot safely support the configured wallet path.
-15. Print the execution snapshot, execution result, and any active order status, then sleep for the configured interval.
+4. Run a one-shot LLM connectivity preflight via [custom/btc_agent/llm_decision.py](/appl/agents/custom/btc_agent/llm_decision.py:1) and abort startup immediately if the provider cannot complete the minimal JSON test request.
+5. Print wallet/account balances via helpers in [custom/btc_agent/executor.py](/appl/agents/custom/btc_agent/executor.py:1).
+6. Resolve the active BTC Up/Down market slug in [custom/btc_agent/market_lookup.py](/appl/agents/custom/btc_agent/market_lookup.py:1).
+7. Fetch current quotes for both outcome tokens.
+8. Build BTC features in [custom/btc_agent/indicators.py](/appl/agents/custom/btc_agent/indicators.py:1).
+9. Request an LLM trade decision in [custom/btc_agent/llm_decision.py](/appl/agents/custom/btc_agent/llm_decision.py:1).
+10. If the configured per-period paper-trade limit has already been reached for the current 5-minute market slug, skip quote snapshots and LLM decisioning, print active paper-order status only, and wait for the next loop tick.
+11. Otherwise, fetch a decision-time quote snapshot for the selected token, print it, and reuse that same snapshot for paper-trade evaluation within the tick.
+12. If a trade executes, record an in-memory active order for the current market window using the configured share size.
+13. In non-debug mode, print only compact operational output for geolocation, balances, quotes, features, the LLM decision, and the final execution result; in debug mode, print the fuller diagnostic output.
+14. Execute a paper trade when `USE_PAPER_TRADES=true`, or submit a live Polymarket buy order through the upstream client when `USE_PAPER_TRADES=false`.
+15. For live mode, abort the process immediately if the required live trade cash, including the estimated taker-fee buffer, exceeds the available `cash_balance_pusd`, or if the flow cannot safely support the configured wallet path.
+16. Print the execution snapshot, execution result, and any active order status, then sleep for the configured interval.
 
 ## Repository Map
 
@@ -83,14 +84,17 @@ Optional / supported:
 - `AI_ENGINE` supported values: `OPENAI`, `GEMINI`
 - `OPENAI_MODEL` default: `gpt-4.1-mini`
 - `GEMINI_MODEL` default: `gemini-2.5-flash`
-- `API_CONNECTION_TIMEOUT` default: `10`
+- `API_CONNECTION_TIMEOUT` default: `10`; used as the fast-fail connect timeout
+- `LLM_API_READ_TIMEOUT` default: `20`; used as the longer read timeout for large LLM prompts, with `API_READ_TIMEOUT` still accepted as a fallback env name
 - `API_CONNECTION_RETRY_TIMER` default: `2.0`
 - `API_CONNECTION_RETRY_ATTEMPTS` default: `3`
-- `ALL_PROXY` optional global proxy setting for outbound API calls; for Mullvad WireGuard the intended SOCKS5 value is `socks5h://10.64.0.1:1080`
-- `HTTP_PROXY` / `HTTPS_PROXY` optional proxy settings for outbound API calls, including LLM requests and geolocation checks
+- `ALL_PROXY` optional global proxy setting for outbound API calls; non-LLM BTC-agent traffic, including the geolocation check, uses the configured VPN proxy path when present
+- `HTTP_PROXY` / `HTTPS_PROXY` optional proxy settings for outbound non-LLM requests, including geolocation
+- `LLM_PROXY_URL` optional explicit proxy URL for Gemini/OpenAI calls; when omitted, the agent falls back to `LLM_WINDOWS_HOST_IP` plus `LLM_PROXY_PORT`, defaulting to `http://10.255.255.254:8888`
 - `NO_PROXY` optional bypass list for local addresses
 - `USE_PROXY` default: `true`; when set to `false`, the BTC agent ignores `ALL_PROXY`, `HTTP_PROXY`, and `HTTPS_PROXY` for its shared HTTP/LLM network path
 - `LLM_CONNECTION_DEBUG` default: `false`; when set to `true`, the agent skips the normal trading startup flow and runs only an LLM connectivity test
+- `LLM_RESPONSE_DEBUG` repo-visible flag in `custom/btc_agent/config.py`; when set to `True`, the agent bypasses the geolocation check, runs the startup LLM connectivity test, performs one predefined synthetic LLM decision probe using a static payload, and exits immediately after printing that response
 - `USE_PAPER_TRADES` default: `true`
 - `MINIMUM_WALLET_BALANCE` default: `0`; enforced against Polygon pUSD trading cash, not legacy USDC.e
 - `BTC_AGENT_LIVE_FEE_RATE_BPS` default: `1000`
@@ -99,7 +103,7 @@ Optional / supported:
 - `POLYMKT_PROXY_ADDRESS`
 - `POLYGON_RPC_URL` default: `https://polygon.drpc.org`
 - `POLYGON_RPC_URLS` optional comma-separated list of Polygon RPC endpoints to try in order
-- `BTC_AGENT_DEBUG` default: `false`
+- `BTC_AGENT_DEBUG` now comes from the repo-visible constant in `custom/btc_agent/config.py`, not from `.env`
 - `BTC_AGENT_LOOP_INTERVAL` default: `30`
 - `BTC_AGENT_MAX_TRADES_PER_PERIOD` default: `1`
 - `MAX_LOSSES_PER_RUN` default: `4` in `custom/btc_agent/config.py`; the agent counts completed losing trades since launch and stops once that loss count reaches the configured threshold
@@ -113,9 +117,15 @@ Notes:
 - `config.py` loads `.env` from the repo root, so local execution assumes a root-level `.env`.
 - Non-secret threshold tuning is now beginning to move out of `.env` and into top-level defaults near the imports in [custom/btc_agent/config.py](/appl/agents/custom/btc_agent/config.py:1). Environment variables can still override those values, but the repo copy is now the primary reference for execution and prompt calibration defaults such as minimum confidence, ADX caution levels, market-win-chance veto levels, RSI veto thresholds, and required-velocity divisors.
 - On the first loop and again at the start of each new 5-minute BTC period, the runtime now reloads `custom/btc_agent/config.py` in-process so edits to repo-defined non-secret tuning constants can take effect without restarting the bot.
+- `BTC_AGENT_DEBUG` is part of that repo-visible runtime config now. When it is `True`, the bot forces paper trading even if `.env` still says `USE_PAPER_TRADES=false`, and the loop prints an advisory each tick that live trades are disabled while debug mode is active.
+- The old `priceToBeatDebug*.txt` debug-file path has been removed. The agent no longer creates, clears, or references `logs/priceToBeatDebug.txt` or `priceToBeatDebugPg*.txt`.
 - Order sizing now also follows that repo-defined pattern: `SHARES_PER_TRADE` in `custom/btc_agent/config.py` is the active fixed size for both paper and live BTC orders.
-- `launch_btc_agent.sh` exports `.env` before starting Python so proxy variables such as `HTTP_PROXY` and `HTTPS_PROXY` are available to the full launch path.
-- The active BTC-agent runtime normalizes `ALL_PROXY=socks5://...` to `socks5h://...` for `requests` traffic and to `socks5://...` for the OpenAI HTTPX client so Mullvad SOCKS routing works consistently.
+- `launch_btc_agent.sh` exports `.env` before starting Python, resolves the Windows host IP for the WSL proxy.py bridge from `/etc/resolv.conf` nameserver data (falling back to `10.255.255.254`), exports the VPN proxy settings for the non-LLM path, and exports `LLM_PROXY_URL` so Gemini/OpenAI calls use the explicit Windows-host proxy path.
+- The active BTC-agent runtime normalizes `ALL_PROXY=socks5://...` to `socks5h://...` for `requests` traffic and to `socks5://...` for the OpenAI HTTPX client so Mullvad SOCKS routing works consistently for non-LLM traffic.
+- Shared BTC-agent HTTP requests now always use `trust_env=False` unless the agent explicitly resolved and passed a proxy URL itself. This prevents ambient shell proxy variables from silently leaking into `requests` when the runtime log says `proxy = None`.
+- When an explicit SOCKS/HTTP proxy is configured for shared HTTP and a timeout occurs against Gemini/Google APIs, the shared HTTP layer now retries that request once directly without the proxy, which helps when the Mullvad SOCKS proxy stalls but the underlying VPN tunnel is still healthy.
+- LLM HTTP/WebSocket calls now use the explicit Windows-host proxy.py path via `LLM_PROXY_URL` (or the `LLM_WINDOWS_HOST_IP` / `LLM_PROXY_PORT` fallback), while Polymarket-facing requests and the geolocation check continue to use the VPN proxy path.
+- If the LLM proxy route itself errors out, the agent logs the proxy failure and retries the same LLM request directly once, so a broken Windows-host bridge does not mask a working ISP path.
 
 ## Current Behavior
 
@@ -129,7 +139,8 @@ What the BTC agent does today:
   - converts them to the human-readable BTC/USD price used by the agent
 - Maintains an in-memory rolling price history during process lifetime only.
 - Backfills enough recent BTC history on startup to support the Phase 2 indicator set, including the longer EMA(21) warmup.
-- Even with that historical backfill, startup readiness now keys off fresh live samples for the visible RSI / Phase 2 warmup counters, so a restart still shows the familiar `RSI warmup incomplete (...)` and `phase 2 indicator warmup incomplete (...)` messages before trading is allowed.
+- Even with that historical backfill, normal startup readiness keys off fresh live samples for the visible RSI / Phase 2 warmup counters, so a restart still shows the familiar `RSI warmup incomplete (...)` and `phase 2 indicator warmup incomplete (...)` messages before trading is allowed.
+- When `BTC_AGENT_DEBUG=true`, that indicator warmup gate is bypassed so debug runs can exercise the live loop immediately without waiting for RSI / Phase 2 readiness.
 - Approximates market-window open price using the earliest retained BTC sample inside the current 5-minute market window, not a true historical open fetched from a historical BTC data source.
 - Computes 5-minute momentum and volatility from a trailing 5-minute BTC sample window, so analysis continues to reference recent cross-period history even immediately after a new market window begins.
 - Computes a Phase 2 indicator set from the retained BTC history, including `RSI(9)`, `RSI(14)`, `EMA(9)`, `EMA(21)`, `ADX(14)`, `ATR(14)`, `rsi_speed_divergence`, `ema_alignment`, and `ema_cross_direction`.
@@ -138,21 +149,28 @@ What the BTC agent does today:
 - Uses the current 5-minute BTC Up/Down slug by timestamp alignment, unless overridden.
 - For BTC 5-minute up/down markets, token-to-outcome discovery now treats `clobTokenIds[0]` as the YES/`UP` token and `clobTokenIds[1]` as the NO/`DOWN` token, matching the user-validated `getlimitfull.py` mapping rather than relying on weaker token metadata ordering.
 - Performs a startup IP geolocation check and refuses to run unless the current public IP resolves to an allowed country, currently Indonesia or Mexico.
-- Bypasses the startup geolocation check when `LLM_CONNECTION_DEBUG=true` so LLM/provider connectivity can be tested from non-allowed locations.
-- Respects standard proxy environment variables such as `HTTP_PROXY` and `HTTPS_PROXY` for outbound requests when they are exported in the shell or defined in the repo `.env`.
-- Routes outbound BTC-agent requests through `ALL_PROXY` when configured, including geolocation, BTC spot pricing, Polymarket API lookups, and LLM calls.
+- Bypasses the startup geolocation check when `LLM_CONNECTION_DEBUG=true` or `LLM_RESPONSE_DEBUG=True` so LLM/provider connectivity can be tested from non-allowed locations.
+- Respects standard proxy environment variables such as `HTTP_PROXY` and `HTTPS_PROXY` for outbound non-LLM requests when they are exported in the shell or defined in the repo `.env`.
+- Routes outbound BTC-agent requests through `ALL_PROXY` when configured, including geolocation, BTC spot pricing, and Polymarket API lookups. LLM calls use the dedicated Windows-host proxy path instead.
 - For Polymarket HTTP endpoints, the shared network layer now retries once without the proxy on connect/read timeout when proxy routing is enabled, which helps recover from intermittent SOCKS timeouts against `*.polymarket.com`.
 - Allows proxy routing to be disabled globally with `USE_PROXY=false`, which causes the agent to use direct connections for shared HTTP/LLM requests even if proxy environment variables are present.
-- Supports a dedicated `LLM_CONNECTION_DEBUG=true` mode that runs only a one-shot LLM connectivity test, prints the active connection settings, runs a direct Google connectivity probe after LLM connection failures, and exits without touching balances, market lookup, or trading execution.
+- Supports a dedicated `LLM_CONNECTION_DEBUG=true` mode that runs only a one-shot LLM connectivity test, prints the active connection settings, runs both a direct and VPN-routed Google connectivity probe after LLM connection failures, and exits without touching balances, market lookup, or trading execution.
+- Supports a dedicated `LLM_RESPONSE_DEBUG=True` mode that skips the geolocation gate, runs the startup LLM connectivity test, executes one predefined synthetic LLM decision probe without any live market lookup, and exits immediately after the response is printed so VPN / proxy impact can be isolated quickly.
+- In normal startup mode, the agent runs a basic-only LLM connectivity preflight immediately after the geolocation check and before balances / warmup, so provider failures are detected before the indicator startup path does any work.
+- The startup basic LLM probe accepts either a tiny `{"status":"ok"}` payload or a valid trade-decision JSON payload, because some providers answer the transport probe using the normal trading schema.
 - Uses the configured AI engine with JSON output to decide `UP`, `DOWN`, or `NO_TRADE`.
 - Prints the current market `price_to_beat` in the BTC-agent output and includes that same period baseline in the LLM decision prompt, now preferring Vatic's BTC 5-minute timestamp target API and only falling back to Polymarket page / `_next/data` parsing when that external target lookup is unavailable.
 - Pulls Gamma `outcomePrices` from the active market payload only as an initial discovery fallback, then refreshes `up_market_probability` / `down_market_probability` from the Polymarket CLOB market websocket using the same token-mapped `price_change.best_ask` fields as the local `getlimitfull.py` script, so terminal output, completed-period logs, completed-order logs, and prompt inputs track the same live probabilities shown on Polymarket more closely.
 - Prints `up_spread` and `down_spread` in the per-tick `Market:` block so each loop shows the current book width for both sides even when verbose quote snapshots are not being emphasized.
+- Prints `up_order_book_pressure` and `down_order_book_pressure` in the per-tick `Market:` block as well, so the live output shows the top-5 bid/ask depth ratio for both sides alongside spread.
 - Derives `best_bid`, `best_ask`, `spread`, and `spread_bps` from the executable quote pair first (`SELL` quote as bid, `BUY` quote as ask), only falling back to raw `/book` extremes when quote-side prices are unavailable. This avoids the old ghost-spread problem where thin 5-minute books surfaced fake `0.01 / 0.99` bounds and triggered toxic-liquidity rejections.
 - Uses a one-shot synchronous websocket scrape for that per-tick probability refresh and closes it immediately after both side probabilities arrive, avoiding the older `asyncio.run()` / websocket close-handshake delay that could stretch a nominal 5-second sleep into 10-15 seconds.
 - Refreshes those live market probabilities only once per loop tick; the main loop now reuses the market object’s already-refreshed `up_market_probability` / `down_market_probability` values instead of opening a second websocket connection.
 - The live market-probability path is now authoritative: if the CLOB market websocket does not provide `best_ask` values for both outcome tokens, the refresh path raises instead of silently inventing or substituting probabilities.
-- Retries LLM API calls across configurable attempts using a single per-attempt timeout, logs each attempt result to stdout, and converts repeated failures into a `NO_TRADE` so the loop can move on to the next tick.
+- Retries LLM API calls across configurable attempts using split connect/read timeouts, logs each attempt result to stdout, and converts repeated failures into a `NO_TRADE` so the loop can move on to the next tick.
+- Gemini/OpenAI request logging now prints a rough `prompt_token_estimate`, derived from serialized payload size, so large-prompt timeouts can be correlated with specific request sizes from terminal output and completed-period logs. Attempt/failure lines now keep a much longer detail excerpt so proxy errors are less likely to be truncated before the useful part.
+- Gemini request submission now uses `(connect_timeout, read_timeout)` timeout tuples rather than a single flat timeout, so the bot can fail fast on broken transport while still waiting longer for large prompt completions.
+- Gemini read-timeout retries now use exponential backoff on repeated `ReadTimeout` failures, while parse retries keep the shorter fixed retry delay.
 - Computes a reference price from quote, midpoint, last trade, and order book data.
 - Reuses a single decision-time token quote snapshot for both the printed `UP/DOWN (with decision)` block and the paper execution gate so those logs cannot diverge within one loop tick.
 - Uses `USE_RECOMMENDED_LIMIT` to choose whether submit checks and execution use the recommended snapped limit or the raw target limit; when disabled, recommended limit is still computed for visibility but is not used as a gating/execution factor.
@@ -161,6 +179,9 @@ What the BTC agent does today:
 - Provides the LLM with time remaining, window delta, and current `UP` / `DOWN` ask prices so the model can apply EV- and timing-based rules for late-window decisions.
 - Provides the LLM with the Phase 2 trend-strength and normalization fields as well, including `RSI(9)`, `RSI speed divergence`, `EMA` alignment/cross direction, `ADX(14)`, `ATR(14)`, and the volatility-normalized / required-velocity context derived from the current target gap.
 - To reduce transport timeouts, the live decision path now uses a trimmed minimal LLM payload for both OpenAI Realtime and Gemini instead of the older verbose prompt, while preserving the active Phase 2.x guardrails.
+- The live user prompt has been tightened further so it now sends mostly compact structured market/feature fields while keeping the policy/guardrail text in the system prompt. This reduces duplicate instruction tokens without removing the decision-critical inputs.
+- The active runtime prompt is now built as a compact system prompt carrying the static policy rules plus a compact structured user prompt that contains only raw numerical market data.
+- The main loop now applies Python hard-veto checks before the LLM call for obvious near-strike and RSI-exhaustion cases, so simple time/ATR/RSI conditions can skip the model entirely.
 - The LLM prompt now also includes `momentum_acceleration`, `last_10_ticks_direction`, and follows stricter ADX guidance:
   - if `ADX(14) > 35`, do not trade against the trend
   - if `ADX(14) > 45`, treat the move as potentially exhausted and avoid late trend-chasing
@@ -206,7 +227,7 @@ What the BTC agent does today:
 - Executes paper trades by default and can submit live Polymarket buy orders through `agents/polymarket/polymarket.py` when `USE_PAPER_TRADES=false`.
 - Submits live orders with a configurable maker fee rate from `BTC_AGENT_LIVE_FEE_RATE_BPS`, defaulting to `1000` bps to match the current BTC Up/Down market requirement observed during live submission attempts.
 - Sizes paper and live orders from `SHARES_PER_TRADE` in `custom/btc_agent/config.py`, using a fixed share count for both paper and live orders.
-- The current repo-visible sizing default is `SHARES_PER_TRADE = 3`, so both paper and live orders now use that fixed reduced exposure unless the code default is changed again.
+- The current repo-visible sizing default is `SHARES_PER_TRADE = 5`, so both paper and live orders now use that fixed share count unless the code default is changed again.
 - Before live BUY submission, the agent quantizes share size to a Polymarket-compatible precision so the quote-side amount stays within the exchange’s 2-decimal maker-amount constraint while still respecting the 4-decimal taker-size limit.
 - That live BUY quantization now guarantees a minimum positive valid quantum when the configured size is non-zero, preventing edge-case rounding from collapsing a tiny but valid order to zero shares.
 - Rejects live submissions cleanly when the configured `SHARES_PER_TRADE` cannot satisfy the venue minimum order size instead of silently scaling or overriding size.
@@ -237,6 +258,11 @@ What the BTC agent does today:
 - Applies momentum-trap RSI vetoes before submission:
   - if the bot wants `UP` while BTC is still below the strike and `RSI(9) > 60`, the trade is rejected as a late breakout chase below the settlement line
   - if the bot wants `UP` with more than 200 seconds remaining and `RSI(9) > MAX_EARLY_WINDOW_RSI`, currently `65`, the trade is rejected as an early-window momentum trap
+- Applies late-window exhaustion vetoes before submission:
+  - if `time_remaining_seconds < 45` and the bot wants `UP` while `RSI(9) > 80`, the trade is rejected as a late continuation chase with elevated snap-back risk
+  - if `time_remaining_seconds < 45` and the bot wants `DOWN` while `RSI(9) < 20`, the trade is rejected as a late downside exhaustion entry
+- Applies a hard final-window safety cushion before submission:
+  - if `time_remaining_seconds < 30` and the BTC gap to strike is less than `$5.00` in either direction, the trade is rejected regardless of volatility regime
 - Suspends the normal `UP` RSI veto during parabolic continuation only when both of these are true:
   - `rsi_speed_divergence > 5`
   - `ADX(14) > 35`
@@ -261,7 +287,7 @@ What the BTC agent does today:
   - re-submit the same side and size at the latest submission-limit probability price
   - if the retry still does not fill, the order remains tracked as `UNFILLED`
 - If that tracked live order reaches period close without a confirmed fill price, the finalized filename is neutral and does not carry a win/loss or direction label:
-  - `completed_order_unfilled_<slug_timestamp>.txt`
+  - `completed_order_unfilled_<side>_<slug_timestamp>.txt`
 - If a confirmed filled order shows realized slippage above `SLIPPAGE_COOLDOWN_THRESHOLD_BPS`, currently `500` bps, the bot now triggers a trade cooldown for `SLIPPAGE_COOLDOWN_SECONDS`, currently `300` seconds, before taking another order.
 - While an executed order is still unresolved, its working log file remains `completed_order_<slug_timestamp>.txt` and is only renamed to the finalized `completed_order_<win/loss>_<up/down>_<slug_timestamp>.txt` form once the period result is known.
 - Preserves every analyzed 5-minute window under `completed_orders/completed_period_<slug_timestamp>.txt` while the period is still unresolved, and finalizes resolved no-trade period files as:
@@ -290,6 +316,7 @@ What the BTC agent does today:
 - Enforces `MAX_LOSSES_PER_RUN` across the full process session as a completed-loss stop; once that many trades have actually settled as losses, the agent exits.
 - When `BTC_AGENT_DEBUG=false`, suppresses most verbose diagnostics and only prints a compact subset of geolocation, balances, quote snapshots, BTC features, LLM decision fields, and final paper execution fields.
 - When `BTC_AGENT_DEBUG=true`, the agent also prints the exact LLM prompt text to terminal output and writes that same prompt into the pending-period / completed-order logs for post-trade review.
+- In debug mode, the agent now prints the exact SYSTEM/USER prompt at send time for both the startup LLM connectivity probes and the normal per-tick LLM decision calls.
 - The raw LLM response text is preserved for successful decisions regardless of debug mode:
   - it is printed to terminal output as `LLM raw response:`
   - it is written into pending-period / completed-order logs between `llm_raw_response_start` / `llm_raw_response_end`
@@ -299,8 +326,11 @@ What the BTC agent does today:
   - `actual_fill_price`
   - `realized_slippage_bps`
   - `order_latency_ms`
+  - `fill_duration_ms`
   - `book_depth_at_fill`
+  - `order_book_pressure`
   - `shares_requested`
+- Completed-order lifecycle logs now also include `exit_price_delta`, which records the BTC distance from the strike at that tick and is especially useful on the final completion entry to distinguish noise losses from larger trend reversals.
 - In paper mode, those same Phase 3 metrics are also carried into `completed_order_attempt_*` files for pre-execution rejections when they can be derived from the simulated quote snapshot, so paper-mode analysis can still distinguish signal rejection from thin-book conditions.
 - Phase 3.1 refinement: vetoed directional attempts now preserve the bot’s intent-time quote context too, so `completed_order_attempt_*` files capture the quote and top-of-book depth the bot wanted to trade against even when a pre-execution guardrail blocks the trade.
 - In non-debug mode, account balances print only on the first loop iteration and again at the start of each new 5-minute market period.

@@ -16,6 +16,7 @@ from custom.btc_agent.llm_decision import (
     _get_openai_realtime_client,
     _stream_openai_chat_completion,
     decide_trade,
+    test_llm_connection,
 )
 
 
@@ -58,6 +59,92 @@ class DummyMarket:
 
 
 class TestBtcLlmDecision(unittest.TestCase):
+    def test_test_llm_connection_runs_basic_and_full_probes(self):
+        cfg = types.SimpleNamespace(
+            engine="gemini",
+            model="gemini-3.1-flash-lite-preview",
+            api_key="test-key",
+            api_connection_timeout_seconds=15.0,
+            api_connection_retry_timer_seconds=2.0,
+            api_connection_retry_attempts=3,
+        )
+        with patch(
+            "custom.btc_agent.llm_decision.get_llm_config",
+            return_value=cfg,
+        ), patch(
+            "custom.btc_agent.llm_decision._run_llm_connection_probe",
+            return_value={"status": "ok"},
+        ) as mock_probe:
+            success, detail = test_llm_connection()
+
+        self.assertTrue(success)
+        self.assertIn("basic probe passed", detail)
+        self.assertEqual(mock_probe.call_count, 1)
+        self.assertEqual(mock_probe.call_args_list[0].kwargs["mode_label"], "Basic connectivity")
+
+    def test_test_llm_connection_accepts_trade_schema_for_basic_probe(self):
+        cfg = types.SimpleNamespace(
+            engine="gemini",
+            model="gemini-3.1-flash-lite-preview",
+            api_key="test-key",
+            api_connection_timeout_seconds=15.0,
+            api_connection_retry_timer_seconds=2.0,
+            api_connection_retry_attempts=3,
+        )
+        trading_cfg = types.SimpleNamespace(
+            debug=True,
+            llm_connection_debug=False,
+            discovery_adx_caution_threshold=20,
+            trend_priority_adx_threshold=30,
+            market_win_chance_veto_end_seconds=120,
+            market_win_chance_veto_threshold=0.15,
+            required_velocity_divisor=8,
+            itm_confidence_boost_amount=0.15,
+            down_rsi_veto_threshold=30,
+            up_rsi_veto_base_threshold=70,
+            up_rsi_veto_adx_threshold=30,
+            up_rsi_veto_trend_threshold=85,
+        )
+
+        with patch(
+            "custom.btc_agent.llm_decision.get_llm_config",
+            return_value=cfg,
+        ), patch(
+            "custom.btc_agent.llm_decision._run_llm_connection_probe",
+            return_value={
+                "decision": "NO_TRADE",
+                "confidence": 0.0,
+                "max_price_to_pay": 0.0,
+                "reason": "status ok",
+            },
+        ):
+            success, detail = test_llm_connection()
+
+        self.assertTrue(success)
+        self.assertIn("basic probe passed", detail)
+
+    def test_test_llm_connection_fails_when_basic_probe_payload_is_invalid(self):
+        cfg = types.SimpleNamespace(
+            engine="openai",
+            model="gpt-4.1-mini",
+            api_key="test-key",
+            api_connection_timeout_seconds=15.0,
+            api_connection_retry_timer_seconds=2.0,
+            api_connection_retry_attempts=3,
+        )
+
+        with patch(
+            "custom.btc_agent.llm_decision.get_llm_config",
+            return_value=cfg,
+        ), patch(
+            "custom.btc_agent.llm_decision._run_llm_connection_probe",
+            return_value={"decision": "MAYBE", "confidence": "bad", "max_price_to_pay": 1.0, "reason": "bad"},
+        ):
+            success, detail = test_llm_connection()
+
+        self.assertFalse(success)
+        self.assertIn("Unexpected basic LLM connection test payload", detail)
+
     def test_extract_json_payload_accepts_key_value_response_format(self):
         payload = _extract_json_payload(
             "decision: NO_TRADE, confidence: 0.45, max_price_to_pay: 1.0, reason: Time remaining is sufficient, RSI not extreme, and side quote low, so prefer no trade."
@@ -212,12 +299,15 @@ class TestBtcLlmDecision(unittest.TestCase):
         )
 
         self.assertIn("DISTANCE_FROM_STRIKE_USD=", prompt)
+        self.assertIn("DISTANCE_FROM_STRIKE_PCT=", prompt)
         self.assertIn("MARKET_WIN_CHANCE_UP=0.495", prompt)
         self.assertIn("MARKET_WIN_CHANCE_DOWN=0.505", prompt)
         self.assertIn("momentum_alignment=", prompt)
         self.assertIn("rsi_speed_divergence=", prompt)
-        self.assertIn("Do not confuse DISTANCE_FROM_STRIKE values with MARKET_WIN_CHANCE values.", prompt)
-        self.assertNotIn("\ndelta_pct=", prompt)
+        self.assertIn("atr14=", prompt)
+        self.assertIn("ticks10=", prompt)
+        self.assertNotIn("Window Delta", prompt)
+        self.assertNotIn("policy=", prompt)
 
     def test_gemini_503_returns_no_trade(self):
         error_response = requests.Response()
@@ -283,6 +373,40 @@ class TestBtcLlmDecision(unittest.TestCase):
         self.assertEqual(decision.side, "NO_TRADE")
         self.assertEqual(decision.confidence, 0.0)
         self.assertIn("LLM request failed", decision.reason)
+
+    def test_gemini_proxy_error_retries_direct(self):
+        success_response = requests.Response()
+        success_response.status_code = 200
+        success_response._content = (
+            b'{"candidates":[{"content":{"parts":[{"text":"{\\"decision\\":\\"UP\\",\\"confidence\\":0.8,\\"max_price_to_pay\\":0.6,\\"reason\\":\\"direct fallback\\"}"}]}}]}'
+        )
+
+        with patch(
+            "custom.btc_agent.llm_decision.get_llm_config",
+            return_value=Mock(
+                engine="gemini",
+                api_key="test-key",
+                model="gemini-2.5-flash",
+                api_connection_timeout_seconds=10.0,
+                api_connection_retry_timer_seconds=2.0,
+                api_connection_retry_attempts=3,
+                proxy_url="http://10.255.255.254:8888",
+            ),
+        ), patch(
+            "custom.btc_agent.llm_decision._direct_http_post",
+            side_effect=[requests.exceptions.ProxyError("Unable to connect to proxy"), success_response],
+        ), patch(
+            "custom.btc_agent.llm_decision.check_internet_connectivity",
+            return_value=(True, "Connectivity OK via https://www.google.com/generate_204 (HTTP 204)"),
+        ), patch(
+            "builtins.print",
+        ) as mock_print:
+            decision = decide_trade(DummyFeatures(), DummyMarket())
+
+        printed_lines = [" ".join(str(arg) for arg in call.args) for call in mock_print.call_args_list]
+        self.assertEqual(decision.side, "UP")
+        self.assertTrue(any("proxy route failed; retrying direct" in line for line in printed_lines))
+        self.assertTrue(any("direct-fallback" in line for line in printed_lines))
 
     def test_gemini_wrapped_text_extracts_json_object(self):
         wrapped_response = requests.Response()
@@ -377,7 +501,9 @@ class TestBtcLlmDecision(unittest.TestCase):
         self.assertTrue(any(line == "LLM connection:" for line in printed_lines))
         self.assertTrue(any("engine            = gemini" in line for line in printed_lines))
         self.assertTrue(any("model             = gemini-2.5-flash" in line for line in printed_lines))
-        self.assertTrue(any("timeout_seconds   = 15.0" in line for line in printed_lines))
+        self.assertTrue(any("connect_timeout_s = 15.0" in line for line in printed_lines))
+        self.assertTrue(any("read_timeout_s    = 20.0" in line for line in printed_lines))
+        self.assertTrue(any("prompt_token_estimate =" in line for line in printed_lines))
         self.assertTrue(any("proxy             = None" in line for line in printed_lines))
 
     def test_openai_disables_trust_env_when_use_proxy_false(self):
@@ -500,7 +626,7 @@ class TestBtcLlmDecision(unittest.TestCase):
 
         self.assertEqual(decision.side, "UP")
         self.assertAlmostEqual(decision.confidence, 0.77)
-        self.assertEqual(mock_requests_post.call_args_list[0].kwargs["timeout"], 11.0)
+        self.assertEqual(mock_requests_post.call_args_list[0].kwargs["timeout"], (11.0, 20.0))
 
     def test_gemini_incomplete_json_retries_full_attempts_then_fails(self):
         truncated_response = requests.Response()
@@ -601,8 +727,9 @@ class TestBtcLlmDecision(unittest.TestCase):
 
         printed_lines = [" ".join(str(arg) for arg in call.args) for call in mock_print.call_args_list]
         self.assertEqual(decision.side, "UP")
-        mock_connectivity.assert_called_once()
-        self.assertTrue(any("Internet connectivity check: Connectivity OK" in line for line in printed_lines))
+        self.assertEqual(mock_connectivity.call_count, 2)
+        self.assertTrue(any("Internet connectivity check (direct): Connectivity OK" in line for line in printed_lines))
+        self.assertTrue(any("Internet connectivity check (vpn): Connectivity OK" in line for line in printed_lines))
 
     def test_gemini_connection_failure_stops_when_connectivity_check_fails(self):
         with patch(
@@ -628,7 +755,7 @@ class TestBtcLlmDecision(unittest.TestCase):
 
         self.assertEqual(decision.side, "NO_TRADE")
         self.assertIn("Connectivity check failed", decision.reason)
-        mock_connectivity.assert_called_once()
+        self.assertEqual(mock_connectivity.call_count, 2)
         mock_sleep.assert_not_called()
 
 

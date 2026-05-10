@@ -85,6 +85,32 @@ class TestBtcNetwork(unittest.TestCase):
         fake_session.post.assert_called_once()
         fake_session.close.assert_called_once()
 
+    def test_http_post_disables_trust_env_when_no_explicit_proxy_is_resolved(self):
+        fake_session = MagicMock()
+        fake_response = object()
+        fake_session.post.return_value = fake_response
+
+        with patch.dict(
+            os.environ,
+            {
+                "USE_PROXY": "true",
+                "ALL_PROXY": "",
+                "HTTPS_PROXY": "",
+                "HTTP_PROXY": "",
+            },
+            clear=False,
+        ), patch(
+            "custom.btc_agent.network.requests.Session",
+            return_value=fake_session,
+        ):
+            response = http_post("https://example.com", json={"ok": True}, timeout=5)
+
+        self.assertIs(response, fake_response)
+        self.assertFalse(fake_session.trust_env)
+        fake_session.post.assert_called_once()
+        self.assertIsNone(fake_session.post.call_args.kwargs["proxies"])
+        fake_session.close.assert_called_once()
+
     def test_check_internet_connectivity_reports_success(self):
         fake_session = MagicMock()
         response = MagicMock()
@@ -99,6 +125,30 @@ class TestBtcNetwork(unittest.TestCase):
 
         self.assertTrue(ok)
         self.assertIn("Connectivity OK", detail)
+        self.assertIn("route=direct", detail)
+        self.assertIn("HTTP 204", detail)
+        self.assertFalse(fake_session.trust_env)
+        fake_session.close.assert_called_once()
+
+    def test_check_internet_connectivity_reports_vpn_success(self):
+        fake_session = MagicMock()
+        response = MagicMock()
+        response.status_code = 204
+        fake_session.get.return_value = response
+
+        with patch.dict(
+            os.environ,
+            {"ALL_PROXY": "socks5h://10.64.0.1:1080"},
+            clear=False,
+        ), patch(
+            "custom.btc_agent.network.requests.Session",
+            return_value=fake_session,
+        ):
+            ok, detail = check_internet_connectivity(timeout=3.0, use_proxy=True)
+
+        self.assertTrue(ok)
+        self.assertIn("Connectivity OK", detail)
+        self.assertIn("route=vpn", detail)
         self.assertIn("HTTP 204", detail)
         self.assertFalse(fake_session.trust_env)
         fake_session.close.assert_called_once()
@@ -115,6 +165,7 @@ class TestBtcNetwork(unittest.TestCase):
 
         self.assertFalse(ok)
         self.assertIn("Connectivity check failed", detail)
+        self.assertIn("route=direct", detail)
         self.assertFalse(fake_session.trust_env)
         fake_session.close.assert_called_once()
 
@@ -165,6 +216,37 @@ class TestBtcNetwork(unittest.TestCase):
             return_value=fake_session,
         ):
             response = http_post("https://clob.polymarket.com/prices", json=[{"token_id": "1"}], timeout=10)
+
+        self.assertIs(response, fake_response)
+        self.assertFalse(fake_session.trust_env)
+        fake_session.post.assert_called_once()
+        self.assertIsNone(fake_session.post.call_args.kwargs["proxies"])
+        fake_session.close.assert_called_once()
+
+    def test_http_post_retries_direct_without_proxy_on_google_timeout(self):
+        fake_session = MagicMock()
+        fake_response = MagicMock()
+        fake_session.post.return_value = fake_response
+
+        with patch.dict(
+            os.environ,
+            {
+                "USE_PROXY": "true",
+                "ALL_PROXY": "socks5h://10.64.0.1:1080",
+            },
+            clear=False,
+        ), patch(
+            "custom.btc_agent.network.requests.post",
+            side_effect=requests.ReadTimeout("proxy timeout"),
+        ), patch(
+            "custom.btc_agent.network.requests.Session",
+            return_value=fake_session,
+        ):
+            response = http_post(
+                "https://generativelanguage.googleapis.com/v1beta/models/test:generateContent",
+                json={"ok": True},
+                timeout=10,
+            )
 
         self.assertIs(response, fake_response)
         self.assertFalse(fake_session.trust_env)

@@ -115,7 +115,11 @@ def _should_retry_direct_without_proxy(url: str) -> bool:
         hostname = (urlsplit(url).hostname or "").lower()
     except Exception:
         return False
-    return hostname.endswith("polymarket.com")
+    return (
+        hostname.endswith("polymarket.com")
+        or hostname.endswith("generativelanguage.googleapis.com")
+        or hostname.endswith("googleapis.com")
+    )
 
 
 def _request_with_direct_timeout_fallback(
@@ -125,6 +129,16 @@ def _request_with_direct_timeout_fallback(
     proxies: Optional[dict],
     request_kwargs: dict,
 ):
+    if proxies is None:
+        session = requests.Session()
+        session.trust_env = False
+        try:
+            if method == "GET":
+                return session.get(url, proxies=None, **request_kwargs)
+            return session.post(url, proxies=None, **request_kwargs)
+        finally:
+            session.close()
+
     request_callable = requests.get if method == "GET" else requests.post
     try:
         return request_callable(url, proxies=proxies, **request_kwargs)
@@ -169,6 +183,10 @@ def http_get(url: str, **kwargs: Any) -> requests.Response:
 
 
 def http_post(url: str, **kwargs: Any) -> requests.Response:
+    # `requests` supports timeout as either a single float or a
+    # `(connect_timeout, read_timeout)` tuple. Preserve that shape here so
+    # higher-level callers can fail fast on connection while waiting longer
+    # for large LLM responses.
     request_kwargs = dict(kwargs)
     proxies = request_kwargs.pop("proxies", None)
     if not is_proxy_enabled():
@@ -191,15 +209,24 @@ def http_post(url: str, **kwargs: Any) -> requests.Response:
     )
 
 
-def check_internet_connectivity(timeout: float = 5.0) -> tuple[bool, str]:
+def check_internet_connectivity(timeout: float = 5.0, use_proxy: bool = False) -> tuple[bool, str]:
     test_url = "https://www.google.com/generate_204"
     session = requests.Session()
     session.trust_env = False
+    proxies = None
+    route_label = "direct"
+    if use_proxy:
+        proxy_url = get_proxy_url_for_requests("https")
+        if proxy_url:
+            proxies = {"http": proxy_url, "https": proxy_url}
+            route_label = "vpn"
     try:
-        response = session.get(test_url, timeout=timeout)
+        response = session.get(test_url, timeout=timeout, proxies=proxies)
         response.raise_for_status()
-        return True, f"Connectivity OK via {test_url} (HTTP {response.status_code})"
+        return True, f"Connectivity OK via {test_url} (HTTP {response.status_code}; route={route_label})"
     except requests.RequestException as exc:
-        return False, f"Connectivity check failed via {test_url}: {exc}"
+        if use_proxy and proxies is None:
+            return False, f"Connectivity check failed via {test_url} (route={route_label}; no proxy configured): {exc}"
+        return False, f"Connectivity check failed via {test_url} (route={route_label}): {exc}"
     finally:
         session.close()

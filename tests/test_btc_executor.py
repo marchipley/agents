@@ -1036,6 +1036,98 @@ class TestBtcExecutor(unittest.TestCase):
         self.assertIsNone(validated_snapshot)
         self.assertIn("Momentum-trap veto blocked UP trade below the strike", rejection.reason)
 
+    def test_validate_trade_candidate_rejects_late_window_up_exhaustion(self):
+        market = types.SimpleNamespace(
+            up_token_id="up-token",
+            down_token_id="down-token",
+            settlement_threshold=100.0,
+            end_ts=1_000_000_300,
+            volume=5000.0,
+        )
+        decision = types.SimpleNamespace(
+            side="UP",
+            confidence=0.88,
+            max_price_to_pay=1.0,
+            reason="test",
+        )
+        features = types.SimpleNamespace(
+            price_usd=108.0,
+            volatility_5m=10.0,
+            rsi_9=82.0,
+            adx_14=28.0,
+        )
+        snapshot = TokenQuoteSnapshot(
+            token_id="up-token",
+            buy_quote=0.72,
+            midpoint=0.72,
+            last_trade_price=0.72,
+            reference_price=0.72,
+            target_limit_price=0.72,
+            recommended_limit_price=0.72,
+            ok_to_submit=True,
+            submit_reason="ok",
+            best_bid=0.71,
+            best_ask=0.72,
+            tick_size=0.01,
+            spread=0.01,
+        )
+
+        fake_now = datetime.fromtimestamp(1_000_000_260, tz=timezone.utc)
+        with patch("custom.btc_agent.executor.datetime") as mock_datetime:
+            mock_datetime.now.return_value = fake_now
+            validated_snapshot, rejection = _validate_trade_candidate(
+                market, decision, features=features, snapshot=snapshot
+            )
+
+        self.assertIsNone(validated_snapshot)
+        self.assertIn("Late-window exhaustion veto blocked UP trade", rejection.reason)
+
+    def test_validate_trade_candidate_rejects_final_window_thin_cushion_trade(self):
+        market = types.SimpleNamespace(
+            up_token_id="up-token",
+            down_token_id="down-token",
+            settlement_threshold=100.0,
+            end_ts=1_000_000_300,
+            volume=5000.0,
+        )
+        decision = types.SimpleNamespace(
+            side="UP",
+            confidence=0.88,
+            max_price_to_pay=1.0,
+            reason="test",
+        )
+        features = types.SimpleNamespace(
+            price_usd=103.0,
+            volatility_5m=20.0,
+            rsi_9=55.0,
+            adx_14=25.0,
+        )
+        snapshot = TokenQuoteSnapshot(
+            token_id="up-token",
+            buy_quote=0.64,
+            midpoint=0.64,
+            last_trade_price=0.64,
+            reference_price=0.64,
+            target_limit_price=0.64,
+            recommended_limit_price=0.64,
+            ok_to_submit=True,
+            submit_reason="ok",
+            best_bid=0.63,
+            best_ask=0.64,
+            tick_size=0.01,
+            spread=0.01,
+        )
+
+        fake_now = datetime.fromtimestamp(1_000_000_272, tz=timezone.utc)
+        with patch("custom.btc_agent.executor.datetime") as mock_datetime:
+            mock_datetime.now.return_value = fake_now
+            validated_snapshot, rejection = _validate_trade_candidate(
+                market, decision, features=features, snapshot=snapshot
+            )
+
+        self.assertIsNone(validated_snapshot)
+        self.assertIn("Final-window safety cushion veto blocked near-strike trade", rejection.reason)
+
     def test_validate_trade_candidate_rejects_up_rsi_ceiling_above_strike(self):
         market = types.SimpleNamespace(
             up_token_id="up-token",
