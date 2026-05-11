@@ -201,7 +201,11 @@ BTC_AGENT_DEBUG_WARMUP=False
 # and to change it in order to run all other script features.
 # This will allow us to troubleshoot issues we are having the the reponses on the VPN and proxy
 
-LLM_CONNECTION_DEBUG=True
+LLM_CONNECTION_DEBUG=False
+
+BTC_AGENT_LOOP_INTERVAL=5
+USE_PAPER_TRADES=False
+BTC_AGENT_MAX_PRICE=2
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 load_dotenv(os.path.join(REPO_ROOT, ".env"))
@@ -254,6 +258,7 @@ class TradingConfig:
     debug_warmup: bool = True
     debug_price_to_beat: bool = False
     llm_connection_debug: bool = False
+    loop_interval_seconds: int = 30
     minimum_wallet_balance: float = 0.0
     live_fee_rate_bps: int = 1000
     live_min_order_usd: float = 1.0
@@ -367,11 +372,12 @@ def get_polymarket_config() -> PolymarketConfig:
 
 def get_trading_config() -> TradingConfig:
     return TradingConfig(
-        paper_trading=_parse_bool_env("USE_PAPER_TRADES", True),
+        paper_trading=bool(USE_PAPER_TRADES),
         debug=bool(BTC_AGENT_DEBUG),
         debug_warmup=bool(BTC_AGENT_DEBUG_WARMUP),
         debug_price_to_beat=_parse_bool_env("DEBUG_PRICE_TO_BEAT", False),
         llm_connection_debug=bool(LLM_CONNECTION_DEBUG),
+        loop_interval_seconds=max(int(BTC_AGENT_LOOP_INTERVAL), 1),
         minimum_wallet_balance=float(os.getenv("MINIMUM_WALLET_BALANCE", "0")),
         live_fee_rate_bps=int(os.getenv("BTC_AGENT_LIVE_FEE_RATE_BPS", "1000")),
         live_min_order_usd=float(os.getenv("BTC_AGENT_LIVE_MIN_ORDER_USD", "1")),
@@ -384,7 +390,7 @@ def get_trading_config() -> TradingConfig:
         discovery_min_confidence=float(
             os.getenv("BTC_AGENT_DISCOVERY_MIN_CONFIDENCE", str(DISCOVERY_MIN_CONFIDENCE))
         ),
-        max_entry_price=float(os.getenv("BTC_AGENT_MAX_ENTRY_PRICE", "0.62")),
+        max_entry_price=float(BTC_AGENT_MAX_PRICE),
         max_spread=float(os.getenv("BTC_AGENT_MAX_SPREAD", str(DEFAULT_MAX_SPREAD))),
         discovery_adx_caution_threshold=float(
             os.getenv("BTC_AGENT_DISCOVERY_ADX_CAUTION_THRESHOLD", str(DISCOVERY_ADX_CAUTION_THRESHOLD))

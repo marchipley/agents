@@ -91,7 +91,7 @@ Optional / supported:
 - `NO_PROXY` optional bypass list for local addresses
 - `USE_PROXY` default: `true`; when set to `false`, the BTC agent ignores `ALL_PROXY`, `HTTP_PROXY`, and `HTTPS_PROXY` for its shared HTTP/LLM network path
 - `LLM_CONNECTION_DEBUG` is controlled by `custom/btc_agent/config.py`; when set to `true`, the agent skips geolocation and the normal trading startup flow, then runs only LLM connectivity diagnostics
-- `USE_PAPER_TRADES` default: `true`
+- `USE_PAPER_TRADES` is controlled by `custom/btc_agent/config.py`; it currently controls whether the bot paper-trades or submits live Polymarket orders
 - `MINIMUM_WALLET_BALANCE` default: `0`; enforced against Polygon pUSD trading cash, not legacy USDC.e
 - `BTC_AGENT_LIVE_FEE_RATE_BPS` default: `1000`
 - `BTC_AGENT_LIVE_MIN_ORDER_USD` default: `1`
@@ -101,11 +101,11 @@ Optional / supported:
 - `POLYGON_RPC_URLS` optional comma-separated list of Polygon RPC endpoints to try in order
 - `BTC_AGENT_DEBUG` is controlled by `custom/btc_agent/config.py`; when `true`, the agent emits fuller diagnostics and forces paper-style debugging behavior
 - `BTC_AGENT_DEBUG_WARMUP` is controlled by `custom/btc_agent/config.py`; when `false` and `BTC_AGENT_DEBUG=true`, the agent bypasses RSI / Phase 2 feature warmup gates to speed local debugging
-- `BTC_AGENT_LOOP_INTERVAL` default: `30`
+- `BTC_AGENT_LOOP_INTERVAL` is controlled by `custom/btc_agent/config.py`; it currently controls the per-loop sleep interval in seconds
 - `BTC_AGENT_MAX_TRADES_PER_PERIOD` default: `1`
 - `MAX_LOSSES_PER_RUN` default: `4` in `custom/btc_agent/config.py`; the agent counts completed losing trades since launch and stops once that loss count reaches the configured threshold
 - `BTC_AGENT_MIN_CONFIDENCE` optional override; otherwise the repo default comes from `DEFAULT_MIN_CONFIDENCE` in `custom/btc_agent/config.py`
-- `BTC_AGENT_MAX_ENTRY_PRICE` default: `0.62`
+- `BTC_AGENT_MAX_PRICE` is controlled by `custom/btc_agent/config.py`; it currently controls the maximum allowed entry price used by trade-quality gates
 - `BTC_AGENT_MAX_SPREAD` optional override; otherwise the repo default comes from `DEFAULT_MAX_SPREAD` in `custom/btc_agent/config.py`, currently `0.10`
 - `BTC_AGENT_MARKET_SLUG` for override/debugging/backtesting
 

@@ -132,7 +132,7 @@ def _apply_slippage_cooldown_if_needed(entity) -> None:
     threshold_bps = float(getattr(cfg, "slippage_cooldown_threshold_bps", 500.0))
     if abs(float(slippage_bps)) <= threshold_bps:
         return
-    loop_interval = max(int(os.getenv("BTC_AGENT_LOOP_INTERVAL", "30")), 1)
+    loop_interval = max(int(getattr(cfg, "loop_interval_seconds", 30)), 1)
     cooldown_seconds = max(int(getattr(cfg, "slippage_cooldown_seconds", 300)), 0)
     cooldown_loops = max(int(math.ceil(cooldown_seconds / loop_interval)), 1)
     set_trade_cooldown(cooldown_loops)
@@ -2282,7 +2282,7 @@ def main() -> None:
     startup_account = get_account_balance_snapshot()
     enforce_minimum_wallet_balance(startup_account)
 
-    interval = int(os.getenv("BTC_AGENT_LOOP_INTERVAL", "30"))
+    interval = int(getattr(cfg, "loop_interval_seconds", 30))
     print("Press q to quit.")
 
     monitor_context = QuitKeyMonitor()
