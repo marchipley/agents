@@ -1141,13 +1141,99 @@ def _build_debug_prompt_text(system_prompt: str, user_prompt: str) -> Optional[s
     return f"SYSTEM PROMPT:\n{system_prompt}\n\nUSER PROMPT:\n{user_prompt}"
 
 
+def _print_probe_prompt(label: str, system_prompt: str, user_prompt: str) -> None:
+    print(f"{label} prompt:")
+    print("SYSTEM PROMPT:")
+    print(system_prompt)
+    print()
+    print("USER PROMPT:")
+    print(user_prompt)
+
+
+def _request_llm_json_for_probe(
+    cfg,
+    system_prompt: str,
+    user_prompt: str,
+    timeout_seconds: float,
+    retry_attempts: int,
+    retry_timer_seconds: float,
+    probe_label: str,
+) -> tuple[dict, str]:
+    _print_probe_prompt(probe_label, system_prompt, user_prompt)
+    if cfg.engine == "openai":
+        raw_text = _request_openai_decision(
+            model=cfg.model,
+            api_key=cfg.api_key,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            timeout_seconds=timeout_seconds,
+            retry_attempts=retry_attempts,
+            retry_timer_seconds=max(retry_timer_seconds, 0.0),
+        )
+        return _extract_json_payload(raw_text), raw_text
+
+    if cfg.engine == "gemini":
+        data, raw_text = _request_gemini_decision_with_parse_retry(
+            model=cfg.model,
+            api_key=cfg.api_key,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            timeout_seconds=timeout_seconds,
+            retry_attempts=retry_attempts,
+            retry_timer_seconds=max(retry_timer_seconds, 0.0),
+        )
+        return data, raw_text
+
+    raise RuntimeError(f"Unsupported AI engine: {cfg.engine}")
+
+
+def _validate_probe_response(data: dict, probe_name: str) -> None:
+    if str(data.get("status", "")).lower() == "ok":
+        return
+    decision = str(data.get("decision", "")).upper()
+    if decision in {"UP", "DOWN", "NO_TRADE"}:
+        return
+    raise RuntimeError(f"Unexpected {probe_name} LLM connection test payload: {data}")
+
+
+def _google_connectivity_detail() -> str:
+    is_connected, detail = check_internet_connectivity()
+    if is_connected:
+        return detail
+    return f"FAILED: {detail}"
+
+
+def _build_basic_connection_test_prompts() -> tuple[str, str]:
+    return (
+        "You are a connection test for an automated trading agent. "
+        "Respond with one JSON object only using this schema: "
+        '{"decision":"UP|DOWN|NO_TRADE","confidence":0.0,'
+        '"max_price_to_pay":0.0,"reason":"short string"}.',
+        'Return exactly {"decision":"NO_TRADE","confidence":0,'
+        '"max_price_to_pay":0,"reason":"Connection test"} and nothing else.',
+    )
+
+
+def _build_full_connection_test_prompts() -> tuple[str, str]:
+    return (
+        _build_openai_realtime_system_prompt(),
+        "beat=80818.80297729779;t=0;btc_eff=80823.16;"
+        "DISTANCE_FROM_STRIKE_USD=4.359535714989761;"
+        "DISTANCE_FROM_STRIKE_PCT=0.0054;"
+        "MARKET_WIN_CHANCE_UP=1.0;MARKET_WIN_CHANCE_DOWN=0.01;"
+        "up_ask=0.99;down_ask=0.0;"
+        "rsi9=37.31201219544613;rsi14=46.585563674512606;"
+        "rsi_speed_divergence=-9.273551479066477;"
+        "mom1m=-2.3299999900045805;v15=2.940000009999494;"
+        "v30=-2.3299999900045805;acc=5.2700000000040745;"
+        "adx14=6.828872650974774;atr14=4.403571429286136;"
+        "vol5m=7.401005737845983;reqv=None;dir_ticks=3;"
+        "ticks10=UUUUDDUUDU;momentum_alignment=False",
+    )
+
+
 def test_llm_connection() -> tuple[bool, str]:
     cfg = get_llm_config()
-    system_prompt = (
-        "You are a connection test for an automated trading agent. "
-        'Respond with a single JSON object: {"status":"ok"}.'
-    )
-    user_prompt = 'Return exactly {"status":"ok"} and nothing else.'
     api_connection_timeout_seconds = _coerce_config_value(
         getattr(cfg, "api_connection_timeout_seconds", 10.0),
         float,
@@ -1163,38 +1249,48 @@ def test_llm_connection() -> tuple[bool, str]:
         1,
     )
 
+    basic_probe_detail = "basic probe passed"
     try:
-        raw_response_text = None
-        if cfg.engine == "openai":
-            raw_text = _request_openai_decision(
-                model=cfg.model,
-                api_key=cfg.api_key,
-                system_prompt=system_prompt,
-                user_prompt=user_prompt,
-                timeout_seconds=api_connection_timeout_seconds,
-                retry_attempts=api_connection_retry_attempts,
-                retry_timer_seconds=max(api_connection_retry_timer_seconds, 0.0),
-            )
-            data = _extract_json_payload(raw_text)
-        elif cfg.engine == "gemini":
-            data = _request_gemini_decision_with_parse_retry(
-                model=cfg.model,
-                api_key=cfg.api_key,
-                system_prompt=system_prompt,
-                user_prompt=user_prompt,
-                timeout_seconds=api_connection_timeout_seconds,
-                retry_attempts=api_connection_retry_attempts,
-                retry_timer_seconds=max(api_connection_retry_timer_seconds, 0.0),
-            )
-        else:
-            raise RuntimeError(f"Unsupported AI engine: {cfg.engine}")
+        basic_system_prompt, basic_user_prompt = _build_basic_connection_test_prompts()
+        basic_data, _ = _request_llm_json_for_probe(
+            cfg,
+            basic_system_prompt,
+            basic_user_prompt,
+            api_connection_timeout_seconds,
+            api_connection_retry_attempts,
+            api_connection_retry_timer_seconds,
+            "Basic LLM connection test",
+        )
+        _validate_probe_response(basic_data, "basic")
     except Exception as exc:
-        return False, str(exc)
+        google_connected, google_detail = check_internet_connectivity()
+        basic_probe_detail = f"basic probe failed: {exc}; Google connectivity: {google_detail}"
+        if not google_connected:
+            return False, basic_probe_detail
 
-    if str(data.get("status", "")).lower() != "ok":
-        return False, f"Unexpected LLM connection test payload: {data}"
+    try:
+        full_system_prompt, full_user_prompt = _build_full_connection_test_prompts()
+        full_data, _ = _request_llm_json_for_probe(
+            cfg,
+            full_system_prompt,
+            full_user_prompt,
+            api_connection_timeout_seconds,
+            api_connection_retry_attempts,
+            api_connection_retry_timer_seconds,
+            "Full-size LLM connection test",
+        )
+        _validate_probe_response(full_data, "full-size")
+    except Exception as exc:
+        google_detail = _google_connectivity_detail()
+        return False, (
+            f"{basic_probe_detail}; Full-size LLM probe failed: {exc}; "
+            f"Google connectivity: {google_detail}"
+        )
 
-    return True, f"LLM connection test succeeded ({cfg.engine}/{cfg.model})"
+    return True, (
+        f"LLM connection test succeeded ({cfg.engine}/{cfg.model}; "
+        f"{basic_probe_detail}; full-size probe passed)"
+    )
 
 
 def decide_trade(features: BtcFeatures, market: BtcUpDownMarket, up_snapshot=None, down_snapshot=None) -> LlmDecision:

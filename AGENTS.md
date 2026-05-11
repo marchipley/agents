@@ -90,7 +90,7 @@ Optional / supported:
 - `HTTP_PROXY` / `HTTPS_PROXY` optional proxy settings for outbound API calls, including LLM requests and geolocation checks
 - `NO_PROXY` optional bypass list for local addresses
 - `USE_PROXY` default: `true`; when set to `false`, the BTC agent ignores `ALL_PROXY`, `HTTP_PROXY`, and `HTTPS_PROXY` for its shared HTTP/LLM network path
-- `LLM_CONNECTION_DEBUG` default: `false`; when set to `true`, the agent skips the normal trading startup flow and runs only an LLM connectivity test
+- `LLM_CONNECTION_DEBUG` is controlled by `custom/btc_agent/config.py`; when set to `true`, the agent skips geolocation and the normal trading startup flow, then runs only LLM connectivity diagnostics
 - `USE_PAPER_TRADES` default: `true`
 - `MINIMUM_WALLET_BALANCE` default: `0`; enforced against Polygon pUSD trading cash, not legacy USDC.e
 - `BTC_AGENT_LIVE_FEE_RATE_BPS` default: `1000`
@@ -99,7 +99,8 @@ Optional / supported:
 - `POLYMKT_PROXY_ADDRESS`
 - `POLYGON_RPC_URL` default: `https://polygon.drpc.org`
 - `POLYGON_RPC_URLS` optional comma-separated list of Polygon RPC endpoints to try in order
-- `BTC_AGENT_DEBUG` default: `false`
+- `BTC_AGENT_DEBUG` is controlled by `custom/btc_agent/config.py`; when `true`, the agent emits fuller diagnostics and forces paper-style debugging behavior
+- `BTC_AGENT_DEBUG_WARMUP` is controlled by `custom/btc_agent/config.py`; when `false` and `BTC_AGENT_DEBUG=true`, the agent bypasses RSI / Phase 2 feature warmup gates to speed local debugging
 - `BTC_AGENT_LOOP_INTERVAL` default: `30`
 - `BTC_AGENT_MAX_TRADES_PER_PERIOD` default: `1`
 - `MAX_LOSSES_PER_RUN` default: `4` in `custom/btc_agent/config.py`; the agent counts completed losing trades since launch and stops once that loss count reaches the configured threshold
@@ -143,7 +144,7 @@ What the BTC agent does today:
 - Routes outbound BTC-agent requests through `ALL_PROXY` when configured, including geolocation, BTC spot pricing, Polymarket API lookups, and LLM calls.
 - For Polymarket HTTP endpoints, the shared network layer now retries once without the proxy on connect/read timeout when proxy routing is enabled, which helps recover from intermittent SOCKS timeouts against `*.polymarket.com`.
 - Allows proxy routing to be disabled globally with `USE_PROXY=false`, which causes the agent to use direct connections for shared HTTP/LLM requests even if proxy environment variables are present.
-- Supports a dedicated `LLM_CONNECTION_DEBUG=true` mode that runs only a one-shot LLM connectivity test, prints the active connection settings, runs a direct Google connectivity probe after LLM connection failures, and exits without touching balances, market lookup, or trading execution.
+- Supports a dedicated `LLM_CONNECTION_DEBUG=true` mode that runs only LLM diagnostics, prints the active connection settings, prints the full system/user prompt for each probe, sends a small LLM probe first, runs a direct Google connectivity probe after LLM failures, then sends a predefined full-size trading-style prompt before exiting without touching geolocation, balances, market lookup, warmup, or trading execution.
 - Uses the configured AI engine with JSON output to decide `UP`, `DOWN`, or `NO_TRADE`.
 - Prints the current market `price_to_beat` in the BTC-agent output and includes that same period baseline in the LLM decision prompt, now preferring Vatic's BTC 5-minute timestamp target API and only falling back to Polymarket page / `_next/data` parsing when that external target lookup is unavailable.
 - Pulls Gamma `outcomePrices` from the active market payload only as an initial discovery fallback, then refreshes `up_market_probability` / `down_market_probability` from the Polymarket CLOB market websocket using the same token-mapped `price_change.best_ask` fields as the local `getlimitfull.py` script, so terminal output, completed-period logs, completed-order logs, and prompt inputs track the same live probabilities shown on Polymarket more closely.

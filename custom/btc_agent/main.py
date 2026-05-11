@@ -2040,6 +2040,12 @@ def run_once() -> None:
     features = build_btc_features(window_start_ts=market.start_ts)
     print_features(features, debug=cfg.debug)
     features_ready, feature_skip_reason = get_feature_readiness(features)
+    if cfg.debug and not getattr(cfg, "debug_warmup", True) and not features_ready:
+        print(
+            "Debug warmup bypass enabled; continuing despite feature readiness: "
+            f"{feature_skip_reason}"
+        )
+        features_ready = True
     if not features_ready:
         append_pending_period_tick_analysis(
             market,
@@ -2259,9 +2265,14 @@ def main() -> None:
 
     if cfg.llm_connection_debug:
         print("LLM connection debug mode enabled.")
+        print("Skipping public IP geolocation check because LLM_CONNECTION_DEBUG=true")
         success, detail = test_llm_connection()
         if success:
             print(f"LLM connection test: {detail}")
+            print(
+                "Script terminated because LLM_CONNECTION_DEBUG=True. "
+                "Set it to False in custom/btc_agent/config.py to run the full BTC agent."
+            )
             return
         print(f"ERROR: LLM connection test failed: {detail}")
         sys.exit(1)

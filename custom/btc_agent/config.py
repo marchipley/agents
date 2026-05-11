@@ -188,6 +188,21 @@ LIVE_ORDER_STATUS_POLL_ATTEMPTS = 4
 # the loop; lowering to 0.25s checks faster but can miss slower confirmations.
 LIVE_ORDER_STATUS_POLL_INTERVAL_SECONDS = 0.75
 
+# Enabling tis will output additional debug info in the output
+BTC_AGENT_DEBUG=False
+
+# Enabling this will disable warmup if BTC_AGENT_DEBUG is enabled
+BTC_AGENT_DEBUG_WARMUP=False
+
+# When enabled, the program will disable the geolocation check and send a small test prompt to the LLM to check connection
+# then do a test connection to google if it fails so we can see if there is any basic connection
+# issues. If that succeeds, it will then send a full size system and user prompt to the LLM and confirm 
+# a response then the script will terminate and advise the user that the script was terminated due to LLM_CONNECTION_DEBUG=True
+# and to change it in order to run all other script features.
+# This will allow us to troubleshoot issues we are having the the reponses on the VPN and proxy
+
+LLM_CONNECTION_DEBUG=True
+
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 load_dotenv(os.path.join(REPO_ROOT, ".env"))
 
@@ -236,6 +251,7 @@ class LlmConfig:
 class TradingConfig:
     paper_trading: bool = True
     debug: bool = False
+    debug_warmup: bool = True
     debug_price_to_beat: bool = False
     llm_connection_debug: bool = False
     minimum_wallet_balance: float = 0.0
@@ -352,9 +368,10 @@ def get_polymarket_config() -> PolymarketConfig:
 def get_trading_config() -> TradingConfig:
     return TradingConfig(
         paper_trading=_parse_bool_env("USE_PAPER_TRADES", True),
-        debug=_parse_bool_env("BTC_AGENT_DEBUG", False),
+        debug=bool(BTC_AGENT_DEBUG),
+        debug_warmup=bool(BTC_AGENT_DEBUG_WARMUP),
         debug_price_to_beat=_parse_bool_env("DEBUG_PRICE_TO_BEAT", False),
-        llm_connection_debug=_parse_bool_env("LLM_CONNECTION_DEBUG", False),
+        llm_connection_debug=bool(LLM_CONNECTION_DEBUG),
         minimum_wallet_balance=float(os.getenv("MINIMUM_WALLET_BALANCE", "0")),
         live_fee_rate_bps=int(os.getenv("BTC_AGENT_LIVE_FEE_RATE_BPS", "1000")),
         live_min_order_usd=float(os.getenv("BTC_AGENT_LIVE_MIN_ORDER_USD", "1")),
