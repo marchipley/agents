@@ -189,7 +189,7 @@ LIVE_ORDER_STATUS_POLL_ATTEMPTS = 4
 LIVE_ORDER_STATUS_POLL_INTERVAL_SECONDS = 0.75
 
 # Enabling tis will output additional debug info in the output
-BTC_AGENT_DEBUG=False
+BTC_AGENT_DEBUG=True
 
 # Enabling this will disable warmup if BTC_AGENT_DEBUG is enabled
 BTC_AGENT_DEBUG_WARMUP=False
