@@ -189,7 +189,7 @@ LIVE_ORDER_STATUS_POLL_ATTEMPTS = 4
 LIVE_ORDER_STATUS_POLL_INTERVAL_SECONDS = 0.75
 
 # Enabling tis will output additional debug info in the output
-BTC_AGENT_DEBUG=True
+BTC_AGENT_DEBUG=False
 
 # Enabling this will disable warmup if BTC_AGENT_DEBUG is enabled
 BTC_AGENT_DEBUG_WARMUP=False
@@ -201,7 +201,7 @@ BTC_AGENT_DEBUG_WARMUP=False
 # and to change it in order to run all other script features.
 # This will allow us to troubleshoot issues we are having the the reponses on the VPN and proxy
 
-LLM_CONNECTION_DEBUG=False
+LLM_CONNECTION_DEBUG=True
 
 BTC_AGENT_LOOP_INTERVAL=5
 USE_PAPER_TRADES=False
@@ -256,7 +256,6 @@ class TradingConfig:
     paper_trading: bool = True
     debug: bool = False
     debug_warmup: bool = True
-    debug_price_to_beat: bool = False
     llm_connection_debug: bool = False
     loop_interval_seconds: int = 30
     minimum_wallet_balance: float = 0.0
@@ -375,7 +374,6 @@ def get_trading_config() -> TradingConfig:
         paper_trading=bool(USE_PAPER_TRADES),
         debug=bool(BTC_AGENT_DEBUG),
         debug_warmup=bool(BTC_AGENT_DEBUG_WARMUP),
-        debug_price_to_beat=_parse_bool_env("DEBUG_PRICE_TO_BEAT", False),
         llm_connection_debug=bool(LLM_CONNECTION_DEBUG),
         loop_interval_seconds=max(int(BTC_AGENT_LOOP_INTERVAL), 1),
         minimum_wallet_balance=float(os.getenv("MINIMUM_WALLET_BALANCE", "0")),
