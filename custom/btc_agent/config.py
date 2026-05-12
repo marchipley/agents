@@ -201,7 +201,7 @@ BTC_AGENT_DEBUG_WARMUP=False
 # and to change it in order to run all other script features.
 # This will allow us to troubleshoot issues we are having the the reponses on the VPN and proxy
 
-LLM_CONNECTION_DEBUG=True
+LLM_CONNECTION_DEBUG=False
 
 BTC_AGENT_LOOP_INTERVAL=5
 USE_PAPER_TRADES=False
