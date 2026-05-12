@@ -1784,13 +1784,15 @@ def both_sides_untradable_reason(up_snapshot: TokenQuoteSnapshot, down_snapshot:
 
 
 def print_llm_decision(decision, market, features, debug: bool) -> None:
+    cfg = get_trading_config()
+    show_llm_detail = debug or getattr(cfg, "llm_show_detail", False)
     print("LLM decision:")
     print(f"  side              = {decision.side}")
     print(f"  confidence        = {decision.confidence:.3f}")
     print(f"  effective_conf    = {_effective_confidence(decision, market=market, features=features):.3f}")
     print(f"  max_price_to_pay  = {decision.max_price_to_pay:.3f}")
     print(f"  reason            = {decision.reason}")
-    if debug and getattr(decision, "prompt_text", None):
+    if show_llm_detail and getattr(decision, "prompt_text", None):
         print("LLM prompt:")
         print(decision.prompt_text)
     if getattr(decision, "raw_response_text", None):

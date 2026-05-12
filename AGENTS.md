@@ -101,6 +101,7 @@ Optional / supported:
 - `POLYGON_RPC_URLS` optional comma-separated list of Polygon RPC endpoints to try in order
 - `BTC_AGENT_DEBUG` is controlled by `custom/btc_agent/config.py`; when `true`, the agent emits fuller diagnostics and forces paper-style debugging behavior
 - `BTC_AGENT_DEBUG_WARMUP` is controlled by `custom/btc_agent/config.py`; when `false` and `BTC_AGENT_DEBUG=true`, the agent bypasses RSI / Phase 2 feature warmup gates to speed local debugging
+- `LLM_SHOW_DETAIL` is controlled by `custom/btc_agent/config.py`; when `true`, terminal output and completed-order / completed-period logs include the full LLM system/user prompt and raw response without enabling all `BTC_AGENT_DEBUG` output
 - `BTC_AGENT_LOOP_INTERVAL` is controlled by `custom/btc_agent/config.py`; it currently controls the per-loop sleep interval in seconds
 - `BTC_AGENT_MAX_TRADES_PER_PERIOD` default: `1`
 - `MAX_LOSSES_PER_RUN` default: `4` in `custom/btc_agent/config.py`; the agent counts completed losing trades since launch and stops once that loss count reaches the configured threshold
@@ -237,6 +238,10 @@ What the BTC agent does today:
   - if `RSI(9) < 30`, `DOWN` is rejected as bottom-chasing
   - if `RSI(9) > 70`, `UP` is rejected unless `ADX > 30`
   - if `RSI(9) > 85` while BTC is already above the strike, `UP` is rejected as an exhaustion-risk breakout chase
+- Applies a hard exhaustion cap before the softer RSI vetoes:
+  - if `ADX(14) > 50` and `RSI(9) > 80`, new `UP` entries are rejected as overbought trend exhaustion
+  - if `ADX(14) > 50` and `RSI(9) < 20`, new `DOWN` entries are rejected as oversold trend exhaustion
+- Applies a late ITM quote cap: if the chosen side is already in the money, fewer than 60 seconds remain, and the buy quote is above `0.85`, the trade is rejected as poor risk/reward.
 - Applies momentum-trap RSI vetoes before submission:
   - if the bot wants `UP` while BTC is still below the strike and `RSI(9) > 60`, the trade is rejected as a late breakout chase below the settlement line
   - if the bot wants `UP` with more than 200 seconds remaining and `RSI(9) > MAX_EARLY_WINDOW_RSI`, currently `65`, the trade is rejected as an early-window momentum trap
@@ -293,6 +298,7 @@ What the BTC agent does today:
 - Enforces `MAX_LOSSES_PER_RUN` across the full process session as a completed-loss stop; once that many trades have actually settled as losses, the agent exits.
 - When `BTC_AGENT_DEBUG=false`, suppresses most verbose diagnostics and only prints a compact subset of geolocation, balances, quote snapshots, BTC features, LLM decision fields, and final paper execution fields.
 - When `BTC_AGENT_DEBUG=true`, the agent also prints the exact LLM prompt text to terminal output and writes that same prompt into the pending-period / completed-order logs for post-trade review.
+- When `LLM_SHOW_DETAIL=true`, the agent also prints and stores the exact LLM prompt/response details without requiring full debug mode.
 - The raw LLM response text is preserved for successful decisions regardless of debug mode:
   - it is printed to terminal output as `LLM raw response:`
   - it is written into pending-period / completed-order logs between `llm_raw_response_start` / `llm_raw_response_end`

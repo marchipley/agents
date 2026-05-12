@@ -75,17 +75,17 @@ class TestBtcLlmConfig(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 get_llm_config()
 
-    def test_trading_config_reads_llm_connection_debug_flag(self):
-        with patch.dict(
-            os.environ,
-            {
-                "LLM_CONNECTION_DEBUG": "true",
-            },
-            clear=False,
-        ):
+    def test_trading_config_reads_llm_connection_debug_flag_from_config_constant(self):
+        with patch("custom.btc_agent.config.LLM_CONNECTION_DEBUG", True):
             cfg = get_trading_config()
 
         self.assertTrue(cfg.llm_connection_debug)
+
+    def test_trading_config_reads_llm_show_detail_flag_from_config_constant(self):
+        with patch("custom.btc_agent.config.LLM_SHOW_DETAIL", True):
+            cfg = get_trading_config()
+
+        self.assertTrue(cfg.llm_show_detail)
 
 
 if __name__ == "__main__":

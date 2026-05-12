@@ -155,7 +155,7 @@ def _build_system_prompt() -> str:
         "If Window Delta is above 0.15% near T-10, confidence should usually be 0.95 or higher.\n"
         "If confidence is above 0.90, treat it as a directive to get in rather than demanding extra edge buffer.\n"
         "If time remaining is under 5 seconds and confidence is above 0.70, avoid NO_TRADE unless the signal is clearly invalid.\n"
-        "CRITICAL EXECUTION RULE: If the trade is currently IN-THE-MONEY (Price > Strike for UP, Price < Strike for DOWN) and there is less than 60 seconds remaining, ignore RSI overbought/oversold exhaustion signals. In this state, momentum is less important than position maintenance. Only veto late-window ITM trades if a massive counter-trend spike is actively occurring.\n"
+        "CRITICAL EXECUTION RULE: If currently ITM and time remaining < 60s, you may ignore RSI signals ONLY IF the entry price is below 0.80. If the buy quote is > 0.85, the risk-to-reward is too poor to enter a new position regardless of ITM status.\n"
         "Paradoxical Momentum rule: If ADX is above 50 and RSI is above 75, treat this as Exhaustion rather than Strength. Do not enter new positions; only maintain existing ones.\n"
         f"Respect market consensus. If the chosen side market win chance is below {cfg.market_win_chance_veto_threshold:.2f} and 15 <= time_remaining_seconds < {cfg.market_win_chance_veto_end_seconds}, prefer NO_TRADE. Under 15 seconds, only fade consensus on a clear reversal.\n"
         "If momentum_alignment is TRUE, clarity is HIGH and you are encouraged to trade with the trend.\n"
@@ -180,7 +180,7 @@ def _build_openai_realtime_system_prompt() -> str:
         "Do not confuse strike-distance fields with market-win-chance fields. "
         "A MARKET_WIN_CHANCE of 65% is aggressive consensus, not physical distance. A $1.00 DISTANCE_FROM_STRIKE_USD can justify ~95% confidence when time_remaining_seconds<15. "
         f"If time_remaining_seconds>240 and adx<{cfg.discovery_adx_caution_threshold:.0f}, stay cautious; if adx>{cfg.trend_priority_adx_threshold:.0f}, prioritize the trend over elapsed time. "
-        "If trade is ITM and time_remaining_seconds<60, ignore RSI exhaustion and focus on position maintenance unless a massive counter-trend spike is active. "
+        "If trade is ITM and time_remaining_seconds<60, you may ignore RSI only when entry quote<0.80; if buy quote>0.85, prefer NO_TRADE regardless of ITM status. "
         "If adx>50 and rsi>75, treat that as exhaustion rather than strength and avoid new entries. "
         f"If chosen market win chance<{cfg.market_win_chance_veto_threshold:.2f} and 15<=time_remaining_seconds<{cfg.market_win_chance_veto_end_seconds}, prefer NO_TRADE. "
         "If momentum_alignment is TRUE, clarity is HIGH and you are encouraged to trade with the trend. "
@@ -1135,7 +1135,7 @@ def _build_debug_prompt_text(system_prompt: str, user_prompt: str) -> Optional[s
         cfg = get_trading_config()
     except Exception:
         return None
-    if not getattr(cfg, "debug", False):
+    if not (getattr(cfg, "debug", False) or getattr(cfg, "llm_show_detail", False)):
         return None
     return f"SYSTEM PROMPT:\n{system_prompt}\n\nUSER PROMPT:\n{user_prompt}"
 

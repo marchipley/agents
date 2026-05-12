@@ -684,6 +684,53 @@ class TestBtcExecutor(unittest.TestCase):
         self.assertIsNone(validated_snapshot)
         self.assertIn("RSI directional veto blocked DOWN", rejection.reason)
 
+    def test_validate_trade_candidate_rejects_down_on_hard_exhaustion_cap(self):
+        market = types.SimpleNamespace(
+            up_token_id="up-token",
+            down_token_id="down-token",
+            settlement_threshold=100.0,
+            end_ts=1_000_000_180,
+            volume=5000.0,
+        )
+        decision = types.SimpleNamespace(
+            side="DOWN",
+            confidence=0.95,
+            max_price_to_pay=1.0,
+            reason="test",
+        )
+        features = types.SimpleNamespace(
+            price_usd=95.0,
+            volatility_5m=10.0,
+            rsi_9=15.0,
+            adx_14=55.0,
+            delta_pct_from_window_open=-0.001,
+        )
+        snapshot = TokenQuoteSnapshot(
+            token_id="down-token",
+            buy_quote=0.30,
+            midpoint=0.30,
+            last_trade_price=0.30,
+            reference_price=0.30,
+            target_limit_price=0.30,
+            recommended_limit_price=0.30,
+            ok_to_submit=True,
+            submit_reason="ok",
+            best_bid=0.29,
+            best_ask=0.30,
+            tick_size=0.01,
+            spread=0.01,
+        )
+
+        fake_now = datetime.fromtimestamp(1_000_000_000, tz=timezone.utc)
+        with patch("custom.btc_agent.executor.datetime") as mock_datetime:
+            mock_datetime.now.return_value = fake_now
+            validated_snapshot, rejection = _validate_trade_candidate(
+                market, decision, features=features, snapshot=snapshot
+            )
+
+        self.assertIsNone(validated_snapshot)
+        self.assertIn("Hard Exhaustion Veto: ADX > 50 and RSI9 < 20", rejection.reason)
+
     def test_validate_trade_candidate_rejects_up_when_rsi9_is_overbought(self):
         market = types.SimpleNamespace(
             up_token_id="up-token",
@@ -729,6 +776,53 @@ class TestBtcExecutor(unittest.TestCase):
 
         self.assertIsNone(validated_snapshot)
         self.assertIn("RSI directional veto blocked UP", rejection.reason)
+
+    def test_validate_trade_candidate_rejects_up_on_hard_exhaustion_cap(self):
+        market = types.SimpleNamespace(
+            up_token_id="up-token",
+            down_token_id="down-token",
+            settlement_threshold=100.0,
+            end_ts=1_000_000_180,
+            volume=5000.0,
+        )
+        decision = types.SimpleNamespace(
+            side="UP",
+            confidence=0.95,
+            max_price_to_pay=1.0,
+            reason="test",
+        )
+        features = types.SimpleNamespace(
+            price_usd=105.0,
+            volatility_5m=10.0,
+            rsi_9=82.0,
+            adx_14=55.0,
+            delta_pct_from_window_open=0.001,
+        )
+        snapshot = TokenQuoteSnapshot(
+            token_id="up-token",
+            buy_quote=0.60,
+            midpoint=0.60,
+            last_trade_price=0.60,
+            reference_price=0.60,
+            target_limit_price=0.60,
+            recommended_limit_price=0.60,
+            ok_to_submit=True,
+            submit_reason="ok",
+            best_bid=0.59,
+            best_ask=0.60,
+            tick_size=0.01,
+            spread=0.01,
+        )
+
+        fake_now = datetime.fromtimestamp(1_000_000_000, tz=timezone.utc)
+        with patch("custom.btc_agent.executor.datetime") as mock_datetime:
+            mock_datetime.now.return_value = fake_now
+            validated_snapshot, rejection = _validate_trade_candidate(
+                market, decision, features=features, snapshot=snapshot
+            )
+
+        self.assertIsNone(validated_snapshot)
+        self.assertIn("Hard Exhaustion Veto: ADX > 50 and RSI9 > 80", rejection.reason)
 
     def test_validate_trade_candidate_allows_up_when_parabolic_rsi_suspension_applies(self):
         market = types.SimpleNamespace(
@@ -777,6 +871,53 @@ class TestBtcExecutor(unittest.TestCase):
 
         self.assertIs(validated_snapshot, snapshot)
         self.assertIsNone(rejection)
+
+    def test_validate_trade_candidate_rejects_late_itm_entry_when_quote_is_too_high(self):
+        market = types.SimpleNamespace(
+            up_token_id="up-token",
+            down_token_id="down-token",
+            settlement_threshold=100.0,
+            end_ts=1_000_000_050,
+            volume=5000.0,
+        )
+        decision = types.SimpleNamespace(
+            side="DOWN",
+            confidence=0.95,
+            max_price_to_pay=1.0,
+            reason="test",
+        )
+        features = types.SimpleNamespace(
+            price_usd=95.0,
+            volatility_5m=10.0,
+            rsi_9=35.0,
+            adx_14=35.0,
+            delta_pct_from_window_open=-0.001,
+        )
+        snapshot = TokenQuoteSnapshot(
+            token_id="down-token",
+            buy_quote=0.90,
+            midpoint=0.90,
+            last_trade_price=0.90,
+            reference_price=0.90,
+            target_limit_price=0.90,
+            recommended_limit_price=0.90,
+            ok_to_submit=True,
+            submit_reason="ok",
+            best_bid=0.89,
+            best_ask=0.90,
+            tick_size=0.01,
+            spread=0.01,
+        )
+
+        fake_now = datetime.fromtimestamp(1_000_000_000, tz=timezone.utc)
+        with patch("custom.btc_agent.executor.datetime") as mock_datetime:
+            mock_datetime.now.return_value = fake_now
+            validated_snapshot, rejection = _validate_trade_candidate(
+                market, decision, features=features, snapshot=snapshot
+            )
+
+        self.assertIsNone(validated_snapshot)
+        self.assertIn("Late ITM entry quote veto", rejection.reason)
 
     def test_validate_trade_candidate_rejects_sub_015_quote_inside_final_15_seconds_when_below_010(self):
         market = types.SimpleNamespace(

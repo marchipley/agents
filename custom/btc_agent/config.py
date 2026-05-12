@@ -13,16 +13,16 @@ from typing import Optional
 # stronger raw LLM conviction; lowering it to 0.60 allows more marginal trades.
 DEFAULT_MIN_CONFIDENCE = 0.65
 
-# Very low confidence floor used in the early Discovery Phase to allow
+# Lower confidence floor used in the early Discovery Phase to allow
 # mathematically favorable early entries before the market fully trends.
 # Example: raising from 0.10 to 0.25 makes early entries rarer; lowering it
 # further makes the bot more willing to probe early-window setups.
-DISCOVERY_MIN_CONFIDENCE = 0.85
+DISCOVERY_MIN_CONFIDENCE = 0.70
 
 # Fixed number of shares to submit for each paper/live trade.
 # Example: increasing from 5 to 10 doubles position size and PnL variance;
 # lowering to 3 reduces exposure per order.
-SHARES_PER_TRADE = 5
+SHARES_PER_TRADE = 7
 
 # Maximum spread allowed by configuration for a trade candidate.
 # Example: raising from 0.06 to 0.10 allows participation in wider, more
@@ -203,6 +203,10 @@ BTC_AGENT_DEBUG_WARMUP=False
 
 LLM_CONNECTION_DEBUG=False
 
+# When enabled, the terminal output and completed_orders log files will show the full LLM request and response. Enabling debug
+# also does this but we do not always want to see the full debug output to reduce clutter.
+LLM_SHOW_DETAIL=True
+
 BTC_AGENT_LOOP_INTERVAL=5
 USE_PAPER_TRADES=False
 BTC_AGENT_MAX_PRICE=2
@@ -257,6 +261,7 @@ class TradingConfig:
     debug: bool = False
     debug_warmup: bool = True
     llm_connection_debug: bool = False
+    llm_show_detail: bool = False
     loop_interval_seconds: int = 30
     minimum_wallet_balance: float = 0.0
     live_fee_rate_bps: int = 1000
@@ -375,6 +380,7 @@ def get_trading_config() -> TradingConfig:
         debug=bool(BTC_AGENT_DEBUG),
         debug_warmup=bool(BTC_AGENT_DEBUG_WARMUP),
         llm_connection_debug=bool(LLM_CONNECTION_DEBUG),
+        llm_show_detail=bool(LLM_SHOW_DETAIL),
         loop_interval_seconds=max(int(BTC_AGENT_LOOP_INTERVAL), 1),
         minimum_wallet_balance=float(os.getenv("MINIMUM_WALLET_BALANCE", "0")),
         live_fee_rate_bps=int(os.getenv("BTC_AGENT_LIVE_FEE_RATE_BPS", "1000")),

@@ -10,6 +10,7 @@ sys.modules.setdefault("dotenv", types.SimpleNamespace(load_dotenv=lambda *args,
 sys.modules.setdefault("websocket", types.SimpleNamespace(WebSocketApp=object, create_connection=object))
 
 from custom.btc_agent.llm_decision import (
+    _build_debug_prompt_text,
     _build_minimal_user_prompt,
     _build_user_prompt,
     _extract_json_payload,
@@ -58,6 +59,15 @@ class DummyMarket:
 
 
 class TestBtcLlmDecision(unittest.TestCase):
+    def test_build_debug_prompt_text_enabled_by_llm_show_detail_without_full_debug(self):
+        with patch(
+            "custom.btc_agent.llm_decision.get_trading_config",
+            return_value=types.SimpleNamespace(debug=False, llm_show_detail=True),
+        ):
+            prompt_text = _build_debug_prompt_text("system", "user")
+
+        self.assertEqual(prompt_text, "SYSTEM PROMPT:\nsystem\n\nUSER PROMPT:\nuser")
+
     def test_extract_json_payload_accepts_key_value_response_format(self):
         payload = _extract_json_payload(
             "decision: NO_TRADE, confidence: 0.45, max_price_to_pay: 1.0, reason: Time remaining is sufficient, RSI not extreme, and side quote low, so prefer no trade."

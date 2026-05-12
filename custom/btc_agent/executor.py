@@ -1482,6 +1482,39 @@ def _validate_trade_candidate(
         else abs(float(effective_confidence) - float(market_implied_probability))
     )
 
+    if adx_14 is not None and adx_14 > 50.0:
+        if decision.side == "UP" and rsi_9 is not None and rsi_9 > 80.0:
+            return _reject(
+                submission_limit_price,
+                (
+                    "Hard Exhaustion Veto: ADX > 50 and RSI9 > 80 "
+                    f"(adx_14={adx_14:.3f}; rsi_9={rsi_9:.3f})"
+                ),
+            )
+        if decision.side == "DOWN" and rsi_9 is not None and rsi_9 < 20.0:
+            return _reject(
+                submission_limit_price,
+                (
+                    "Hard Exhaustion Veto: ADX > 50 and RSI9 < 20 "
+                    f"(adx_14={adx_14:.3f}; rsi_9={rsi_9:.3f})"
+                ),
+            )
+
+    if (
+        side_is_itm
+        and time_remaining_seconds < 60
+        and chosen_side_quote is not None
+        and chosen_side_quote > 0.85
+    ):
+        return _reject(
+            submission_limit_price,
+            (
+                "Late ITM entry quote veto blocked poor risk/reward trade "
+                f"(quote={chosen_side_quote:.3f}; threshold=0.850; "
+                f"time_remaining={time_remaining_seconds}s)"
+            ),
+        )
+
     if (
         decision.side == "DOWN"
         and rsi_9 is not None
