@@ -172,6 +172,7 @@ What the BTC agent does today:
   - `Window Delta` is explicitly defined as the change from the market window open price and must not be confused with `DISTANCE_FROM_STRIKE_*`, `MARKET_WIN_CHANCE_*`, or `oracle_gap_ratio`
   - when upstream `start_ts` / `end_ts` are stale, the prompt now prefers the canonical slug timestamp plus 300 seconds so the model sees the same effective clock as execution
 - The LLM prompt now treats `DISTANCE_FROM_STRIKE_PCT` as the source of truth for whether `UP` or `DOWN` is currently winning relative to the price to beat, while `window_delta_pct` is treated only as recent drift from the market-window open.
+- `DISTANCE_FROM_STRIKE_USD` and `DISTANCE_FROM_STRIKE_PCT` are now computed directly from the raw BTC feed price minus the period `price_to_beat`; synthetic Polymarket-implied oracle price is included only as separate market-context diagnostics and must not replace the physical strike gap.
 - The live decision prompts now omit `window_delta_pct` entirely from the active minimal decision payload and instead emphasize:
   - `DISTANCE_FROM_STRIKE_USD`
   - `DISTANCE_FROM_STRIKE_PCT`

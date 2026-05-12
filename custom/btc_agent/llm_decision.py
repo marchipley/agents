@@ -87,6 +87,25 @@ def _compute_implied_oracle_price(
     )
 
 
+def _strike_distance_context(
+    features: BtcFeatures,
+    market: BtcUpDownMarket,
+    up_snapshot=None,
+    down_snapshot=None,
+) -> tuple[Optional[float], Optional[float], Optional[float], Optional[float], Optional[float]]:
+    implied_oracle_price = _compute_implied_oracle_price(features, market, up_snapshot, down_snapshot)
+    current_price = None if features.price_usd is None else float(features.price_usd)
+    strike = None if market.settlement_threshold in (None, 0) else float(market.settlement_threshold)
+    gap_to_target = None if current_price is None or strike is None else current_price - strike
+    strike_delta_pct = None if gap_to_target is None or strike in (None, 0) else gap_to_target / strike
+    feed_drift_usd = (
+        None
+        if current_price is None or implied_oracle_price is None
+        else current_price - implied_oracle_price
+    )
+    return current_price, gap_to_target, strike_delta_pct, implied_oracle_price, feed_drift_usd
+
+
 def _momentum_alignment_text(features: BtcFeatures) -> str:
     values = [
         getattr(features, "velocity_15s", None),
@@ -180,24 +199,17 @@ def _build_openai_realtime_system_prompt() -> str:
 def _build_user_prompt(features: BtcFeatures, market: BtcUpDownMarket, up_snapshot=None, down_snapshot=None) -> str:
     cfg = get_trading_config()
     time_remaining_seconds = _get_time_remaining_seconds(market, int(features.as_of.timestamp()))
-    implied_oracle_price = _compute_implied_oracle_price(features, market, up_snapshot, down_snapshot)
-    effective_current_price = (
-        implied_oracle_price if implied_oracle_price is not None else features.price_usd
-    )
-    gap_to_target = (
-        None
-        if market.settlement_threshold in (None, 0)
-        else effective_current_price - market.settlement_threshold
-    )
+    (
+        effective_current_price,
+        gap_to_target,
+        strike_delta_pct,
+        implied_oracle_price,
+        feed_drift_usd,
+    ) = _strike_distance_context(features, market, up_snapshot, down_snapshot)
     required_velocity_to_win = (
         None
         if gap_to_target is None or time_remaining_seconds <= 0
         else abs(gap_to_target) / time_remaining_seconds
-    )
-    strike_delta_pct = (
-        None
-        if gap_to_target is None or features.price_usd in (None, 0)
-        else gap_to_target / features.price_usd
     )
     strike_delta_pct_display = (
         "None" if strike_delta_pct is None else f"{strike_delta_pct * 100:.4f}%"
@@ -227,7 +239,9 @@ def _build_user_prompt(features: BtcFeatures, market: BtcUpDownMarket, up_snapsh
         f"- Required velocity to win USD/sec: {required_velocity_to_win}\n\n"
         "BTC features:\n"
         f"- Current BTC price USD (raw feed): {features.price_usd:.2f}\n"
-        f"- Effective BTC price USD (drift-adjusted): {effective_current_price:.2f}\n"
+        f"- Effective BTC price USD (raw strike baseline): {effective_current_price:.2f}\n"
+        f"- Implied oracle price USD (market context only): {implied_oracle_price}\n"
+        f"- Feed drift USD (raw BTC - implied oracle): {feed_drift_usd}\n"
         f"- DISTANCE_FROM_STRIKE_PCT (BTC vs price to beat): {strike_delta_pct_display}\n"
         f"- Market window open price USD: {features.window_open_price:.2f}\n"
         f"- Percent change from market window open: {features.delta_pct_from_window_open * 100:.4f}%\n"
@@ -262,7 +276,7 @@ def _build_user_prompt(features: BtcFeatures, market: BtcUpDownMarket, up_snapsh
         f"- If time_remaining_seconds > 240, you are in the Discovery Phase. If ADX < {cfg.discovery_adx_caution_threshold:.0f}, stay cautious. If ADX > {cfg.trend_priority_adx_threshold:.0f}, prioritize the trend over time elapsed.\n"
         "- DISTANCE_FROM_STRIKE_PCT is the source of truth for whether UP or DOWN is currently winning against the price to beat.\n"
         "- A positive DISTANCE_FROM_STRIKE_PCT means BTC is above the strike and UP is currently winning. A negative DISTANCE_FROM_STRIKE_PCT means BTC is below the strike and DOWN is currently winning.\n"
-        "- Use the drift-adjusted Effective BTC price as the true current price when reasoning about distance to the strike.\n"
+        "- Use raw BTC price / Effective BTC price as the true current price when reasoning about distance to the strike; implied oracle price is market context only.\n"
         "- A MARKET_WIN_CHANCE of 65% is already aggressive consensus. Do not confuse that with physical strike distance. A DISTANCE_FROM_STRIKE_USD of about $1.00 can still justify ~95% confidence if time_remaining_seconds < 15.\n"
         "- Window Delta is a recent-drift confidence signal near T-10 only.\n"
         "- Window Delta means percent change from market window open only. Do not confuse it with DISTANCE_FROM_STRIKE_PCT, DISTANCE_FROM_STRIKE_USD, MARKET_WIN_CHANCE_UP, MARKET_WIN_CHANCE_DOWN, or Oracle gap ratio.\n"
@@ -306,24 +320,17 @@ def _build_user_prompt(features: BtcFeatures, market: BtcUpDownMarket, up_snapsh
 def _build_compact_user_prompt(features: BtcFeatures, market: BtcUpDownMarket, up_snapshot=None, down_snapshot=None) -> str:
     cfg = get_trading_config()
     time_remaining_seconds = _get_time_remaining_seconds(market, int(features.as_of.timestamp()))
-    implied_oracle_price = _compute_implied_oracle_price(features, market, up_snapshot, down_snapshot)
-    effective_current_price = (
-        implied_oracle_price if implied_oracle_price is not None else features.price_usd
-    )
-    gap_to_target = (
-        None
-        if market.settlement_threshold in (None, 0)
-        else effective_current_price - market.settlement_threshold
-    )
+    (
+        effective_current_price,
+        gap_to_target,
+        strike_delta_pct,
+        implied_oracle_price,
+        feed_drift_usd,
+    ) = _strike_distance_context(features, market, up_snapshot, down_snapshot)
     required_velocity_to_win = (
         None
         if gap_to_target is None or time_remaining_seconds <= 0
         else abs(gap_to_target) / time_remaining_seconds
-    )
-    strike_delta_pct = (
-        None
-        if gap_to_target is None or features.price_usd in (None, 0)
-        else gap_to_target / features.price_usd
     )
     strike_delta_pct_display = (
         "None" if strike_delta_pct is None else f"{strike_delta_pct * 100:.4f}%"
@@ -339,6 +346,8 @@ def _build_compact_user_prompt(features: BtcFeatures, market: BtcUpDownMarket, u
         f"Time remaining seconds: {time_remaining_seconds}\n"
         f"Current BTC price USD (raw): {features.price_usd:.2f}\n"
         f"Effective BTC price USD: {effective_current_price:.2f}\n"
+        f"Implied oracle price USD (market context only): {implied_oracle_price}\n"
+        f"Feed drift USD: {feed_drift_usd}\n"
         f"DISTANCE_FROM_STRIKE_PCT: {strike_delta_pct_display}\n"
         f"Window Delta pct: {features.delta_pct_from_window_open * 100:.4f}%\n"
         f"UP ask price: {getattr(up_snapshot, 'buy_quote', None)}\n"
@@ -373,7 +382,7 @@ def _build_compact_user_prompt(features: BtcFeatures, market: BtcUpDownMarket, u
         "Settlement: UP wins only above the price to beat; DOWN wins only below it.\n"
         f"time_remaining_seconds is authoritative; final 10 seconds means <15; if ADX < {cfg.discovery_adx_caution_threshold:.0f} stay cautious in Discovery Phase, if ADX > {cfg.trend_priority_adx_threshold:.0f} prioritize trend over elapsed time.\n"
         "DISTANCE_FROM_STRIKE_PCT is the source of truth for whether UP or DOWN is currently winning versus the strike.\n"
-        "Use Effective BTC price as the true current price when reasoning about the strike gap.\n"
+        "Use Effective BTC price/raw BTC as the true current price when reasoning about the strike gap; implied oracle price is context only.\n"
         "Window Delta only means change from market window open, never DISTANCE_FROM_STRIKE_PCT, DISTANCE_FROM_STRIKE_USD, MARKET_WIN_CHANCE fields, or Oracle gap ratio.\n"
         "velocity_30s is for entry timing only.\n"
         "Do not fade parabolic trend and do not chase if directional ticks are >= 8.\n"
@@ -398,24 +407,17 @@ def _build_compact_user_prompt(features: BtcFeatures, market: BtcUpDownMarket, u
 def _build_minimal_user_prompt(features: BtcFeatures, market: BtcUpDownMarket, up_snapshot=None, down_snapshot=None) -> str:
     cfg = get_trading_config()
     time_remaining_seconds = _get_time_remaining_seconds(market, int(features.as_of.timestamp()))
-    implied_oracle_price = _compute_implied_oracle_price(features, market, up_snapshot, down_snapshot)
-    effective_current_price = (
-        implied_oracle_price if implied_oracle_price is not None else features.price_usd
-    )
-    gap_to_target = (
-        None
-        if market.settlement_threshold in (None, 0)
-        else effective_current_price - market.settlement_threshold
-    )
+    (
+        effective_current_price,
+        gap_to_target,
+        strike_delta_pct,
+        implied_oracle_price,
+        feed_drift_usd,
+    ) = _strike_distance_context(features, market, up_snapshot, down_snapshot)
     required_velocity_to_win = (
         None
         if gap_to_target is None or time_remaining_seconds <= 0
         else abs(gap_to_target) / time_remaining_seconds
-    )
-    strike_delta_pct = (
-        None
-        if gap_to_target is None or features.price_usd in (None, 0)
-        else gap_to_target / features.price_usd
     )
     strike_delta_usd = gap_to_target
     strike_delta_pct_display = (
@@ -428,6 +430,8 @@ def _build_minimal_user_prompt(features: BtcFeatures, market: BtcUpDownMarket, u
         f"btc_eff={effective_current_price:.2f}\n"
         f"DISTANCE_FROM_STRIKE_USD={strike_delta_usd}\n"
         f"DISTANCE_FROM_STRIKE_PCT={strike_delta_pct_display}\n"
+        f"implied_oracle_price={implied_oracle_price}\n"
+        f"feed_drift_usd={feed_drift_usd}\n"
         f"MARKET_WIN_CHANCE_UP={market.up_market_probability}\n"
         f"MARKET_WIN_CHANCE_DOWN={market.down_market_probability}\n"
         f"up_ask={getattr(up_snapshot, 'buy_quote', None)}\n"
@@ -447,7 +451,7 @@ def _build_minimal_user_prompt(features: BtcFeatures, market: BtcUpDownMarket, u
         "DISTANCE_FROM_STRIKE_USD and DISTANCE_FROM_STRIKE_PCT are the settlement baseline; positive means above strike, negative means below strike.\n"
         "MARKET_WIN_CHANCE_UP and MARKET_WIN_CHANCE_DOWN are market-implied probabilities, not price distances.\n"
         "Do not confuse DISTANCE_FROM_STRIKE values with MARKET_WIN_CHANCE values.\n"
-        "Use btc_eff as the true current price for strike-gap reasoning.\n"
+        "Use btc_eff/raw BTC as the true current price for strike-gap reasoning; implied_oracle_price is market context only.\n"
         "Ignore window-open drift. v30 is entry timing only.\n"
         "MARKET_WIN_CHANCE_UP and MARKET_WIN_CHANCE_DOWN come from Gamma. Do not bet against them lightly.\n"
         f"No fade of parabolic trend; no chase if dir_ticks>=8; if adx14>35 follow trend; if adx14>45 expect exhaustion; if chosen side is OTM and reqv>(vol5m/{cfg.required_velocity_divisor:.0f}) prefer NO_TRADE, if ITM ignore reqv.\n"
@@ -474,24 +478,17 @@ def _build_openai_realtime_user_prompt(
 ) -> str:
     cfg = get_trading_config()
     time_remaining_seconds = _get_time_remaining_seconds(market, int(features.as_of.timestamp()))
-    implied_oracle_price = _compute_implied_oracle_price(features, market, up_snapshot, down_snapshot)
-    effective_current_price = (
-        implied_oracle_price if implied_oracle_price is not None else features.price_usd
-    )
-    gap_to_target = (
-        None
-        if market.settlement_threshold in (None, 0)
-        else effective_current_price - market.settlement_threshold
-    )
+    (
+        effective_current_price,
+        gap_to_target,
+        strike_delta_pct,
+        implied_oracle_price,
+        feed_drift_usd,
+    ) = _strike_distance_context(features, market, up_snapshot, down_snapshot)
     required_velocity_to_win = (
         None
         if gap_to_target is None or time_remaining_seconds <= 0
         else abs(gap_to_target) / time_remaining_seconds
-    )
-    strike_delta_pct = (
-        None
-        if gap_to_target is None or features.price_usd in (None, 0)
-        else gap_to_target / features.price_usd
     )
     strike_delta_usd = gap_to_target
     strike_delta_pct_display = (
@@ -503,6 +500,8 @@ def _build_openai_realtime_user_prompt(
         f"btc_eff={effective_current_price:.2f};"
         f"DISTANCE_FROM_STRIKE_USD={strike_delta_usd};"
         f"DISTANCE_FROM_STRIKE_PCT={strike_delta_pct_display};"
+        f"implied_oracle_price={implied_oracle_price};"
+        f"feed_drift_usd={feed_drift_usd};"
         f"MARKET_WIN_CHANCE_UP={market.up_market_probability};"
         f"MARKET_WIN_CHANCE_DOWN={market.down_market_probability};"
         f"u={getattr(up_snapshot, 'buy_quote', None)};"
@@ -522,7 +521,7 @@ def _build_openai_realtime_user_prompt(
         "DISTANCE_FROM_STRIKE_fields_are_settlement_baseline_positive_means_above_strike_negative_means_below_strike;"
         "MARKET_WIN_CHANCE_fields_are_market_probabilities_not_price_distance;"
         "do_not_confuse_distance_from_strike_with_market_win_chance;"
-        "btc_eff_is_true_current_price_for_strike_gap;"
+        "btc_eff_raw_btc_is_true_current_price_for_strike_gap_implied_oracle_is_context_only;"
         "ignore_window_open_drift_v30_is_entry_timing_only;"
         "MARKET_WIN_CHANCE_UP_and_MARKET_WIN_CHANCE_DOWN_are_gamma_market_probabilities;"
         f"if_chosen_market_win_chance_lt_{cfg.market_win_chance_veto_threshold:.2f}_and_15_lte_t_lt_{cfg.market_win_chance_veto_end_seconds}_prefer_no_trade;"
