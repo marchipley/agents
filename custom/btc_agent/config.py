@@ -47,9 +47,9 @@ TREND_PRIORITY_ADX_THRESHOLD = 30.0
 TREND_RELAXED_MIN_CONFIDENCE = 0.62
 
 # Harder minimum confidence floor used in the final minute of the period.
-# Example: raising from 0.75 to 0.80 blocks more late-window trades; lowering
+# Example: raising from 0.75 to 0.85 blocks more late-window trades; lowering
 # to 0.70 makes the bot more willing to take last-minute entries.
-FINAL_WINDOW_MIN_CONFIDENCE = 0.70
+FINAL_WINDOW_MIN_CONFIDENCE = 0.85
 
 # Minimum required execution edge above market implied probability for a trade
 # to pass, except for special very-high-confidence override cases.

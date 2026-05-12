@@ -169,7 +169,7 @@ What the BTC agent does today:
   - if `ADX(14) > 45`, treat the move as potentially exhausted and avoid late trend-chasing
 - The LLM prompt now treats `time_remaining_seconds` as the authoritative clock:
   - final 10 seconds means `time_remaining_seconds < 15`
-  - `time_remaining_seconds > 240` is treated as an early-window Discovery Phase where high-confidence trades should be rare unless trend intensity is extreme
+  - `time_remaining_seconds > 180` is treated as an extended early-window Discovery Phase where low-ADX trades should stay cautious unless trend intensity is clear
   - `Window Delta` is explicitly defined as the change from the market window open price and must not be confused with `DISTANCE_FROM_STRIKE_*`, `MARKET_WIN_CHANCE_*`, or `oracle_gap_ratio`
   - when upstream `start_ts` / `end_ts` are stale, the prompt now prefers the canonical slug timestamp plus 300 seconds so the model sees the same effective clock as execution
 - The LLM prompt now treats `DISTANCE_FROM_STRIKE_PCT` as the source of truth for whether `UP` or `DOWN` is currently winning relative to the price to beat, while `window_delta_pct` is treated only as recent drift from the market-window open.
@@ -186,13 +186,13 @@ What the BTC agent does today:
   - if the chosen side `MARKET_WIN_CHANCE` is below `0.15` and `15 <= time_remaining_seconds < 120`, prefer `NO_TRADE`
   - under the final 15 seconds, only fade that consensus on a clear reversal
 - The LLM prompt now also treats early-window caution as ADX-aware rather than flat:
-  - if `time_remaining_seconds > 240` and `ADX < 15`, stay cautious
+  - if `time_remaining_seconds > 180` and `ADX < 20`, stay cautious
   - if `ADX > 30`, prioritize the trend over the elapsed time
 - The LLM prompt now includes a momentum-trap exhaustion rule:
   - if `ADX > 50` and `RSI(9) > 75`, treat that as exhaustion rather than fresh breakout strength and avoid opening a new position
 - The LLM prompt now includes an early-window near-strike caution rule:
   - if `time_remaining_seconds > 180` and `DISTANCE_FROM_STRIKE_USD < 0.5 * volatility_5m`, prefer `NO_TRADE`
-  - if `time_remaining_seconds > 240` and `ADX > 30`, prioritize the trend over elapsed time
+  - if `time_remaining_seconds > 180` and `ADX > 30`, prioritize the trend over elapsed time
 - The LLM prompt now includes `momentum_alignment`, which is `True` when `velocity_15s`, `velocity_30s`, and `momentum_1m` all point the same direction; when it is `True`, the model is encouraged to treat clarity as high and trade with the trend.
 - The LLM prompt now includes an in-the-money confidence boost rule: if `DISTANCE_FROM_STRIKE_USD` is beyond `0.5 * ATR` in the chosen direction, the model may raise confidence by `0.15`.
 - The LLM prompt now explicitly disambiguates market probability from physical strike distance: a `MARKET_WIN_CHANCE` of `65%` is an aggressive consensus signal, while even a `$1.00` physical `DISTANCE_FROM_STRIKE_USD` can justify `~95%` confidence when fewer than 15 seconds remain.
@@ -220,9 +220,9 @@ What the BTC agent does today:
 - Applies a Gamma/CLOB consensus-gap veto before submission: if `abs(effective_confidence - market_implied_probability) > 0.50`, the trade is rejected as a hallucinated edge against market consensus.
 - Applies a regime-aware minimum-confidence veto before submission:
   - base floor now defaults to `DEFAULT_MIN_CONFIDENCE` through the top-level tuning defaults in `custom/btc_agent/config.py`, while still allowing a `BTC_AGENT_MIN_CONFIDENCE` env override
-  - in the Discovery Phase with more than 180 seconds remaining, the operational floor now uses `DISCOVERY_MIN_CONFIDENCE`, currently `0.85`
+  - in the Discovery Phase with more than 180 seconds remaining, the operational floor now uses `DISCOVERY_MIN_CONFIDENCE`, currently `0.70`
   - in the mid-window band, the operational floor now falls back to the base configured minimum-confidence value instead of using the older ADX-based relaxed floor
-  - in the final 60 seconds, the operational floor is tightened to `0.70`
+  - in the final 60 seconds, the operational floor is tightened to `0.85`
 - The execution layer now computes an `effective_confidence` before gating:
   - if the chosen side is already winning against the strike by more than `0.5 * ATR(14)` in the chosen direction
   - the confidence is boosted by `+0.15` before floor / edge / consensus-gap checks
@@ -239,8 +239,11 @@ What the BTC agent does today:
   - if `RSI(9) > 70`, `UP` is rejected unless `ADX > 30`
   - if `RSI(9) > 85` while BTC is already above the strike, `UP` is rejected as an exhaustion-risk breakout chase
 - Applies a hard exhaustion cap before the softer RSI vetoes:
-  - if `ADX(14) > 50` and `RSI(9) > 80`, new `UP` entries are rejected as overbought trend exhaustion
-  - if `ADX(14) > 50` and `RSI(9) < 20`, new `DOWN` entries are rejected as oversold trend exhaustion
+  - if `ADX(14) > 50` and `RSI(9) > 75`, new `UP` entries are rejected as overbought trend exhaustion
+  - if `ADX(14) > 50` and `RSI(9) < 25`, new `DOWN` entries are rejected as oversold trend exhaustion
+- Applies absolute RSI caps before broader directional RSI vetoes:
+  - if `RSI(9) > 85`, new `UP` entries are rejected as extreme overbought chase risk
+  - if `RSI(9) < 15`, new `DOWN` entries are rejected as extreme oversold chase risk
 - Applies a late ITM quote cap: if the chosen side is already in the money, fewer than 60 seconds remain, and the buy quote is above `0.85`, the trade is rejected as poor risk/reward.
 - Applies momentum-trap RSI vetoes before submission:
   - if the bot wants `UP` while BTC is still below the strike and `RSI(9) > 60`, the trade is rejected as a late breakout chase below the settlement line
@@ -270,7 +273,7 @@ What the BTC agent does today:
   - if the retry still does not fill, the order remains tracked as `UNFILLED`
 - If that tracked live order reaches period close without a confirmed fill price, the finalized filename is neutral and does not carry a win/loss or direction label:
   - `completed_order_unfilled_<slug_timestamp>.txt`
-- If a confirmed filled order shows realized slippage above `SLIPPAGE_COOLDOWN_THRESHOLD_BPS`, currently `500` bps, the bot now triggers a trade cooldown for `SLIPPAGE_COOLDOWN_SECONDS`, currently `300` seconds, before taking another order.
+- If a confirmed filled order shows realized slippage above `SLIPPAGE_COOLDOWN_THRESHOLD_BPS`, currently `500` bps, the bot now triggers a trade cooldown before taking another order; the live executor also applies an immediate 5-loop slippage kill-switch on a bad fill and includes the warning in the execution reason.
 - While an executed order is still unresolved, its working log file remains `completed_order_<slug_timestamp>.txt` and is only renamed to the finalized `completed_order_<win/loss>_<up/down>_<slug_timestamp>.txt` form once the period result is known.
 - Preserves every analyzed 5-minute window under `completed_orders/completed_period_<slug_timestamp>.txt` while the period is still unresolved, and finalizes resolved no-trade period files as:
   - `completed_period_up_<slug_timestamp>.txt`
