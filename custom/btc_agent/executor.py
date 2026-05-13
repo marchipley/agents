@@ -986,6 +986,7 @@ def refresh_live_order_fill_status(order) -> bool:
     if actual_fill_price is None:
         return False
     order.actual_fill_price = actual_fill_price
+    order.filled = True
     order.realized_slippage_bps = _compute_realized_slippage_bps(
         getattr(order, "quoted_price_at_entry", None),
         actual_fill_price,

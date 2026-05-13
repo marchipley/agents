@@ -250,9 +250,10 @@ def _completed_order_final_log_path(
     completed_orders_dir = os.path.join(os.getcwd(), "completed_orders")
     os.makedirs(completed_orders_dir, exist_ok=True)
     if not_filled:
+        side_suffix = f"_{str(side).lower()}" if side else ""
         return os.path.join(
             completed_orders_dir,
-            f"completed_order_unfilled_{_extract_slug_timestamp(market_slug)}{_trade_number_suffix(trade_number_in_period)}.txt",
+            f"completed_order_unfilled{side_suffix}_{_extract_slug_timestamp(market_slug)}{_trade_number_suffix(trade_number_in_period)}.txt",
         )
     side_suffix = f"_{str(side).lower()}" if side else ""
     return os.path.join(
@@ -926,7 +927,9 @@ def append_completed_order_tick(
         order.market_slug,
         getattr(order, "trade_number_in_period", None),
     )
-    is_unfilled = getattr(order, "actual_fill_price", None) is None
+    actual_fill_price = getattr(order, "actual_fill_price", None)
+    filled = bool(getattr(order, "filled", False))
+    is_unfilled = not (actual_fill_price is not None and filled)
     status = classify_position(order, current_btc_price)
     btc_move_from_entry = current_btc_price - order.entry_btc_price
     btc_move_from_entry_pct = (
@@ -983,6 +986,7 @@ def append_completed_order_tick(
                     f"entry_price={order.entry_price:.3f}",
                     f"entry_btc_price={order.entry_btc_price:.2f}",
                     f"live_order_id={getattr(order, 'live_order_id', None)}",
+                    f"filled={filled}",
                     f"period_open_price_to_beat={order.target_btc_price:.2f}",
                     f"current_btc_price={current_btc_price:.2f}",
                     f"btc_move_from_entry={btc_move_from_entry:.2f}",
@@ -1064,7 +1068,7 @@ def append_completed_order_tick(
         final_path = _completed_order_final_log_path(
             order.market_slug,
             outcome_label,
-            side=period_direction,
+            side=order.side if is_unfilled else period_direction,
             not_filled=is_unfilled,
             trade_number_in_period=getattr(order, "trade_number_in_period", None),
         )
@@ -1122,6 +1126,7 @@ def maintain_unfilled_live_orders(active_orders, market):
             order.shares_requested = getattr(result, "shares_requested", None)
             if getattr(result, "actual_fill_price", None) is not None:
                 order.actual_fill_price = result.actual_fill_price
+                order.filled = True
                 order.realized_slippage_bps = getattr(result, "realized_slippage_bps", None)
                 updated_orders.append(order)
         except Exception:
@@ -1856,6 +1861,8 @@ def run_once() -> None:
             try:
                 for filled_order in refresh_active_live_order_fills(previous_orders):
                     _apply_slippage_cooldown_if_needed(filled_order)
+                for filled_order in maintain_unfilled_live_orders(previous_orders, market):
+                    _apply_slippage_cooldown_if_needed(filled_order)
                 _SESSION_LOSS_TRADES += finalize_completed_orders(
                     previous_orders,
                     final_resolution_btc_price if final_resolution_btc_price is not None else fetch_btc_spot_price(),
@@ -2142,6 +2149,7 @@ def run_once() -> None:
             entry_btc_price=features.price_usd,
             quoted_price_at_entry=getattr(result, "quoted_price_at_entry", None),
             actual_fill_price=getattr(result, "actual_fill_price", None),
+            filled=getattr(result, "actual_fill_price", None) is not None,
             realized_slippage_bps=getattr(result, "realized_slippage_bps", None),
             order_latency_ms=getattr(result, "order_latency_ms", None),
             book_depth_at_fill=getattr(result, "book_depth_at_fill", None),

@@ -18,6 +18,7 @@ class ActivePaperOrder:
     entry_btc_price: float
     quoted_price_at_entry: Optional[float] = None
     actual_fill_price: Optional[float] = None
+    filled: bool = False
     realized_slippage_bps: Optional[float] = None
     order_latency_ms: Optional[int] = None
     book_depth_at_fill: Optional[float] = None

@@ -555,6 +555,7 @@ class TestBtcMain(unittest.TestCase):
             entry_btc_price=77760.00,
             quoted_price_at_entry=0.44,
             actual_fill_price=0.45,
+            filled=True,
             realized_slippage_bps=227.27,
             order_latency_ms=342,
             book_depth_at_fill=12.5,
@@ -1536,6 +1537,7 @@ class TestBtcMain(unittest.TestCase):
             target_btc_price=77560.75,
             entry_btc_price=77570.0,
             actual_fill_price=0.45,
+            filled=True,
         )
 
         with ExitStack() as stack:
@@ -1634,6 +1636,7 @@ class TestBtcMain(unittest.TestCase):
             target_btc_price=77720.0,
             entry_btc_price=77725.0,
             actual_fill_price=0.43,
+            filled=True,
         )
         market = SimpleNamespace(
             slug="btc-updown-5m-1777513800",
@@ -1767,16 +1770,17 @@ class TestBtcMain(unittest.TestCase):
 
         self.assertTrue(
             os.path.exists(
-                "/appl/agents/completed_orders/completed_order_unfilled_1777513500.txt"
+                "/appl/agents/completed_orders/completed_order_unfilled_down_1777513500.txt"
             )
         )
         with open(
-            "/appl/agents/completed_orders/completed_order_unfilled_1777513500.txt",
+            "/appl/agents/completed_orders/completed_order_unfilled_down_1777513500.txt",
             encoding="utf-8",
         ) as order_file:
             content = order_file.read()
         self.assertIn("outcome_label=unfilled", content)
         self.assertIn("position_state=UNFILLED", content)
+        self.assertIn("filled=False", content)
 
     def test_run_once_tracks_live_submitted_but_unfilled_order_without_creating_win_file(self):
         market = SimpleNamespace(
@@ -1920,7 +1924,7 @@ class TestBtcMain(unittest.TestCase):
         )
         self.assertFalse(
             os.path.exists(
-                "/appl/agents/completed_orders/completed_order_unfilled_1778208300.txt"
+                "/appl/agents/completed_orders/completed_order_unfilled_up_1778208300.txt"
             )
         )
 
@@ -1935,6 +1939,7 @@ class TestBtcMain(unittest.TestCase):
             target_btc_price=77720.0,
             entry_btc_price=77725.0,
             actual_fill_price=0.43,
+            filled=True,
         )
         market = SimpleNamespace(
             slug="btc-updown-5m-1777513800",
@@ -2017,6 +2022,7 @@ class TestBtcMain(unittest.TestCase):
             target_btc_price=77720.0,
             entry_btc_price=77725.0,
             actual_fill_price=0.43,
+            filled=True,
         )
         market = SimpleNamespace(
             slug="btc-updown-5m-1777513800",
