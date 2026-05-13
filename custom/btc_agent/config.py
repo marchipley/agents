@@ -47,9 +47,9 @@ TREND_PRIORITY_ADX_THRESHOLD = 30.0
 TREND_RELAXED_MIN_CONFIDENCE = 0.62
 
 # Harder minimum confidence floor used in the final minute of the period.
-# Example: raising from 0.75 to 0.80 blocks more late-window trades; lowering
+# Example: raising from 0.75 to 0.85 blocks more late-window trades; lowering
 # to 0.70 makes the bot more willing to take last-minute entries.
-FINAL_WINDOW_MIN_CONFIDENCE = 0.70
+FINAL_WINDOW_MIN_CONFIDENCE = 0.85
 
 # Minimum required execution edge above market implied probability for a trade
 # to pass, except for special very-high-confidence override cases.
@@ -175,7 +175,7 @@ SLIPPAGE_COOLDOWN_SECONDS = 300
 
 # The total number of completed losing trades allowed in a single run before the
 # bot stops. This is a repo-visible non-secret runtime cap.
-MAX_LOSSES_PER_RUN = 4
+MAX_LOSSES_PER_RUN = 8
 
 # Number of times to poll Polymarket order status right after live submission
 # before deciding the order is still unfilled.
@@ -205,7 +205,7 @@ LLM_CONNECTION_DEBUG=False
 
 # When enabled, the terminal output and completed_orders log files will show the full LLM request and response. Enabling debug
 # also does this but we do not always want to see the full debug output to reduce clutter.
-LLM_SHOW_DETAIL=True
+LLM_SHOW_DETAIL=False
 
 BTC_AGENT_LOOP_INTERVAL=5
 USE_PAPER_TRADES=False

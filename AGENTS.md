@@ -179,6 +179,7 @@ What the BTC agent does today:
   - `DISTANCE_FROM_STRIKE_PCT`
   - `MARKET_WIN_CHANCE_UP`
   - `MARKET_WIN_CHANCE_DOWN`
+- The live decision user prompts now carry raw market data only, including `trend_regime`, `rsi_regime`, and `volatility_regime`; strategy rules and conditional policy text are kept in the system prompt to reduce conflicting instructions in the data packet.
 - The prompt explicitly tells the model not to confuse strike-distance fields with market-win-chance fields, which closes the Phase 2.82 “logic loop hallucination” where the model treated probability and price-distance as the same signal.
 - The LLM prompt now also passes a drift-adjusted effective BTC price, derived from the implied Polymarket oracle price when available, and tells the model to use that effective price instead of the raw feed price when reasoning about strike distance.
 - The LLM prompt uses `velocity_30s` only as a micro-momentum entry-timing signal, which is intended to prevent baseline-confusion reversals where the model mistakes a short dip for being below the strike.
@@ -198,6 +199,11 @@ What the BTC agent does today:
 - The LLM prompt now explicitly disambiguates market probability from physical strike distance: a `MARKET_WIN_CHANCE` of `65%` is an aggressive consensus signal, while even a `$1.00` physical `DISTANCE_FROM_STRIKE_USD` can justify `~95%` confidence when fewer than 15 seconds remain.
 - The LLM prompt includes a sign-consistency rule: if `DISTANCE_FROM_STRIKE_PCT` is positive and the model chooses `DOWN`, or negative and it chooses `UP`, confidence should stay below `0.50` unless trend exhaustion is genuinely clear.
 - The LLM prompt now also includes an RSI directional sanity rule: if `RSI(9) < 30`, it should not choose `DOWN`; if `RSI(9) > 70`, it should not choose `UP` unless `ADX > 30`, and values above `RSI(9) > 85` are treated as explicit exhaustion risk even in strong trends.
+- The system prompt now includes the explicit parabolic exception, Gamma discrepancy rule, late ITM entry cap, and extended Discovery rule:
+  - if `rsi_regime` is `PARABOLIC_UP` and `momentum_alignment` is true, the model may follow the trend despite standard RSI exhaustion concerns
+  - if confidence differs from the chosen side `MARKET_WIN_CHANCE` by more than `0.50`, the model must choose `NO_TRADE`
+  - if the current side is in the money and fewer than 60 seconds remain, new entry requires quote `< 0.85`
+  - if `time_remaining_seconds > 180` and `abs(DISTANCE_FROM_STRIKE_USD) < 0.2 * ATR`, prefer `NO_TRADE` unless trend regime is strong and momentum alignment is true
 - The LLM prompt and execution layer now both suspend the normal `UP` RSI veto when `rsi_speed_divergence > 5` and `ADX > 35`, so accelerating RSI in a strong trend is treated as a parabolic continuation signal instead of automatic exhaustion.
 - The LLM prompt now also tells the model to lower confidence when `rsi_speed_divergence` is negative while price is still moving up, which is intended to catch weakening continuation setups before they become late-window fades or weak breakout chases.
 - The LLM prompt now also carries a late-window ITM maintenance rule: if a side is already in the money and fewer than 60 seconds remain, generic RSI exhaustion fears should be deprioritized unless a genuinely large counter-trend spike is occurring.
@@ -210,7 +216,7 @@ What the BTC agent does today:
 - Executes paper trades by default and can submit live Polymarket buy orders through `agents/polymarket/polymarket.py` when `USE_PAPER_TRADES=false`.
 - Submits live orders with a configurable maker fee rate from `BTC_AGENT_LIVE_FEE_RATE_BPS`, defaulting to `1000` bps to match the current BTC Up/Down market requirement observed during live submission attempts.
 - Sizes paper and live orders from `SHARES_PER_TRADE` in `custom/btc_agent/config.py`, using a fixed share count for both paper and live orders.
-- The current repo-visible sizing default is `SHARES_PER_TRADE = 3`, so both paper and live orders now use that fixed reduced exposure unless the code default is changed again.
+- The current repo-visible sizing default is `SHARES_PER_TRADE = 7`, so both paper and live orders now use that fixed exposure unless the code default is changed again.
 - Before live BUY submission, the agent quantizes share size to a Polymarket-compatible precision so the quote-side amount stays within the exchange’s 2-decimal maker-amount constraint while still respecting the 4-decimal taker-size limit.
 - That live BUY quantization now guarantees a minimum positive valid quantum when the configured size is non-zero, preventing edge-case rounding from collapsing a tiny but valid order to zero shares.
 - Rejects live submissions cleanly when the configured `SHARES_PER_TRADE` cannot satisfy the venue minimum order size instead of silently scaling or overriding size.
@@ -220,9 +226,9 @@ What the BTC agent does today:
 - Applies a Gamma/CLOB consensus-gap veto before submission: if `abs(effective_confidence - market_implied_probability) > 0.50`, the trade is rejected as a hallucinated edge against market consensus.
 - Applies a regime-aware minimum-confidence veto before submission:
   - base floor now defaults to `DEFAULT_MIN_CONFIDENCE` through the top-level tuning defaults in `custom/btc_agent/config.py`, while still allowing a `BTC_AGENT_MIN_CONFIDENCE` env override
-  - in the Discovery Phase with more than 180 seconds remaining, the operational floor now uses `DISCOVERY_MIN_CONFIDENCE`, currently `0.85`
+  - in the Discovery Phase with more than 180 seconds remaining, the operational floor now uses `DISCOVERY_MIN_CONFIDENCE`, currently `0.70`
   - in the mid-window band, the operational floor now falls back to the base configured minimum-confidence value instead of using the older ADX-based relaxed floor
-  - in the final 60 seconds, the operational floor is tightened to `0.70`
+  - in the final 60 seconds, the operational floor is tightened to `0.85`
 - The execution layer now computes an `effective_confidence` before gating:
   - if the chosen side is already winning against the strike by more than `0.5 * ATR(14)` in the chosen direction
   - the confidence is boosted by `+0.15` before floor / edge / consensus-gap checks
@@ -239,8 +245,11 @@ What the BTC agent does today:
   - if `RSI(9) > 70`, `UP` is rejected unless `ADX > 30`
   - if `RSI(9) > 85` while BTC is already above the strike, `UP` is rejected as an exhaustion-risk breakout chase
 - Applies a hard exhaustion cap before the softer RSI vetoes:
-  - if `ADX(14) > 50` and `RSI(9) > 80`, new `UP` entries are rejected as overbought trend exhaustion
-  - if `ADX(14) > 50` and `RSI(9) < 20`, new `DOWN` entries are rejected as oversold trend exhaustion
+  - if `ADX(14) > 50` and `RSI(9) > 75`, new `UP` entries are rejected as overbought trend exhaustion
+  - if `ADX(14) > 50` and `RSI(9) < 25`, new `DOWN` entries are rejected as oversold trend exhaustion
+- Applies absolute RSI caps before broader directional RSI vetoes:
+  - if `RSI(9) > 85`, new `UP` entries are rejected as extreme overbought chase risk
+  - if `RSI(9) < 15`, new `DOWN` entries are rejected as extreme oversold chase risk
 - Applies a late ITM quote cap: if the chosen side is already in the money, fewer than 60 seconds remain, and the buy quote is above `0.85`, the trade is rejected as poor risk/reward.
 - Applies momentum-trap RSI vetoes before submission:
   - if the bot wants `UP` while BTC is still below the strike and `RSI(9) > 60`, the trade is rejected as a late breakout chase below the settlement line
@@ -270,7 +279,7 @@ What the BTC agent does today:
   - if the retry still does not fill, the order remains tracked as `UNFILLED`
 - If that tracked live order reaches period close without a confirmed fill price, the finalized filename is neutral and does not carry a win/loss or direction label:
   - `completed_order_unfilled_<slug_timestamp>.txt`
-- If a confirmed filled order shows realized slippage above `SLIPPAGE_COOLDOWN_THRESHOLD_BPS`, currently `500` bps, the bot now triggers a trade cooldown for `SLIPPAGE_COOLDOWN_SECONDS`, currently `300` seconds, before taking another order.
+- If a confirmed filled order shows realized slippage above `SLIPPAGE_COOLDOWN_THRESHOLD_BPS`, currently `500` bps, the bot now triggers a trade cooldown before taking another order; the live executor also applies an immediate 5-loop slippage kill-switch on a bad fill and includes the warning in the execution reason.
 - While an executed order is still unresolved, its working log file remains `completed_order_<slug_timestamp>.txt` and is only renamed to the finalized `completed_order_<win/loss>_<up/down>_<slug_timestamp>.txt` form once the period result is known.
 - Preserves every analyzed 5-minute window under `completed_orders/completed_period_<slug_timestamp>.txt` while the period is still unresolved, and finalizes resolved no-trade period files as:
   - `completed_period_up_<slug_timestamp>.txt`

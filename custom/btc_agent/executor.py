@@ -15,6 +15,7 @@ from .indicators import BtcFeatures
 from .llm_decision import LlmDecision
 from .market_lookup import BtcUpDownMarket
 from .network import http_get, http_post
+from .paper_state import set_trade_cooldown
 
 
 @dataclass
@@ -1482,20 +1483,38 @@ def _validate_trade_candidate(
         else abs(float(effective_confidence) - float(market_implied_probability))
     )
 
+    if decision.side == "UP" and rsi_9 is not None and rsi_9 > 85.0:
+        return _reject(
+            submission_limit_price,
+            (
+                "Absolute RSI Veto blocked UP trade in extreme overbought conditions "
+                f"(rsi_9={rsi_9:.3f}; threshold=85.000)"
+            ),
+        )
+
+    if decision.side == "DOWN" and rsi_9 is not None and rsi_9 < 15.0:
+        return _reject(
+            submission_limit_price,
+            (
+                "Absolute RSI Veto blocked DOWN trade in extreme oversold conditions "
+                f"(rsi_9={rsi_9:.3f}; threshold=15.000)"
+            ),
+        )
+
     if adx_14 is not None and adx_14 > 50.0:
-        if decision.side == "UP" and rsi_9 is not None and rsi_9 > 80.0:
+        if decision.side == "UP" and rsi_9 is not None and rsi_9 > 75.0:
             return _reject(
                 submission_limit_price,
                 (
-                    "Hard Exhaustion Veto: ADX > 50 and RSI9 > 80 "
+                    "Hard Exhaustion Veto: ADX > 50 and RSI9 > 75 "
                     f"(adx_14={adx_14:.3f}; rsi_9={rsi_9:.3f})"
                 ),
             )
-        if decision.side == "DOWN" and rsi_9 is not None and rsi_9 < 20.0:
+        if decision.side == "DOWN" and rsi_9 is not None and rsi_9 < 25.0:
             return _reject(
                 submission_limit_price,
                 (
-                    "Hard Exhaustion Veto: ADX > 50 and RSI9 < 20 "
+                    "Hard Exhaustion Veto: ADX > 50 and RSI9 < 25 "
                     f"(adx_14={adx_14:.3f}; rsi_9={rsi_9:.3f})"
                 ),
             )
@@ -2124,6 +2143,20 @@ def _execute_live_trade(
         quoted_price_at_entry,
         actual_fill_price,
     )
+    slippage_cooldown_reason = ""
+    slippage_cooldown_threshold_bps = float(
+        getattr(cfg, "slippage_cooldown_threshold_bps", 500.0)
+    )
+    if (
+        realized_slippage_bps is not None
+        and realized_slippage_bps > slippage_cooldown_threshold_bps
+    ):
+        set_trade_cooldown(5)
+        slippage_cooldown_reason = (
+            f"; WARNING slippage kill-switch triggered cooldown_loops=5 "
+            f"(realized_slippage_bps={realized_slippage_bps:.3f}; "
+            f"threshold_bps={slippage_cooldown_threshold_bps:.3f})"
+        )
 
     return TradeExecutionResult(
         executed=True,
@@ -2146,7 +2179,7 @@ def _execute_live_trade(
             f"book_depth_at_fill={_fmt_price_debug(book_depth_at_fill)}; "
             f"required_cash={required_cash:.3f}; "
             f"estimated_fee={estimated_fee:.3f}; fee_rate_bps={cfg.live_fee_rate_bps}; "
-            f"{snapshot.submit_reason})"
+            f"{snapshot.submit_reason}{slippage_cooldown_reason})"
         ),
         live_order_response=response,
         execution_snapshot=snapshot,

@@ -12,6 +12,8 @@ sys.modules.setdefault("websocket", types.SimpleNamespace(WebSocketApp=object, c
 from custom.btc_agent.llm_decision import (
     _build_debug_prompt_text,
     _build_minimal_user_prompt,
+    _build_openai_realtime_user_prompt,
+    _build_system_prompt,
     _build_user_prompt,
     _extract_json_payload,
     _get_openai_realtime_client,
@@ -161,23 +163,12 @@ class TestBtcLlmDecision(unittest.TestCase):
         self.assertIn("Momentum acceleration: -2.0", prompt)
         self.assertIn("Momentum alignment:", prompt)
         self.assertIn("Oracle gap ratio:", prompt)
-        self.assertIn("time_remaining_seconds is authoritative", prompt)
-        self.assertIn("Discovery Phase", prompt)
-        self.assertIn("Do not confuse it with DISTANCE_FROM_STRIKE_PCT, DISTANCE_FROM_STRIKE_USD, MARKET_WIN_CHANCE_UP, MARKET_WIN_CHANCE_DOWN, or Oracle gap ratio", prompt)
-        self.assertIn("DISTANCE_FROM_STRIKE_PCT is the source of truth", prompt)
-        self.assertIn("Use raw BTC price / Effective BTC price as the true current price", prompt)
-        self.assertIn("velocity_30s is micro-momentum for entry timing only", prompt)
-        self.assertIn("If ADX < 20, stay cautious. If ADX > 30, prioritize the trend over time elapsed.", prompt)
-        self.assertIn("If the chosen side MARKET_WIN_CHANCE is below 0.15", prompt)
-        self.assertIn("If momentum alignment is TRUE, clarity is HIGH", prompt)
-        self.assertIn("Paradoxical Momentum rule: If ADX is above 50 and RSI is above 75", prompt)
-        self.assertIn("If time_remaining_seconds > 180 and DISTANCE_FROM_STRIKE_USD is less than 0.5 * current 5-minute volatility", prompt)
-        self.assertIn("If DISTANCE_FROM_STRIKE_PCT is positive and you choose DOWN", prompt)
-        self.assertIn("If the chosen side is OTM and required velocity to win exceeds volatility_5m / 8", prompt)
-        self.assertIn("If RSI(9) is below 30, do not choose DOWN.", prompt)
-        self.assertIn("If RSI speed divergence is negative while price is still moving up", prompt)
-        self.assertIn("Focus on regime detection and direction, not limit pricing.", prompt)
-        self.assertIn("execution layer will apply regime-aware EV, deadline, liquidity, and FOK rules", prompt)
+        self.assertIn("trend_regime:", prompt)
+        self.assertIn("rsi_regime:", prompt)
+        self.assertIn("volatility_regime:", prompt)
+        self.assertNotIn("Decision policy:", prompt)
+        self.assertNotIn("prefer NO_TRADE", prompt)
+        self.assertNotIn("do not choose", prompt)
 
     def test_user_prompt_uses_canonical_window_time_when_end_ts_is_stale(self):
         class StaleEndMarket(DummyMarket):
@@ -227,8 +218,36 @@ class TestBtcLlmDecision(unittest.TestCase):
         self.assertIn("MARKET_WIN_CHANCE_DOWN=0.505", prompt)
         self.assertIn("momentum_alignment=", prompt)
         self.assertIn("rsi_speed_divergence=", prompt)
-        self.assertIn("Do not confuse DISTANCE_FROM_STRIKE values with MARKET_WIN_CHANCE values.", prompt)
+        self.assertIn("trend_regime=", prompt)
+        self.assertIn("rsi_regime=", prompt)
+        self.assertIn("volatility_regime=", prompt)
+        self.assertNotIn("prefer NO_TRADE", prompt)
+        self.assertNotIn("Do not confuse DISTANCE_FROM_STRIKE values", prompt)
         self.assertNotIn("\ndelta_pct=", prompt)
+
+    def test_openai_realtime_user_prompt_includes_regime_strings_without_policy_suffix(self):
+        up_snapshot = Mock(buy_quote=0.84)
+        down_snapshot = Mock(buy_quote=0.17)
+        prompt = _build_openai_realtime_user_prompt(
+            DummyFeatures(),
+            DummyMarket(),
+            up_snapshot=up_snapshot,
+            down_snapshot=down_snapshot,
+        )
+
+        self.assertIn("trend_regime=", prompt)
+        self.assertIn("rsi_regime=", prompt)
+        self.assertIn("volatility_regime=", prompt)
+        self.assertNotIn("if_t_gt_", prompt)
+        self.assertNotIn("prefer_no_trade", prompt)
+
+    def test_system_prompt_contains_moved_policy_rules(self):
+        prompt = _build_system_prompt()
+
+        self.assertIn("Parabolic Exception", prompt)
+        self.assertIn("Gamma Discrepancy Rule", prompt)
+        self.assertIn("entry quote is < 0.85", prompt)
+        self.assertIn("Discovery Rule: If t > 180", prompt)
 
     def test_gemini_503_returns_no_trade(self):
         error_response = requests.Response()
