@@ -6,8 +6,10 @@ from custom.btc_agent.paper_state import (
     consume_trade_cooldown_loop,
     describe_target,
     get_trade_cooldown_remaining,
+    get_realized_pnl_snapshot,
     get_state,
     record_executed_trade,
+    record_realized_pnl_for_order,
     set_trade_cooldown,
     sync_period_state,
 )
@@ -127,6 +129,39 @@ class TestBtcPaperState(unittest.TestCase):
             describe_target(order),
             "BTC must finish below approximately 75000.00",
         )
+
+    def test_realized_pnl_snapshot_tracks_drawdown(self):
+        winning_order = ActivePaperOrder(
+            market_slug="btc-updown-5m-1",
+            market_title="Period 1",
+            side="UP",
+            shares=5.0,
+            entry_price=0.40,
+            token_id="token-win",
+            target_btc_price=75000.0,
+            entry_btc_price=75010.0,
+            actual_fill_price=0.40,
+            filled=True,
+        )
+        losing_order = ActivePaperOrder(
+            market_slug="btc-updown-5m-1",
+            market_title="Period 1",
+            side="DOWN",
+            shares=5.0,
+            entry_price=0.50,
+            token_id="token-loss",
+            target_btc_price=75000.0,
+            entry_btc_price=74990.0,
+            actual_fill_price=0.50,
+            filled=True,
+        )
+
+        record_realized_pnl_for_order(winning_order, "win")
+        record_realized_pnl_for_order(losing_order, "loss")
+        realized_pnl, current_drawdown = get_realized_pnl_snapshot()
+
+        self.assertAlmostEqual(realized_pnl, 0.5, places=6)
+        self.assertAlmostEqual(current_drawdown, 2.5, places=6)
 
 
 if __name__ == "__main__":

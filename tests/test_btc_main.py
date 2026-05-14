@@ -25,7 +25,6 @@ from custom.btc_agent.main import (
     append_failed_order_attempt,
     append_failed_live_order,
     append_pending_period_tick_analysis,
-    clear_price_to_beat_debug_files,
     finalize_current_period_logs_on_exit,
     finalize_pending_period_log,
     enforce_session_loss_trade_limit,
@@ -37,6 +36,7 @@ from custom.btc_agent.main import (
     print_llm_decision,
     resolve_price_to_beat_with_retries,
     wait_for_next_tick_or_quit,
+    clear_price_to_beat_debug_files,
     write_price_to_beat_debug_file,
     print_active_orders,
 )
@@ -211,6 +211,7 @@ class TestBtcMain(unittest.TestCase):
         self.assertIn("veto_threshold_delta=", content)
         self.assertIn("llm_raw_reasoning=", content)
         self.assertIn("market_impact_ratio=", content)
+        self.assertIn("veto_flags=", content)
         self.assertIn("llm_prompt_start", content)
         self.assertIn("SYSTEM PROMPT:", content)
         self.assertIn("llm_prompt_end", content)
@@ -952,7 +953,7 @@ class TestBtcMain(unittest.TestCase):
         with patch(
             "custom.btc_agent.main.build_price_to_beat_debug_reports",
             return_value=["page debug report\n", "next data debug report\n", "third page debug report\n"],
-        ), patch(
+        ) as mock_build_reports, patch(
             "custom.btc_agent.main.os.getcwd",
             return_value="/appl/agents",
         ), patch(
@@ -961,12 +962,10 @@ class TestBtcMain(unittest.TestCase):
         ):
             write_price_to_beat_debug_file("btc-updown-5m-1776983100")
 
-        with open("/appl/agents/logs/priceToBeatDebug.txt", encoding="utf-8") as debug_file:
-            self.assertEqual(debug_file.read(), "page debug report\n")
-        with open("/appl/agents/logs/priceToBeatDebugPg2.txt", encoding="utf-8") as debug_file:
-            self.assertEqual(debug_file.read(), "next data debug report\n")
-        with open("/appl/agents/logs/priceToBeatDebugPg3.txt", encoding="utf-8") as debug_file:
-            self.assertEqual(debug_file.read(), "third page debug report\n")
+        mock_build_reports.assert_not_called()
+        self.assertFalse(os.path.exists("/appl/agents/logs/priceToBeatDebug.txt"))
+        self.assertFalse(os.path.exists("/appl/agents/logs/priceToBeatDebugPg2.txt"))
+        self.assertFalse(os.path.exists("/appl/agents/logs/priceToBeatDebugPg3.txt"))
 
     def test_write_price_to_beat_debug_file_writes_only_once_per_slug_without_force(self):
         with patch(
@@ -982,7 +981,7 @@ class TestBtcMain(unittest.TestCase):
             write_price_to_beat_debug_file("btc-updown-5m-1776983100")
             write_price_to_beat_debug_file("btc-updown-5m-1776983100")
 
-        mock_build_reports.assert_called_once_with("btc-updown-5m-1776983100")
+        mock_build_reports.assert_not_called()
 
     def test_clear_price_to_beat_debug_files_removes_only_price_to_beat_logs(self):
         with patch(
@@ -995,15 +994,10 @@ class TestBtcMain(unittest.TestCase):
                 "priceToBeatDebugPg2.txt",
                 "unrelated.log",
             ],
-        ), patch(
-            "custom.btc_agent.main.os.remove",
-        ) as mock_remove:
+        ), patch("custom.btc_agent.main.os.remove") as mock_remove:
             clear_price_to_beat_debug_files()
 
-        removed_paths = [call.args[0] for call in mock_remove.call_args_list]
-        self.assertIn("/appl/agents/logs/priceToBeatDebug.txt", removed_paths)
-        self.assertIn("/appl/agents/logs/priceToBeatDebugPg2.txt", removed_paths)
-        self.assertNotIn("/appl/agents/logs/unrelated.log", removed_paths)
+        mock_remove.assert_not_called()
 
     def test_resolve_price_to_beat_with_retries_refreshes_same_slug(self):
         initial_market = SimpleNamespace(slug="btc-updown-5m-1777056000", settlement_threshold=None)
@@ -1025,19 +1019,24 @@ class TestBtcMain(unittest.TestCase):
 
     def test_resolve_price_to_beat_with_retries_skips_retries_when_debug_price_to_beat_enabled(self):
         initial_market = SimpleNamespace(slug="btc-updown-5m-1777056000", settlement_threshold=None)
+        refreshed_market = SimpleNamespace(
+            slug="btc-updown-5m-1777056000",
+            settlement_threshold=77560.75,
+        )
 
         with patch(
             "custom.btc_agent.main.get_trading_config",
             return_value=SimpleNamespace(debug_price_to_beat=True),
         ), patch(
             "custom.btc_agent.main.get_btc_updown_market_by_slug",
+            return_value=refreshed_market,
         ) as mock_get_by_slug, patch(
             "custom.btc_agent.main.time.sleep",
         ):
             market = resolve_price_to_beat_with_retries(initial_market, retry_attempts=2, retry_delay_seconds=1)
 
-        self.assertIsNone(market.settlement_threshold)
-        mock_get_by_slug.assert_not_called()
+        self.assertEqual(market.settlement_threshold, 77560.75)
+        mock_get_by_slug.assert_called_once_with("btc-updown-5m-1777056000")
 
     def test_run_once_writes_price_to_beat_debug_file_when_debug_enabled(self):
         market = SimpleNamespace(
@@ -1086,7 +1085,7 @@ class TestBtcMain(unittest.TestCase):
         ):
             run_once()
 
-        mock_write_debug.assert_called_once_with("btc-updown-5m-1777056000")
+        mock_write_debug.assert_not_called()
 
     def test_run_once_clears_price_to_beat_debug_files_on_new_slug(self):
         market = SimpleNamespace(
@@ -1140,7 +1139,7 @@ class TestBtcMain(unittest.TestCase):
         ):
             run_once()
 
-        mock_clear_debug.assert_called_once_with()
+        mock_clear_debug.assert_not_called()
 
     def test_run_once_finalizes_no_trade_previous_period_with_directional_price(self):
         market = SimpleNamespace(

@@ -248,6 +248,48 @@ class TestBtcMarketLookup(unittest.TestCase):
         self.assertEqual(market.up_market_probability, 0.68)
         self.assertEqual(market.down_market_probability, 0.33)
 
+    def test_fetch_live_market_probabilities_from_clob_ws_returns_none_on_handshake_failure(self):
+        with patch(
+            "custom.btc_agent.market_lookup.websocket.create_connection",
+            side_effect=TimeoutError("handshake timed out"),
+        ):
+            up_probability, down_probability = fetch_live_market_probabilities_from_clob_ws(
+                "up-token",
+                "down-token",
+            )
+
+        self.assertIsNone(up_probability)
+        self.assertIsNone(down_probability)
+
+    def test_get_btc_updown_market_by_slug_keeps_cached_btc_probabilities_on_ws_failure(self):
+        cached_market = BtcUpDownMarket(
+            event_id="1",
+            market_id="2",
+            up_token_id="up-token",
+            down_token_id="down-token",
+            title="Bitcoin Up or Down",
+            question="Bitcoin Up or Down",
+            slug="btc-updown-5m-1777056000",
+            start_ts=1777056000,
+            end_ts=1777056300,
+            settlement_threshold=77560.75,
+            up_market_probability=0.50,
+            down_market_probability=0.50,
+        )
+
+        with patch(
+            "custom.btc_agent.market_lookup._MARKET_CACHE",
+            {"btc-updown-5m-1777056000": cached_market},
+        ), patch(
+            "custom.btc_agent.market_lookup.fetch_live_market_probabilities_from_clob_ws",
+            return_value=(None, None),
+        ) as mock_fetch_ws:
+            market = get_btc_updown_market_by_slug("btc-updown-5m-1777056000")
+
+        self.assertEqual(market.up_market_probability, 0.50)
+        self.assertEqual(market.down_market_probability, 0.50)
+        mock_fetch_ws.assert_called_once_with("up-token", "down-token")
+
     def test_get_btc_updown_market_by_slug_fetches_live_probabilities_on_initial_btc_lookup(self):
         event = {
             "id": "event-1",

@@ -79,7 +79,7 @@ def _parse_live_market_probabilities_message(
 def fetch_live_market_probabilities_from_clob_ws(
     up_token_id: str,
     down_token_id: str,
-) -> tuple[float, float]:
+) -> tuple[Optional[float], Optional[float]]:
     ws = None
     try:
         ws = websocket.create_connection(
@@ -114,14 +114,9 @@ def fetch_live_market_probabilities_from_clob_ws(
             if up_probability is not None and down_probability is not None:
                 return float(up_probability), float(down_probability)
 
-        raise RuntimeError(
-            "Did not receive best_ask probabilities for both outcome tokens from the CLOB market websocket."
-        )
+        return None, None
     except Exception as exc:
-        raise RuntimeError(
-            "Failed to fetch live market probabilities from CLOB websocket "
-            f"for up_token_id={up_token_id}, down_token_id={down_token_id}: {exc}"
-        ) from exc
+        return None, None
     finally:
         if ws is not None:
             try:
@@ -1391,6 +1386,8 @@ def _refresh_market_probabilities(
             cached_market.up_token_id,
             cached_market.down_token_id,
         )
+        if up_market_probability is None or down_market_probability is None:
+            return replace(cached_market)
         refreshed_market = replace(
             cached_market,
             up_market_probability=up_market_probability,

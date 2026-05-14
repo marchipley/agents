@@ -49,9 +49,11 @@ from .paper_state import (
     consume_trade_cooldown_loop,
     describe_target,
     get_active_orders,
+    get_realized_pnl_snapshot,
     get_trade_cooldown_remaining,
     get_state,
     record_executed_trade,
+    record_realized_pnl_for_order,
     set_trade_cooldown,
     sync_period_state,
 )
@@ -63,6 +65,7 @@ from scripts.python.check_public_ip_indonesia import (
 
 _FIRST_LOOP = True
 _SESSION_LOSS_TRADES = 0
+_DEBUG_WRITTEN_SLUGS = set()
 
 
 class QuitKeyMonitor:
@@ -122,6 +125,18 @@ def _fmt_mmss_from_seconds(seconds: Optional[int]) -> str:
     return f"{minutes:02d}:{secs:02d}"
 
 
+def build_price_to_beat_debug_reports(*_args, **_kwargs):
+    return []
+
+
+def write_price_to_beat_debug_file(*_args, **_kwargs) -> None:
+    return None
+
+
+def clear_price_to_beat_debug_files() -> None:
+    return None
+
+
 def _apply_slippage_cooldown_if_needed(entity) -> None:
     slippage_bps = getattr(entity, "realized_slippage_bps", None)
     if slippage_bps is None:
@@ -142,7 +157,7 @@ def _effective_confidence(decision, market=None, features=None) -> float:
     if market is None:
         cfg = get_trading_config()
         confidence = float(getattr(decision, "confidence", 0.0) or 0.0)
-        return confidence if confidence >= float(getattr(cfg, "min_confidence", 0.7)) else 0.0
+        return confidence if confidence >= float(getattr(cfg, "min_confidence", 0.64)) else 0.0
     effective_confidence = get_effective_decision_confidence(
         decision,
         market,
@@ -379,6 +394,14 @@ def _execution_microstructure_lines(
         f"order_latency_ms={_fmt(order_latency_ms)}",
         f"book_depth_at_fill={_fmt(book_depth_at_fill)}",
         f"shares_requested={_fmt(shares_requested)}",
+    ]
+
+
+def _run_pnl_summary_lines() -> list[str]:
+    realized_pnl, current_drawdown = get_realized_pnl_snapshot()
+    return [
+        f"realized_pnl={_fmt(realized_pnl)}",
+        f"current_drawdown={_fmt(current_drawdown)}",
     ]
 
 
@@ -751,6 +774,7 @@ def append_pending_period_tick_analysis(
             f"down_market_probability={_fmt(getattr(market, 'down_market_probability', None))}",
             f"market_time_remaining_seconds={_fmt(_market_time_remaining_seconds(market.slug, observed_at))}",
             f"market_time_remaining_mmss={_fmt_mmss_from_seconds(_market_time_remaining_seconds(market.slug, observed_at))}",
+            *_run_pnl_summary_lines(),
         ]
         if up_snapshot is not None:
             lines.extend(_snapshot_summary("up", up_snapshot))
@@ -994,6 +1018,7 @@ def append_completed_order_tick(
                     f"btc_gap_to_target={btc_gap_to_target:.2f}",
                     f"market_time_remaining_seconds={_fmt(regime_fingerprint.get('time_remaining_seconds'))}",
                     f"market_time_remaining_mmss={_fmt_mmss_from_seconds(regime_fingerprint.get('time_remaining_seconds'))}",
+                    *_run_pnl_summary_lines(),
                     f"position_state={status}",
                     f"target_description={describe_target(order)}",
                     f"outcome_label={outcome_label}",
@@ -1087,6 +1112,8 @@ def finalize_completed_orders(previous_orders, current_btc_price: float) -> int:
             current_btc_price=current_btc_price,
             phase="COMPLETED",
         )
+        if outcome_label in ("win", "loss"):
+            record_realized_pnl_for_order(order, outcome_label)
         if outcome_label == "loss":
             loss_count += 1
     return loss_count
@@ -1224,6 +1251,8 @@ def append_failed_order_attempt(
             f"paper_trading={paper_trading}",
             f"order_submission_attempted={str(order_submission_attempted).lower()}",
             f"period_open_price_to_beat={_fmt(market.settlement_threshold)}",
+            *_run_pnl_summary_lines(),
+            f"veto_flags={json.dumps(getattr(result, 'veto_flags', None))}",
             f"attempt_side={getattr(decision, 'side', None)}",
             f"attempt_confidence={_fmt(getattr(decision, 'confidence', None))}",
             f"effective_confidence={_fmt(_effective_confidence(decision, market=market, features=features))}",
@@ -1329,6 +1358,7 @@ def append_failed_live_order(
             f"observed_at={observed_at.isoformat()}",
             "phase=LIVE_ORDER_RUNTIME_FAILURE",
             f"period_open_price_to_beat={_fmt(market.settlement_threshold)}",
+            *_run_pnl_summary_lines(),
             f"failure_side={getattr(decision, 'side', None)}",
             f"failure_confidence={_fmt(getattr(decision, 'confidence', None))}",
             f"effective_confidence={_fmt(_effective_confidence(decision, market=market, features=features))}",
@@ -1410,6 +1440,7 @@ def append_unfilled_live_order(
             f"observed_at={observed_at.isoformat()}",
             "phase=LIVE_SUBMITTED_UNFILLED",
             f"period_open_price_to_beat={_fmt(market.settlement_threshold)}",
+            *_run_pnl_summary_lines(),
             f"attempt_side={getattr(decision, 'side', None)}",
             f"attempt_confidence={_fmt(getattr(decision, 'confidence', None))}",
             f"effective_confidence={_fmt(_effective_confidence(decision, market=market, features=features))}",
@@ -1762,6 +1793,9 @@ def print_market_context(
     print(f"  period_open_price_to_beat = {_fmt(market.settlement_threshold)}")
     print(f"  up_market_probability = {_fmt(getattr(market, 'up_market_probability', None))}")
     print(f"  down_market_probability = {_fmt(getattr(market, 'down_market_probability', None))}")
+    realized_pnl, current_drawdown = get_realized_pnl_snapshot()
+    print(f"  realized_pnl          = {_fmt(realized_pnl)}")
+    print(f"  current_drawdown      = {_fmt(current_drawdown)}")
     print(f"  up_spread             = {_fmt(getattr(up_snapshot, 'spread', None))}")
     print(f"  down_spread           = {_fmt(getattr(down_snapshot, 'spread', None))}")
     if not debug:
@@ -1813,6 +1847,8 @@ def print_trade_execution_result(result, debug: bool) -> None:
     print(f"  price    = {_fmt(result.price)}")
     print(f"  token_id = {result.token_id}")
     print(f"  reason   = {result.reason}")
+    if getattr(result, "veto_flags", None):
+        print(f"  veto_flags = {json.dumps(result.veto_flags)}")
 
 
 def run_once() -> None:
@@ -2042,6 +2078,16 @@ def run_once() -> None:
                 print("-" * 80)
             return
 
+    regime_fingerprint = _build_regime_fingerprint(
+        market_slug=market.slug,
+        observed_at=features.as_of,
+        features=features,
+        up_snapshot=up_snapshot,
+        down_snapshot=down_snapshot,
+        current_btc_price=features.price_usd,
+        period_open_price_to_beat=market.settlement_threshold,
+    )
+
     decision = decide_trade(features, market, up_snapshot=up_snapshot, down_snapshot=down_snapshot)
     append_pending_period_tick_analysis(
         market,
@@ -2082,7 +2128,13 @@ def run_once() -> None:
             decision_snapshot = get_token_quote_snapshot(market.down_token_id, decision=decision)
 
     try:
-        result = maybe_execute_trade(market, decision, features=features, snapshot=decision_snapshot)
+        result = maybe_execute_trade(
+            market,
+            decision,
+            features=features,
+            snapshot=decision_snapshot,
+            regime_fingerprint=regime_fingerprint,
+        )
     except RuntimeError as exc:
         print(f"ERROR: {exc}")
         append_failed_live_order(

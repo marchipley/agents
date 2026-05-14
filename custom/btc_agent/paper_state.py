@@ -39,6 +39,8 @@ class PaperTradingState:
     trades_executed: int = 0
     trade_cooldown_loops_remaining: int = 0
     active_orders: List[ActivePaperOrder] = field(default_factory=list)
+    realized_pnl_usd: float = 0.0
+    peak_realized_pnl_usd: float = 0.0
 
 
 _STATE = PaperTradingState()
@@ -68,6 +70,38 @@ def record_executed_trade(order: ActivePaperOrder) -> None:
     _STATE.active_orders.append(order)
 
 
+def _pnl_for_order_outcome(order: ActivePaperOrder, outcome_label: str) -> Optional[float]:
+    if getattr(order, "actual_fill_price", None) is None and not getattr(order, "filled", False):
+        return None
+    try:
+        shares = float(order.shares)
+        entry_price = float(order.entry_price)
+    except (TypeError, ValueError):
+        return None
+    if outcome_label == "win":
+        return shares * (1.0 - entry_price)
+    if outcome_label == "loss":
+        return -shares * entry_price
+    return 0.0
+
+
+def record_realized_pnl(delta_pnl_usd: float) -> float:
+    try:
+        delta = float(delta_pnl_usd)
+    except (TypeError, ValueError):
+        delta = 0.0
+    _STATE.realized_pnl_usd += delta
+    _STATE.peak_realized_pnl_usd = max(_STATE.peak_realized_pnl_usd, _STATE.realized_pnl_usd)
+    return _STATE.realized_pnl_usd
+
+
+def record_realized_pnl_for_order(order: ActivePaperOrder, outcome_label: str) -> Optional[float]:
+    pnl = _pnl_for_order_outcome(order, outcome_label)
+    if pnl is None:
+        return None
+    return record_realized_pnl(pnl)
+
+
 def set_trade_cooldown(loop_count: int) -> None:
     _STATE.trade_cooldown_loops_remaining = max(int(loop_count), 0)
 
@@ -86,6 +120,12 @@ def consume_trade_cooldown_loop() -> int:
 
 def get_active_orders() -> List[ActivePaperOrder]:
     return list(_STATE.active_orders)
+
+
+def get_realized_pnl_snapshot() -> tuple[float, float]:
+    current = float(_STATE.realized_pnl_usd)
+    drawdown = max(float(_STATE.peak_realized_pnl_usd) - current, 0.0)
+    return current, drawdown
 
 
 def classify_position(order: ActivePaperOrder, current_btc_price: float) -> PositionStatus:

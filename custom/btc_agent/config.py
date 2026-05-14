@@ -9,18 +9,18 @@ from typing import Optional
 
 # Base minimum confidence required for a directional trade before any
 # time-remaining or trend-strength adjustments are applied.
-# Example: raising this from 0.65 to 0.72 reduces trade count by forcing
+# Example: raising this from 0.64 to 0.72 reduces trade count by forcing
 # stronger raw LLM conviction; lowering it to 0.60 allows more marginal trades.
-DEFAULT_MIN_CONFIDENCE = 0.65
+DEFAULT_MIN_CONFIDENCE = 0.64
 
 # Lower confidence floor used in the early Discovery Phase to allow
 # mathematically favorable early entries before the market fully trends.
-# Example: raising from 0.10 to 0.25 makes early entries rarer; lowering it
+# Example: raising from 0.65 to 0.90 makes early entries rarer; lowering it
 # further makes the bot more willing to probe early-window setups.
-DISCOVERY_MIN_CONFIDENCE = 0.70
+DISCOVERY_MIN_CONFIDENCE = 0.65
 
 # Fixed number of shares to submit for each paper/live trade.
-# Example: increasing from 5 to 10 doubles position size and PnL variance;
+# Example: increasing from 7 to 10 doubles position size and PnL variance;
 # lowering to 3 reduces exposure per order.
 SHARES_PER_TRADE = 7
 
@@ -49,7 +49,12 @@ TREND_RELAXED_MIN_CONFIDENCE = 0.62
 # Harder minimum confidence floor used in the final minute of the period.
 # Example: raising from 0.75 to 0.85 blocks more late-window trades; lowering
 # to 0.70 makes the bot more willing to take last-minute entries.
-FINAL_WINDOW_MIN_CONFIDENCE = 0.85
+FINAL_WINDOW_MIN_CONFIDENCE = 0.75
+
+# Ceiling for brand-new entries into unusually extended trends.
+# Example: lowering from 75 to 65 blocks more end-of-move chasing; raising to
+# 80 allows more continuation entries before the bot treats the trend as exhausted.
+MAX_ADX_FOR_NEW_ENTRY = 75.0
 
 # Minimum required execution edge above market implied probability for a trade
 # to pass, except for special very-high-confidence override cases.
@@ -76,9 +81,9 @@ ITM_CONFIDENCE_BOOST_ATR_MULTIPLIER = 0.50
 ITM_CONFIDENCE_BOOST_MARKET_WIN_CHANCE = 0.60
 
 # Amount added to decision confidence when the in-the-money boost conditions are met.
-# Example: raising from 0.15 to 0.20 helps more trades clear confidence/edge gates;
-# lowering to 0.10 makes the boost more modest.
-ITM_CONFIDENCE_BOOST_AMOUNT = 0.15
+# Example: raising from 0.05 to 0.10 helps more trades clear confidence/edge gates;
+# lowering to 0.00 makes the boost disappear entirely.
+ITM_CONFIDENCE_BOOST_AMOUNT = 0.05
 
 # Low market-win-chance threshold used by the prompt/execution guardrails to avoid
 # betting on extremely unlikely reversals.
@@ -133,9 +138,9 @@ MAX_EARLY_WINDOW_RSI = 65.0
 
 # Divisor used in the required-velocity sanity check.
 # The bot rejects trades when required_velocity_to_win exceeds volatility_5m / divisor.
-# Example: raising from 15 to 20 makes the check stricter and blocks more
-# mathematically difficult trades; lowering to 10 makes it more permissive.
-REQUIRED_VELOCITY_DIVISOR = 7.5
+# Example: raising from 10 to 20 makes the check stricter and blocks more
+# mathematically difficult trades; lowering to 7.5 makes it more permissive.
+REQUIRED_VELOCITY_DIVISOR = 10.0
 
 # Early-window volatility-to-strike-gap safety multiplier used to block
 # trades where BTC is too close to the strike relative to current 5m noise.
@@ -159,9 +164,9 @@ IMBALANCE_PRICING_STRONG_THRESHOLD = 0.75
 EARLY_WINDOW_BUFFER_MULTIPLIER = 0.50
 
 # Late-window safety buffer multiplier for strike-distance filtering.
-# Example: lowering from 0.15 to 0.10 allows more late near-strike trades;
+# Example: lowering from 0.30 to 0.20 allows more late near-strike trades;
 # raising it makes the bot stay more conservative closer to expiry.
-LATE_WINDOW_BUFFER_MULTIPLIER = 0.15
+LATE_WINDOW_BUFFER_MULTIPLIER = 0.30
 
 # Realized slippage guard in basis points. If the confirmed fill exceeds this
 # slippage relative to the quoted entry price, trigger a cooldown.
@@ -175,7 +180,7 @@ SLIPPAGE_COOLDOWN_SECONDS = 300
 
 # The total number of completed losing trades allowed in a single run before the
 # bot stops. This is a repo-visible non-secret runtime cap.
-MAX_LOSSES_PER_RUN = 8
+MAX_LOSSES_PER_RUN = 5
 
 # Number of times to poll Polymarket order status right after live submission
 # before deciding the order is still unfilled.
@@ -191,7 +196,7 @@ LIVE_ORDER_STATUS_POLL_INTERVAL_SECONDS = 0.75
 # Enabling tis will output additional debug info in the output
 BTC_AGENT_DEBUG=False
 
-# Enabling this will disable warmup if BTC_AGENT_DEBUG is enabled
+# Disabling this will disable warmup if BTC_AGENT_DEBUG is enabled
 BTC_AGENT_DEBUG_WARMUP=False
 
 # When enabled, the program will disable the geolocation check and send a small test prompt to the LLM to check connection
@@ -279,6 +284,7 @@ class TradingConfig:
     trend_priority_adx_threshold: float = TREND_PRIORITY_ADX_THRESHOLD
     trend_relaxed_min_confidence: float = TREND_RELAXED_MIN_CONFIDENCE
     final_window_min_confidence: float = FINAL_WINDOW_MIN_CONFIDENCE
+    max_adx_for_new_entry: float = MAX_ADX_FOR_NEW_ENTRY
     min_execution_edge: float = MIN_EXECUTION_EDGE
     itm_confidence_boost_usd: float = ITM_CONFIDENCE_BOOST_USD
     itm_confidence_boost_atr_multiplier: float = ITM_CONFIDENCE_BOOST_ATR_MULTIPLIER
@@ -407,6 +413,9 @@ def get_trading_config() -> TradingConfig:
         ),
         final_window_min_confidence=float(
             os.getenv("BTC_AGENT_FINAL_WINDOW_MIN_CONFIDENCE", str(FINAL_WINDOW_MIN_CONFIDENCE))
+        ),
+        max_adx_for_new_entry=float(
+            os.getenv("BTC_AGENT_MAX_ADX_FOR_NEW_ENTRY", str(MAX_ADX_FOR_NEW_ENTRY))
         ),
         min_execution_edge=float(
             os.getenv("BTC_AGENT_MIN_EXECUTION_EDGE", str(MIN_EXECUTION_EDGE))

@@ -36,6 +36,7 @@ class TradeExecutionResult:
     shares_requested: Optional[float] = None
     submission_accepted: bool = False
     live_order_id: Optional[str] = None
+    veto_flags: Optional[List[str]] = None
 
 
 @dataclass
@@ -660,6 +661,7 @@ def _build_rejected_trade_result(
     order_latency_ms: Optional[int] = None,
     book_depth_at_fill: Optional[float] = None,
     shares_requested: Optional[float] = None,
+    veto_flags: Optional[List[str]] = None,
 ) -> TradeExecutionResult:
     return TradeExecutionResult(
         executed=False,
@@ -676,6 +678,7 @@ def _build_rejected_trade_result(
         order_latency_ms=order_latency_ms,
         book_depth_at_fill=book_depth_at_fill,
         shares_requested=shares_requested,
+        veto_flags=veto_flags,
     )
 
 
@@ -1339,12 +1342,12 @@ def get_effective_min_confidence(
     cfg=None,
 ) -> float:
     cfg = cfg or get_trading_config()
-    base_confidence = float(getattr(cfg, "min_confidence", 0.7))
+    base_confidence = float(getattr(cfg, "min_confidence", 0.64))
     time_remaining_seconds = _get_time_remaining_seconds(market)
     if time_remaining_seconds > 180:
-        return max(base_confidence, float(getattr(cfg, "discovery_min_confidence", 0.85)))
+        return max(base_confidence, float(getattr(cfg, "discovery_min_confidence", 0.65)))
     if time_remaining_seconds < 60:
-        return max(base_confidence, float(getattr(cfg, "final_window_min_confidence", 0.70)))
+        return max(base_confidence, float(getattr(cfg, "final_window_min_confidence", 0.75)))
     return base_confidence
 
 
@@ -1361,7 +1364,10 @@ def _is_window_delta_master_switch(
 ) -> bool:
     if features is None or time_remaining_seconds > 10:
         return False
-    return abs(features.delta_pct_from_window_open) > 0.0015
+    delta_pct_from_window_open = getattr(features, "delta_pct_from_window_open", None)
+    if delta_pct_from_window_open is None:
+        return False
+    return abs(delta_pct_from_window_open) > 0.0015
 
 
 def _validate_trade_candidate(
@@ -1369,6 +1375,7 @@ def _validate_trade_candidate(
     decision: LlmDecision,
     features: Optional[BtcFeatures] = None,
     snapshot: Optional[TokenQuoteSnapshot] = None,
+    regime_fingerprint: Optional[dict] = None,
 ) -> Tuple[Optional[TokenQuoteSnapshot], Optional[TradeExecutionResult]]:
     cfg = get_trading_config()
 
@@ -1380,6 +1387,7 @@ def _validate_trade_candidate(
             token_id=None,
             reason=f"NO_TRADE from LLM: {decision.reason}",
             snapshot=None,
+            veto_flags=["llm_no_trade"],
         )
 
     token_id = market.up_token_id if decision.side == "UP" else market.down_token_id
@@ -1399,6 +1407,7 @@ def _validate_trade_candidate(
             token_id=token_id,
             reason=reason,
             snapshot=snapshot,
+            veto_flags=[re.sub(r"[^a-z0-9]+", "_", reason.lower()).strip("_") or "executor_rejection"],
             **_get_rejection_intent_context(
                 decision,
                 snapshot,
@@ -1465,6 +1474,16 @@ def _validate_trade_candidate(
             or (decision.side == "DOWN" and gap_to_target < 0)
         )
     )
+    trend_regime = "unknown"
+    rsi_regime = "unknown"
+    if isinstance(regime_fingerprint, dict):
+        trend_regime = str(regime_fingerprint.get("trend_regime", "unknown") or "unknown")
+        rsi_regime = str(regime_fingerprint.get("rsi_regime", "unknown") or "unknown")
+    regime_label = str(rsi_regime or "").upper()
+    parabolic_up_regime = regime_label == "PARABOLIC_UP"
+    parabolic_down_regime = regime_label == "PARABOLIC_DOWN"
+    parabolic_regime = parabolic_up_regime or parabolic_down_regime
+    strong_trend_itm = side_is_itm and trend_regime.lower() in {"strong_up", "strong_down"}
     required_velocity_to_win = None
     if gap_to_target is not None and time_remaining_seconds > 0:
         required_velocity_to_win = abs(gap_to_target) / time_remaining_seconds
@@ -1484,7 +1503,14 @@ def _validate_trade_candidate(
         else abs(float(effective_confidence) - float(market_implied_probability))
     )
 
-    if decision.side == "UP" and rsi_9 is not None and rsi_9 > 85.0:
+    max_adx_for_new_entry = float(getattr(cfg, "max_adx_for_new_entry", 75.0))
+    if adx_14 is not None and adx_14 > max_adx_for_new_entry and not strong_trend_itm:
+        return _reject(
+            submission_limit_price,
+            f"ADX Exhaustion Veto: ADX {adx_14:.1f} > {max_adx_for_new_entry:.1f}",
+        )
+
+    if decision.side == "UP" and rsi_9 is not None and rsi_9 > 85.0 and not parabolic_up_regime:
         return _reject(
             submission_limit_price,
             (
@@ -1493,7 +1519,7 @@ def _validate_trade_candidate(
             ),
         )
 
-    if decision.side == "DOWN" and rsi_9 is not None and rsi_9 < 15.0:
+    if decision.side == "DOWN" and rsi_9 is not None and rsi_9 < 15.0 and not parabolic_down_regime:
         return _reject(
             submission_limit_price,
             (
@@ -1503,7 +1529,7 @@ def _validate_trade_candidate(
         )
 
     if adx_14 is not None and adx_14 > 50.0:
-        if decision.side == "UP" and rsi_9 is not None and rsi_9 > 75.0:
+        if decision.side == "UP" and rsi_9 is not None and rsi_9 > 75.0 and not parabolic_up_regime:
             return _reject(
                 submission_limit_price,
                 (
@@ -1511,7 +1537,7 @@ def _validate_trade_candidate(
                     f"(adx_14={adx_14:.3f}; rsi_9={rsi_9:.3f})"
                 ),
             )
-        if decision.side == "DOWN" and rsi_9 is not None and rsi_9 < 25.0:
+        if decision.side == "DOWN" and rsi_9 is not None and rsi_9 < 25.0 and not parabolic_down_regime:
             return _reject(
                 submission_limit_price,
                 (
@@ -1522,15 +1548,33 @@ def _validate_trade_candidate(
 
     if (
         side_is_itm
-        and time_remaining_seconds < 60
+        and "weak" in trend_regime.lower()
+        and features is not None
+        and getattr(features, "volatility_5m", None) not in (None, 0)
+        and gap_to_target is not None
+        and abs(gap_to_target) < (0.55 * float(getattr(features, "volatility_5m", 0.0)))
+    ):
+        weak_regime_buffer = 0.55 * float(getattr(features, "volatility_5m", 0.0))
+        return _reject(
+            submission_limit_price,
+            (
+                "Weak Regime Buffer Veto: "
+                f"Gap {abs(gap_to_target):.2f} < {weak_regime_buffer:.2f} "
+                f"(trend_regime={trend_regime})"
+            ),
+        )
+
+    late_itm_entry_quote_threshold = 0.96 if time_remaining_seconds > 30 else 0.85
+    if (
+        side_is_itm
         and chosen_side_quote is not None
-        and chosen_side_quote > 0.85
+        and chosen_side_quote > late_itm_entry_quote_threshold
     ):
         return _reject(
             submission_limit_price,
             (
                 "Late ITM entry quote veto blocked poor risk/reward trade "
-                f"(quote={chosen_side_quote:.3f}; threshold=0.850; "
+                f"(quote={chosen_side_quote:.3f}; threshold={late_itm_entry_quote_threshold:.3f}; "
                 f"time_remaining={time_remaining_seconds}s)"
             ),
         )
@@ -1539,6 +1583,7 @@ def _validate_trade_candidate(
         decision.side == "DOWN"
         and rsi_9 is not None
         and rsi_9 < float(getattr(cfg, "down_rsi_veto_threshold", 30.0))
+        and not parabolic_down_regime
     ):
         down_rsi_threshold = float(getattr(cfg, "down_rsi_veto_threshold", 30.0))
         return _reject(
@@ -1554,13 +1599,13 @@ def _validate_trade_candidate(
         and gap_to_target is not None
         and gap_to_target < 0
         and rsi_9 is not None
-        and rsi_9 > 60.0
+        and rsi_9 > 72.0
     ):
         return _reject(
             submission_limit_price,
             (
                 "Momentum-trap veto blocked UP trade below the strike "
-                f"(gap_to_target={gap_to_target:.3f}; rsi_9={rsi_9:.3f}; threshold=60.000)"
+                f"(gap_to_target={gap_to_target:.3f}; rsi_9={rsi_9:.3f}; threshold=72.000)"
             ),
         )
 
@@ -1595,6 +1640,7 @@ def _validate_trade_candidate(
             and adx_14 is not None
             and adx_14 > float(getattr(cfg, "parabolic_rsi_suspend_adx_threshold", 35.0))
         )
+        and not parabolic_up_regime
         and rsi_9 > up_rsi_threshold
     ):
         return _reject(
@@ -2200,12 +2246,14 @@ def maybe_execute_trade(
     decision: LlmDecision,
     features: Optional[BtcFeatures] = None,
     snapshot: Optional[TokenQuoteSnapshot] = None,
+    regime_fingerprint: Optional[dict] = None,
 ) -> TradeExecutionResult:
     validated_snapshot, rejection = _validate_trade_candidate(
         market=market,
         decision=decision,
         features=features,
         snapshot=snapshot,
+        regime_fingerprint=regime_fingerprint,
     )
     if rejection is not None:
         return rejection
