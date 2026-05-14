@@ -22,7 +22,7 @@ DISCOVERY_MIN_CONFIDENCE = 0.65
 # Fixed number of shares to submit for each paper/live trade.
 # Example: increasing from 7 to 10 doubles position size and PnL variance;
 # lowering to 3 reduces exposure per order.
-SHARES_PER_TRADE = 7
+SHARES_PER_TRADE = 5
 
 # Maximum spread allowed by configuration for a trade candidate.
 # Example: raising from 0.06 to 0.10 allows participation in wider, more

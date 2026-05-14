@@ -238,6 +238,8 @@ class TestBtcLlmDecision(unittest.TestCase):
         self.assertIn("trend_regime=", prompt)
         self.assertIn("rsi_regime=", prompt)
         self.assertIn("volatility_regime=", prompt)
+        self.assertIn("momentum_direction=UP;", prompt)
+        self.assertIn("momentum_alignment=True;", prompt)
         self.assertNotIn("if_t_gt_", prompt)
         self.assertNotIn("prefer_no_trade", prompt)
 
@@ -259,6 +261,7 @@ class TestBtcLlmDecision(unittest.TestCase):
         self.assertIn("Parabolic Authority Rule: If rsi_regime is labeled PARABOLIC", prompt)
         self.assertIn("trust the price action over the oscillator", prompt)
         self.assertIn("Execution Edge Rule: For OTM trades, you must have an execution edge of at least 0.05", prompt)
+        self.assertIn("VELOCITY OVERRIDE: If delta_prev_tick is moving against your chosen side", prompt)
 
     def test_gemini_503_returns_no_trade(self):
         error_response = requests.Response()

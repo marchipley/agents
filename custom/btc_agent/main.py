@@ -951,9 +951,8 @@ def append_completed_order_tick(
         order.market_slug,
         getattr(order, "trade_number_in_period", None),
     )
-    actual_fill_price = getattr(order, "actual_fill_price", None)
     filled = bool(getattr(order, "filled", False))
-    is_unfilled = not (actual_fill_price is not None and filled)
+    is_unfilled = not filled
     status = classify_position(order, current_btc_price)
     btc_move_from_entry = current_btc_price - order.entry_btc_price
     btc_move_from_entry_pct = (
@@ -1725,10 +1724,11 @@ def print_active_orders(current_btc_price: float) -> None:
 
     print("Active orders:")
     for idx, order in enumerate(active_orders, start=1):
+        api_state = getattr(order, "api_state", None) or "unknown"
         status = (
-            "UNFILLED"
-            if getattr(order, "actual_fill_price", None) is None
-            else classify_position(order, current_btc_price)
+            classify_position(order, current_btc_price)
+            if getattr(order, "filled", False)
+            else f"UNFILLED (State: {api_state})"
         )
         win_condition = (
             f"BTC must finish above {order.target_btc_price:.2f}"
@@ -2201,12 +2201,12 @@ def run_once() -> None:
             entry_btc_price=features.price_usd,
             quoted_price_at_entry=getattr(result, "quoted_price_at_entry", None),
             actual_fill_price=getattr(result, "actual_fill_price", None),
-            filled=getattr(result, "actual_fill_price", None) is not None,
             realized_slippage_bps=getattr(result, "realized_slippage_bps", None),
             order_latency_ms=getattr(result, "order_latency_ms", None),
             book_depth_at_fill=getattr(result, "book_depth_at_fill", None),
             shares_requested=getattr(result, "shares_requested", None),
             live_order_id=getattr(result, "live_order_id", None),
+            filled=getattr(result, "executed", False),
             llm_prompt_text=getattr(decision, "prompt_text", None),
             llm_raw_response_text=getattr(decision, "raw_response_text", None),
             target_is_approximate=target_is_approximate,

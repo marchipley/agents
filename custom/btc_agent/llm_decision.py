@@ -249,6 +249,7 @@ def _build_system_prompt() -> str:
         "If confidence is above 0.90, treat it as a directive to get in rather than demanding extra edge buffer.\n"
         "If time remaining is under 5 seconds and confidence is above 0.70, avoid NO_TRADE unless the signal is clearly invalid.\n"
         "CRITICAL EXECUTION RULE: If the current side is ITM and time remaining < 60s, you may enter ONLY if the entry quote is < 0.85. If the buy quote is > 0.85, the risk-to-reward is too poor to enter a new position.\n"
+        "VELOCITY OVERRIDE: If delta_prev_tick is moving against your chosen side and its absolute value is greater than your DISTANCE_FROM_STRIKE_USD, you MUST choose NO_TRADE. Never enter a lead that is being erased faster than the execution latency.\n"
         "Paradoxical Momentum rule: If ADX is above 50 and RSI is above 75, treat this as Exhaustion rather than Strength. Do not enter new positions; only maintain existing ones.\n"
         "ADX Cap Rule: Treat ADX > 55 as trend exhaustion. Lower your confidence significantly and prefer NO_TRADE unless rsi_regime is PARABOLIC and momentum_alignment is TRUE.\n"
         "Alpha Override Rule: If confidence is > 0.75, you are authorized to ignore weak trend regimes and momentum_acceleration flags, provided the trade is already ITM by more than 1.0 * ATR.\n"
@@ -289,6 +290,7 @@ def _build_openai_realtime_system_prompt() -> str:
         f"If time_remaining_seconds>180 and adx<{cfg.discovery_adx_caution_threshold:.0f}, stay cautious; if adx>{cfg.trend_priority_adx_threshold:.0f}, prioritize the trend over elapsed time. "
         "If current side is ITM and time_remaining_seconds<60, enter ONLY if entry quote<0.85; if buy quote>0.85, prefer NO_TRADE regardless of ITM status. "
         "If adx>50 and rsi>75, treat that as exhaustion rather than strength and avoid new entries. "
+        "VELOCITY OVERRIDE: If delta_prev_tick is moving against your chosen side and its absolute value is greater than your DISTANCE_FROM_STRIKE_USD, you MUST choose NO_TRADE. Never enter a lead that is being erased faster than the execution latency. "
         "Treat ADX>55 as trend exhaustion and strongly prefer NO_TRADE unless rsi_regime is PARABOLIC and momentum_alignment is TRUE. "
         "Alpha Override Rule: If confidence is > 0.75, you are authorized to ignore weak trend regimes and momentum_acceleration flags, provided the trade is already ITM by more than 1.0 * ATR. "
         "ITM AGGRESSION RULE: If the trade is ITM by more than $15.00 and momentum_alignment is TRUE, you may set confidence to 0.85+ regardless of trend regime labels. "
@@ -541,6 +543,11 @@ def _build_openai_realtime_user_prompt(
     trend_regime = _trend_regime(features, market)
     rsi_regime = _rsi_regime(features)
     volatility_regime = _volatility_regime(features.volatility_5m)
+    mom_dir = "NEUTRAL"
+    if features.momentum_1m > 0:
+        mom_dir = "UP"
+    elif features.momentum_1m < 0:
+        mom_dir = "DOWN"
     return (
         f"beat={market.settlement_threshold};"
         f"t={time_remaining_seconds};"
@@ -562,7 +569,8 @@ def _build_openai_realtime_user_prompt(
         f"v5={features.volatility_5m};"
         f"reqv={required_velocity_to_win};"
         f"dt={features.consecutive_directional_ticks};"
-        f"ma={_momentum_alignment_text(features)};"
+        f"momentum_direction={mom_dir};"
+        f"momentum_alignment={_momentum_alignment_text(features)};"
         f"trend_regime={trend_regime};"
         f"rsi_regime={rsi_regime};"
         f"volatility_regime={volatility_regime}"

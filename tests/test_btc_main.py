@@ -55,6 +55,7 @@ class TestBtcMain(unittest.TestCase):
             target_btc_price=80000.0,
             entry_btc_price=80010.0,
             actual_fill_price=None,
+            api_state="ORDER_STATE_OPEN",
         )
 
         with patch("custom.btc_agent.main.get_active_orders", return_value=[order]), patch(
@@ -62,7 +63,32 @@ class TestBtcMain(unittest.TestCase):
         ) as stdout:
             print_active_orders(80020.0)
 
-        self.assertIn("order_1_position_state = UNFILLED", stdout.getvalue())
+        self.assertIn("order_1_position_state = UNFILLED (State: ORDER_STATE_OPEN)", stdout.getvalue())
+
+    def test_print_active_orders_uses_filled_flag_even_with_fill_price(self):
+        order = ActivePaperOrder(
+            market_slug="btc-updown-5m-1770000000",
+            market_title="Bitcoin Up or Down",
+            side="UP",
+            shares=3.0,
+            entry_price=0.67,
+            token_id="up-token",
+            target_btc_price=80000.0,
+            entry_btc_price=80010.0,
+            actual_fill_price=0.71,
+            filled=False,
+            api_state="ORDER_STATE_PARTIALLY_FILLED",
+        )
+
+        with patch("custom.btc_agent.main.get_active_orders", return_value=[order]), patch(
+            "sys.stdout", new_callable=io.StringIO
+        ) as stdout:
+            print_active_orders(80020.0)
+
+        self.assertIn(
+            "order_1_position_state = UNFILLED (State: ORDER_STATE_PARTIALLY_FILLED)",
+            stdout.getvalue(),
+        )
 
     TEST_TIMESTAMPS = (
         "1777056000",

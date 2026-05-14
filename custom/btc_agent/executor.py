@@ -857,7 +857,7 @@ def _fetch_actual_fill_price_from_trades(
             trades = []
 
         average_fill = _weighted_average_fill_price(trades)
-        if average_fill is not None:
+        if average_fill is not None and filled_size is not None and filled_size > 0:
             return average_fill
     return None
 
@@ -884,6 +884,16 @@ def _extract_order_status_text(order_data: Optional[Dict[str, Any]]) -> Optional
         if value:
             return str(value).strip().lower()
     return None
+
+
+def _extract_order_state(order_data: Optional[Dict[str, Any]]) -> Optional[str]:
+    if not isinstance(order_data, dict):
+        return None
+    value = order_data.get("state")
+    if not value:
+        return None
+    state = str(value).strip()
+    return state or None
 
 
 def _extract_filled_size_from_order_data(order_data: Optional[Dict[str, Any]]) -> Optional[float]:
@@ -954,18 +964,20 @@ def _resolve_confirmed_live_fill(
     interval = max(float(poll_interval_seconds), 0.0)
     for attempt in range(attempts):
         order_data = _fetch_live_order_status(order_id)
+        state = _extract_order_state(order_data)
         average_fill = _extract_average_fill_price_from_order_data(order_data)
         filled_size = _extract_filled_size_from_order_data(order_data)
-        status_text = _extract_order_status_text(order_data)
 
-        if average_fill is not None:
+        if state == "ORDER_STATE_FILLED" and average_fill is not None and filled_size is not None and filled_size > 0:
+            return average_fill
+        if state == "ORDER_STATE_PARTIALLY_FILLED" and average_fill is not None and filled_size is not None and filled_size > 0:
             return average_fill
 
         trades_fill = _fetch_actual_fill_price_from_trades(order_id, token_id)
         if trades_fill is not None:
             return trades_fill
 
-        if _order_status_indicates_no_fill(status_text, filled_size):
+        if _order_status_indicates_no_fill(_extract_order_status_text(order_data), filled_size):
             if attempt < attempts - 1 and interval > 0:
                 time.sleep(interval)
             continue
@@ -978,22 +990,38 @@ def _resolve_confirmed_live_fill(
 
 def refresh_live_order_fill_status(order) -> bool:
     order_id = getattr(order, "live_order_id", None)
-    if not order_id or getattr(order, "actual_fill_price", None) is not None:
+    if not order_id or getattr(order, "filled", False):
         return False
-    actual_fill_price = _resolve_confirmed_live_fill(
-        order_id,
-        getattr(order, "token_id", None),
-        poll_attempts=1,
-        poll_interval_seconds=0.0,
-    )
+    order_data = _fetch_live_order_status(order_id)
+    state = _extract_order_state(order_data)
+    order.api_state = state or "UNKNOWN"
+
+    average_fill = _extract_average_fill_price_from_order_data(order_data)
+    filled_size = _extract_filled_size_from_order_data(order_data)
+
+    if state == "ORDER_STATE_PARTIALLY_FILLED":
+        if average_fill is not None and filled_size is not None and filled_size > 0:
+            order.actual_fill_price = average_fill
+        order.filled = False
+        return False
+
+    if state != "ORDER_STATE_FILLED":
+        order.filled = False
+        return False
+
+    actual_fill_price = average_fill
     if actual_fill_price is None:
-        return False
-    order.actual_fill_price = actual_fill_price
+        actual_fill_price = _fetch_actual_fill_price_from_trades(
+            order_id,
+            getattr(order, "token_id", None),
+        )
+    if actual_fill_price is not None:
+        order.actual_fill_price = actual_fill_price
+        order.realized_slippage_bps = _compute_realized_slippage_bps(
+            getattr(order, "quoted_price_at_entry", None),
+            actual_fill_price,
+        )
     order.filled = True
-    order.realized_slippage_bps = _compute_realized_slippage_bps(
-        getattr(order, "quoted_price_at_entry", None),
-        actual_fill_price,
-    )
     return True
 
 
@@ -1488,6 +1516,8 @@ def _validate_trade_candidate(
     if gap_to_target is not None and time_remaining_seconds > 0:
         required_velocity_to_win = abs(gap_to_target) / time_remaining_seconds
     volatility_5m = None if features is None else getattr(features, "volatility_5m", None)
+    atr_14 = None if features is None else getattr(features, "atr_14", None)
+    delta_prev = None if features is None else getattr(features, "delta_prev_tick", None)
     rsi_9 = None if features is None else getattr(features, "rsi_9", None)
     rsi_speed_divergence = None if features is None else getattr(features, "rsi_speed_divergence", None)
     adx_14 = None if features is None else getattr(features, "adx_14", None)
@@ -1509,6 +1539,18 @@ def _validate_trade_candidate(
             submission_limit_price,
             f"ADX Exhaustion Veto: ADX {adx_14:.1f} > {max_adx_for_new_entry:.1f}",
         )
+
+    if atr_14 and delta_prev:
+        if decision.side == "UP" and delta_prev < -(1.5 * atr_14):
+            return _reject(
+                submission_limit_price,
+                f"Falling Knife Veto: Price nuking ({delta_prev:.2f} < -1.5*ATR)",
+            )
+        if decision.side == "DOWN" and delta_prev > (1.5 * atr_14):
+            return _reject(
+                submission_limit_price,
+                f"Rocket Spike Veto: Price surging ({delta_prev:.2f} > 1.5*ATR)",
+            )
 
     if decision.side == "UP" and rsi_9 is not None and rsi_9 > 85.0 and not parabolic_up_regime:
         return _reject(

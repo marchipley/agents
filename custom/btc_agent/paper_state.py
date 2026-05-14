@@ -18,12 +18,13 @@ class ActivePaperOrder:
     entry_btc_price: float
     quoted_price_at_entry: Optional[float] = None
     actual_fill_price: Optional[float] = None
-    filled: bool = False
     realized_slippage_bps: Optional[float] = None
     order_latency_ms: Optional[int] = None
     book_depth_at_fill: Optional[float] = None
     shares_requested: Optional[float] = None
     live_order_id: Optional[str] = None
+    filled: bool = False
+    api_state: Optional[str] = None
     live_reprice_attempts: int = 0
     llm_prompt_text: Optional[str] = None
     llm_raw_response_text: Optional[str] = None
