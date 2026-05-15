@@ -544,9 +544,10 @@ def _build_openai_realtime_user_prompt(
     rsi_regime = _rsi_regime(features)
     volatility_regime = _volatility_regime(features.volatility_5m)
     mom_dir = "NEUTRAL"
-    if features.momentum_1m > 0:
+    momentum_1m = getattr(features, "momentum_1m", None)
+    if momentum_1m is not None and momentum_1m > 0:
         mom_dir = "UP"
-    elif features.momentum_1m < 0:
+    elif momentum_1m is not None and momentum_1m < 0:
         mom_dir = "DOWN"
     return (
         f"beat={market.settlement_threshold};"

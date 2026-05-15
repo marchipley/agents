@@ -243,6 +243,21 @@ class TestBtcLlmDecision(unittest.TestCase):
         self.assertNotIn("if_t_gt_", prompt)
         self.assertNotIn("prefer_no_trade", prompt)
 
+    def test_openai_realtime_user_prompt_handles_missing_momentum_as_neutral(self):
+        class NoMomentumFeatures(DummyFeatures):
+            momentum_1m = None
+
+        up_snapshot = Mock(buy_quote=0.84)
+        down_snapshot = Mock(buy_quote=0.17)
+        prompt = _build_openai_realtime_user_prompt(
+            NoMomentumFeatures(),
+            DummyMarket(),
+            up_snapshot=up_snapshot,
+            down_snapshot=down_snapshot,
+        )
+
+        self.assertIn("momentum_direction=NEUTRAL;", prompt)
+
     def test_system_prompt_contains_moved_policy_rules(self):
         prompt = _build_system_prompt()
 

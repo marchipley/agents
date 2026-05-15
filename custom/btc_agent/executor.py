@@ -857,7 +857,7 @@ def _fetch_actual_fill_price_from_trades(
             trades = []
 
         average_fill = _weighted_average_fill_price(trades)
-        if average_fill is not None and filled_size is not None and filled_size > 0:
+        if average_fill is not None:
             return average_fill
     return None
 

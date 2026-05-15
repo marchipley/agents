@@ -205,6 +205,23 @@ class TestBtcExecutor(unittest.TestCase):
 
         self.assertIsNone(resolved)
 
+    def test_resolve_confirmed_live_fill_can_fall_back_to_trades(self):
+        with patch(
+            "custom.btc_agent.executor._fetch_live_order_status",
+            return_value={"state": "ORDER_STATE_FILLED", "avgPrice": None, "filledSize": None},
+        ), patch(
+            "custom.btc_agent.executor._fetch_actual_fill_price_from_trades",
+            return_value=0.61,
+        ):
+            resolved = _resolve_confirmed_live_fill(
+                "order-1",
+                "up-token",
+                poll_attempts=1,
+                poll_interval_seconds=0.0,
+            )
+
+        self.assertEqual(resolved, 0.61)
+
     def test_refresh_live_order_fill_status_requires_resolved_fill(self):
         order = types.SimpleNamespace(
             live_order_id="order-1",
