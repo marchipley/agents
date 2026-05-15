@@ -815,11 +815,39 @@ def _weighted_average_fill_price(trades: List[Dict[str, Any]]) -> Optional[float
     return total_notional / total_size
 
 
-def _fetch_actual_fill_price_from_trades(
+def _weighted_average_fill_details(trades: List[Dict[str, Any]]) -> Tuple[Optional[float], float]:
+    total_notional = 0.0
+    total_size = 0.0
+    for trade in trades:
+        if not isinstance(trade, dict):
+            continue
+        price = None
+        size = None
+        for key in ("price", "tradePrice", "fillPrice"):
+            price = _coerce_price(trade.get(key))
+            if price is not None:
+                break
+        for key in ("size", "amount", "asset_size", "shares", "filledSize"):
+            size = _coerce_price(trade.get(key))
+            if size is not None:
+                break
+        if price is None or size is None or size <= 0:
+            continue
+        total_notional += price * size
+        total_size += size
+    if total_size <= 0:
+        return None, 0.0
+    return total_notional / total_size, total_size
+
+
+def _fetch_actual_fill_details_from_trades(
     order_id: str,
     token_id: Optional[str],
-) -> Optional[float]:
-    cfg = get_polymarket_config()
+) -> Tuple[Optional[float], float]:
+    try:
+        cfg = get_polymarket_config()
+    except Exception:
+        return None, 0.0
     candidate_params = [
         {"orderID": order_id},
         {"orderId": order_id},
@@ -856,10 +884,18 @@ def _fetch_actual_fill_price_from_trades(
         else:
             trades = []
 
-        average_fill = _weighted_average_fill_price(trades)
-        if average_fill is not None:
-            return average_fill
-    return None
+        average_fill, filled_size = _weighted_average_fill_details(trades)
+        if average_fill is not None and filled_size > 0:
+            return average_fill, filled_size
+    return None, 0.0
+
+
+def _fetch_actual_fill_price_from_trades(
+    order_id: str,
+    token_id: Optional[str],
+) -> Optional[float]:
+    average_fill, _filled_size = _fetch_actual_fill_details_from_trades(order_id, token_id)
+    return average_fill
 
 
 def _fetch_live_order_status(order_id: str) -> Optional[Dict[str, Any]]:
@@ -889,11 +925,59 @@ def _extract_order_status_text(order_data: Optional[Dict[str, Any]]) -> Optional
 def _extract_order_state(order_data: Optional[Dict[str, Any]]) -> Optional[str]:
     if not isinstance(order_data, dict):
         return None
-    value = order_data.get("state")
+    value = None
+    for key in ("state", "status", "orderStatus"):
+        value = order_data.get(key)
+        if value:
+            break
     if not value:
         return None
     state = str(value).strip()
     return state or None
+
+
+def _normalize_order_state(state: Optional[str]) -> Optional[str]:
+    if not state:
+        return None
+    return str(state).strip().upper()
+
+
+def _order_state_is_filled(state: Optional[str]) -> bool:
+    return _normalize_order_state(state) in {
+        "ORDER_STATE_FILLED",
+        "FILLED",
+        "MATCHED",
+        "DONE",
+        "COMPLETE",
+        "COMPLETED",
+    }
+
+
+def _order_state_is_partially_filled(state: Optional[str]) -> bool:
+    normalized = _normalize_order_state(state)
+    return normalized in {
+        "ORDER_STATE_PARTIALLY_FILLED",
+        "PARTIALLY_FILLED",
+        "PARTIAL",
+        "PARTIALLY MATCHED",
+        "PARTIALLY_MATCHED",
+    }
+
+
+def _requested_order_size(order: Any) -> Optional[float]:
+    for key in ("shares_requested", "shares", "size"):
+        value = _coerce_price(getattr(order, key, None))
+        if value is not None and value > 0:
+            return value
+    return None
+
+
+def _is_full_fill_size(filled_size: Optional[float], requested_size: Optional[float]) -> bool:
+    if filled_size is None or filled_size <= 0:
+        return False
+    if requested_size is None or requested_size <= 0:
+        return True
+    return filled_size + 1e-6 >= requested_size
 
 
 def _extract_filled_size_from_order_data(order_data: Optional[Dict[str, Any]]) -> Optional[float]:
@@ -910,6 +994,11 @@ def _extract_filled_size_from_order_data(order_data: Optional[Dict[str, Any]]) -
         "filled",
     ):
         value = _coerce_price(order_data.get(key))
+        if value is not None:
+            return value
+    for key in ("data", "order", "result"):
+        nested = order_data.get(key)
+        value = _extract_filled_size_from_order_data(nested)
         if value is not None:
             return value
     return None
@@ -956,6 +1045,7 @@ def _resolve_confirmed_live_fill(
     *,
     poll_attempts: int,
     poll_interval_seconds: float,
+    requested_size: Optional[float] = None,
 ) -> Optional[float]:
     if not order_id:
         return None
@@ -968,13 +1058,19 @@ def _resolve_confirmed_live_fill(
         average_fill = _extract_average_fill_price_from_order_data(order_data)
         filled_size = _extract_filled_size_from_order_data(order_data)
 
-        if state == "ORDER_STATE_FILLED" and average_fill is not None and filled_size is not None and filled_size > 0:
-            return average_fill
-        if state == "ORDER_STATE_PARTIALLY_FILLED" and average_fill is not None and filled_size is not None and filled_size > 0:
+        if _order_state_is_filled(state) and average_fill is not None:
             return average_fill
 
-        trades_fill = _fetch_actual_fill_price_from_trades(order_id, token_id)
-        if trades_fill is not None:
+        trades_fill, trades_filled_size = _fetch_actual_fill_details_from_trades(order_id, token_id)
+        if trades_fill is None and _order_state_is_filled(state):
+            trades_fill = _fetch_actual_fill_price_from_trades(order_id, token_id)
+        if _order_state_is_filled(state) and trades_fill is not None:
+            return trades_fill
+        if (
+            state is None
+            and trades_fill is not None
+            and _is_full_fill_size(trades_filled_size, requested_size)
+        ):
             return trades_fill
 
         if _order_status_indicates_no_fill(_extract_order_status_text(order_data), filled_size):
@@ -998,14 +1094,33 @@ def refresh_live_order_fill_status(order) -> bool:
 
     average_fill = _extract_average_fill_price_from_order_data(order_data)
     filled_size = _extract_filled_size_from_order_data(order_data)
+    requested_size = _requested_order_size(order)
 
-    if state == "ORDER_STATE_PARTIALLY_FILLED":
+    if _order_state_is_partially_filled(state):
         if average_fill is not None and filled_size is not None and filled_size > 0:
             order.actual_fill_price = average_fill
         order.filled = False
         return False
 
-    if state != "ORDER_STATE_FILLED":
+    if not _order_state_is_filled(state):
+        trades_fill, trades_filled_size = _fetch_actual_fill_details_from_trades(
+            order_id,
+            getattr(order, "token_id", None),
+        )
+        if trades_fill is not None and trades_filled_size > 0:
+            order.actual_fill_price = trades_fill
+            order.api_state = (
+                "FILLED_BY_TRADES"
+                if _is_full_fill_size(trades_filled_size, requested_size)
+                else "PARTIALLY_FILLED_BY_TRADES"
+            )
+            if _is_full_fill_size(trades_filled_size, requested_size):
+                order.realized_slippage_bps = _compute_realized_slippage_bps(
+                    getattr(order, "quoted_price_at_entry", None),
+                    trades_fill,
+                )
+                order.filled = True
+                return True
         order.filled = False
         return False
 
@@ -1169,7 +1284,11 @@ def retry_unfilled_live_order(order, market: BtcUpDownMarket) -> Optional[TradeE
     )
     order_latency_ms = int(round((time.monotonic() - submit_started) * 1000))
     new_order_id = _extract_order_id_from_live_response(response)
-    actual_fill_price = _resolve_actual_fill_price(response, getattr(order, "token_id", None))
+    actual_fill_price = _resolve_actual_fill_price(
+        response,
+        getattr(order, "token_id", None),
+        requested_size=getattr(order, "shares_requested", None) or getattr(order, "shares", None),
+    )
     realized_slippage_bps = _compute_realized_slippage_bps(
         quoted_price_at_entry,
         actual_fill_price,
@@ -1223,20 +1342,38 @@ def retry_unfilled_live_order(order, market: BtcUpDownMarket) -> Optional[TradeE
     )
 
 
-def _resolve_actual_fill_price(response: Any, token_id: Optional[str]) -> Optional[float]:
-    average_fill = _extract_average_fill_price_from_live_response(response)
-    if average_fill is not None:
-        return average_fill
+def _resolve_actual_fill_price(
+    response: Any,
+    token_id: Optional[str],
+    requested_size: Optional[float] = None,
+) -> Optional[float]:
     order_id = _extract_order_id_from_live_response(response)
+    if order_id:
+        cfg = get_trading_config()
+        confirmed_fill = _resolve_confirmed_live_fill(
+            order_id,
+            token_id,
+            poll_attempts=getattr(cfg, "live_order_status_poll_attempts", 4),
+            poll_interval_seconds=getattr(cfg, "live_order_status_poll_interval_seconds", 0.75),
+            requested_size=requested_size,
+        )
+        if confirmed_fill is not None:
+            return confirmed_fill
+
+    response_fill_size = _extract_filled_size_from_order_data(response if isinstance(response, dict) else None)
+    response_fill_price = _extract_average_fill_price_from_live_response(response)
+    response_state = _extract_order_state(response if isinstance(response, dict) else None)
+    if _order_state_is_filled(response_state) and response_fill_price is not None:
+        return response_fill_price
+    if (
+        response_fill_price is not None
+        and response_fill_size is not None
+        and _is_full_fill_size(response_fill_size, requested_size)
+    ):
+        return response_fill_price
     if not order_id:
-        return None
-    cfg = get_trading_config()
-    return _resolve_confirmed_live_fill(
-        order_id,
-        token_id,
-        poll_attempts=getattr(cfg, "live_order_status_poll_attempts", 4),
-        poll_interval_seconds=getattr(cfg, "live_order_status_poll_interval_seconds", 0.75),
-    )
+        return response_fill_price
+    return None
 
 
 def _slug_start_ts(slug: Optional[str]) -> Optional[int]:
@@ -2200,7 +2337,11 @@ def _execute_live_trade(
             raise RuntimeError(f"Live order submission failed: {exc}") from exc
 
     order_id = _extract_order_id_from_live_response(response)
-    actual_fill_price = _resolve_actual_fill_price(response, snapshot.token_id)
+    actual_fill_price = _resolve_actual_fill_price(
+        response,
+        snapshot.token_id,
+        requested_size=size,
+    )
     if actual_fill_price is None:
         return TradeExecutionResult(
             executed=False,

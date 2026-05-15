@@ -20,6 +20,7 @@ from custom.btc_agent.executor import (
     _scale_live_size_for_min_notional,
     _execute_paper_trade,
     _execute_live_trade,
+    _resolve_actual_fill_price,
     _resolve_confirmed_live_fill,
     refresh_live_order_fill_status,
     _validate_trade_candidate,
@@ -205,6 +206,23 @@ class TestBtcExecutor(unittest.TestCase):
 
         self.assertIsNone(resolved)
 
+    def test_resolve_confirmed_live_fill_ignores_partial_state_even_with_trade_fill(self):
+        with patch(
+            "custom.btc_agent.executor._fetch_live_order_status",
+            return_value={"state": "ORDER_STATE_PARTIALLY_FILLED", "avgPrice": 0.61, "filledSize": 2},
+        ), patch(
+            "custom.btc_agent.executor._fetch_actual_fill_price_from_trades",
+            return_value=0.61,
+        ):
+            resolved = _resolve_confirmed_live_fill(
+                "order-1",
+                "up-token",
+                poll_attempts=1,
+                poll_interval_seconds=0.0,
+            )
+
+        self.assertIsNone(resolved)
+
     def test_resolve_confirmed_live_fill_can_fall_back_to_trades(self):
         with patch(
             "custom.btc_agent.executor._fetch_live_order_status",
@@ -221,6 +239,25 @@ class TestBtcExecutor(unittest.TestCase):
             )
 
         self.assertEqual(resolved, 0.61)
+
+    def test_resolve_actual_fill_price_uses_order_state_before_submission_avg_price(self):
+        response = {"id": "order-1", "avgPrice": 0.61}
+        with patch(
+            "custom.btc_agent.executor.get_trading_config",
+            return_value=types.SimpleNamespace(
+                live_order_status_poll_attempts=1,
+                live_order_status_poll_interval_seconds=0.0,
+            ),
+        ), patch(
+            "custom.btc_agent.executor._fetch_live_order_status",
+            return_value={"state": "ORDER_STATE_OPEN", "avgPrice": 0.61, "filledSize": 0},
+        ), patch(
+            "custom.btc_agent.executor._fetch_actual_fill_price_from_trades",
+            return_value=None,
+        ):
+            resolved = _resolve_actual_fill_price(response, "up-token")
+
+        self.assertIsNone(resolved)
 
     def test_refresh_live_order_fill_status_requires_resolved_fill(self):
         order = types.SimpleNamespace(
@@ -258,6 +295,49 @@ class TestBtcExecutor(unittest.TestCase):
         self.assertEqual(order.actual_fill_price, 0.61)
         self.assertTrue(order.filled)
         self.assertEqual(order.api_state, "ORDER_STATE_FILLED")
+
+    def test_refresh_live_order_fill_status_accepts_filled_state_alias(self):
+        order = types.SimpleNamespace(
+            live_order_id="order-1",
+            token_id="up-token",
+            actual_fill_price=None,
+            filled=False,
+            quoted_price_at_entry=0.50,
+            shares_requested=5,
+        )
+        with patch(
+            "custom.btc_agent.executor._fetch_live_order_status",
+            return_value={"state": "FILLED", "avgPrice": 0.61, "filledSize": 5},
+        ):
+            changed = refresh_live_order_fill_status(order)
+
+        self.assertTrue(changed)
+        self.assertEqual(order.actual_fill_price, 0.61)
+        self.assertTrue(order.filled)
+        self.assertEqual(order.api_state, "FILLED")
+
+    def test_refresh_live_order_fill_status_uses_trade_fallback_when_state_unknown(self):
+        order = types.SimpleNamespace(
+            live_order_id="order-1",
+            token_id="up-token",
+            actual_fill_price=None,
+            filled=False,
+            quoted_price_at_entry=0.50,
+            shares_requested=5,
+        )
+        with patch(
+            "custom.btc_agent.executor._fetch_live_order_status",
+            return_value=None,
+        ), patch(
+            "custom.btc_agent.executor._fetch_actual_fill_details_from_trades",
+            return_value=(0.61, 5.0),
+        ):
+            changed = refresh_live_order_fill_status(order)
+
+        self.assertTrue(changed)
+        self.assertEqual(order.actual_fill_price, 0.61)
+        self.assertTrue(order.filled)
+        self.assertEqual(order.api_state, "FILLED_BY_TRADES")
 
     def test_refresh_live_order_fill_status_updates_partial_fill_without_marking_filled(self):
         order = types.SimpleNamespace(

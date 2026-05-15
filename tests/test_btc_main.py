@@ -271,10 +271,10 @@ class TestBtcMain(unittest.TestCase):
             "/appl/agents/completed_orders/period_analysis.json",
             "/tmp/completed_orders/period_analysis.json",
         ]
-        paths.extend(glob.glob("/appl/agents/completed_orders/period_analysis_*.json"))
         paths.extend(glob.glob("/tmp/completed_orders/period_analysis_*.json"))
         for timestamp in cls.TEST_TIMESTAMPS:
             paths.extend(glob.glob(f"/appl/agents/completed_orders/*{timestamp}*.txt"))
+            paths.extend(glob.glob(f"/appl/agents/completed_orders/period_analysis_{timestamp}.json"))
 
         for path in paths:
             try:
