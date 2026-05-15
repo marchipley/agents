@@ -193,6 +193,11 @@ LIVE_ORDER_STATUS_POLL_ATTEMPTS = 4
 # the loop; lowering to 0.25s checks faster but can miss slower confirmations.
 LIVE_ORDER_STATUS_POLL_INTERVAL_SECONDS = 0.75
 
+# Seconds between routine period-analysis JSON samples. Set to 0 to disable
+# periodic analysis logging; trade attempts and completed outcomes are still
+# logged when explicitly forced by the runtime.
+PERIOD_ANALYSIS_INTERVAL_SECONDS = 30
+
 # Enabling tis will output additional debug info in the output
 BTC_AGENT_DEBUG=False
 
@@ -309,6 +314,7 @@ class TradingConfig:
     slippage_cooldown_seconds: int = SLIPPAGE_COOLDOWN_SECONDS
     live_order_status_poll_attempts: int = LIVE_ORDER_STATUS_POLL_ATTEMPTS
     live_order_status_poll_interval_seconds: float = LIVE_ORDER_STATUS_POLL_INTERVAL_SECONDS
+    period_analysis_interval_seconds: int = PERIOD_ANALYSIS_INTERVAL_SECONDS
     market_slug_override: Optional[str] = None
 
 @dataclass
@@ -535,5 +541,6 @@ def get_trading_config() -> TradingConfig:
             ),
             0.0,
         ),
+        period_analysis_interval_seconds=max(int(PERIOD_ANALYSIS_INTERVAL_SECONDS), 0),
         market_slug_override=os.getenv("BTC_AGENT_MARKET_SLUG"),
     )

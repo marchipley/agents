@@ -14,7 +14,7 @@ from typing import Optional
 import json
 
 from . import config as config_module
-from .config import get_trading_config
+from .config import get_llm_config, get_trading_config
 from .market_lookup import (
     fetch_btc_resolution_price_for_slug,
     find_current_btc_updown_market,
@@ -64,8 +64,10 @@ from scripts.python.check_public_ip_indonesia import (
 
 
 _FIRST_LOOP = True
+_SESSION_WIN_TRADES = 0
 _SESSION_LOSS_TRADES = 0
 _DEBUG_WRITTEN_SLUGS = set()
+_PERIOD_ANALYSIS_LAST_SAMPLE_BY_SLUG = {}
 
 
 class QuitKeyMonitor:
@@ -298,6 +300,15 @@ def _failed_order_log_path(
     return os.path.join(
         completed_orders_dir,
         f"failed_order_{_extract_slug_timestamp(market_slug)}{_trade_number_suffix(trade_number_in_period)}.txt",
+    )
+
+
+def _period_analysis_log_path(market_slug: str) -> str:
+    completed_orders_dir = os.path.join(os.getcwd(), "completed_orders")
+    os.makedirs(completed_orders_dir, exist_ok=True)
+    return os.path.join(
+        completed_orders_dir,
+        f"period_analysis_{_extract_slug_timestamp(market_slug)}.json",
     )
 
 
@@ -741,6 +752,294 @@ def _build_regime_fingerprint(
     }
 
 
+def _json_safe_number(value):
+    if value is None:
+        return None
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return value
+    if math.isnan(numeric) or math.isinf(numeric):
+        return None
+    return numeric
+
+
+def _snapshot_analysis_payload(snapshot: Optional[TokenQuoteSnapshot]) -> Optional[dict]:
+    if snapshot is None:
+        return None
+    return {
+        "token_id": getattr(snapshot, "token_id", None),
+        "buy_quote": _json_safe_number(getattr(snapshot, "buy_quote", None)),
+        "reference_price": _json_safe_number(getattr(snapshot, "reference_price", None)),
+        "target_limit_price": _json_safe_number(getattr(snapshot, "target_limit_price", None)),
+        "recommended_limit_price": _json_safe_number(getattr(snapshot, "recommended_limit_price", None)),
+        "ok_to_submit": getattr(snapshot, "ok_to_submit", None),
+        "submit_reason": getattr(snapshot, "submit_reason", None),
+        "best_bid": _json_safe_number(getattr(snapshot, "best_bid", None)),
+        "best_ask": _json_safe_number(getattr(snapshot, "best_ask", None)),
+        "best_bid_size": _json_safe_number(getattr(snapshot, "best_bid_size", None)),
+        "best_ask_size": _json_safe_number(getattr(snapshot, "best_ask_size", None)),
+        "spread": _json_safe_number(getattr(snapshot, "spread", None)),
+        "spread_bps": _json_safe_number(getattr(snapshot, "spread_bps", None)),
+        "top_level_book_imbalance": _json_safe_number(
+            getattr(snapshot, "top_level_book_imbalance", None)
+        ),
+        "imbalance_pressure": _json_safe_number(getattr(snapshot, "imbalance_pressure", None)),
+    }
+
+
+def _features_analysis_payload(features) -> Optional[dict]:
+    if features is None:
+        return None
+    return {
+        "btc_price": _json_safe_number(getattr(features, "price_usd", None)),
+        "delta_prev_tick": _json_safe_number(getattr(features, "delta_from_previous_tick", None)),
+        "momentum_1m": _json_safe_number(getattr(features, "momentum_1m", None)),
+        "momentum_5m": _json_safe_number(getattr(features, "momentum_5m", None)),
+        "velocity_15s": _json_safe_number(getattr(features, "velocity_15s", None)),
+        "velocity_30s": _json_safe_number(getattr(features, "velocity_30s", None)),
+        "momentum_acceleration": _json_safe_number(
+            getattr(features, "momentum_acceleration", None)
+        ),
+        "momentum_alignment": _momentum_alignment(features),
+        "volatility_5m": _json_safe_number(getattr(features, "volatility_5m", None)),
+        "rsi_9": _json_safe_number(getattr(features, "rsi_9", None)),
+        "rsi_14": _json_safe_number(getattr(features, "rsi_14", None)),
+        "rsi_speed_divergence": _json_safe_number(
+            getattr(features, "rsi_speed_divergence", None)
+        ),
+        "ema_9": _json_safe_number(getattr(features, "ema_9", None)),
+        "ema_21": _json_safe_number(getattr(features, "ema_21", None)),
+        "ema_alignment": getattr(features, "ema_alignment", None),
+        "ema_cross_direction": getattr(features, "ema_cross_direction", None),
+        "adx_14": _json_safe_number(getattr(features, "adx_14", None)),
+        "atr_14": _json_safe_number(getattr(features, "atr_14", None)),
+        "window_open_price": _json_safe_number(getattr(features, "window_open_price", None)),
+        "delta_pct_from_window_open": _json_safe_number(
+            getattr(features, "delta_pct_from_window_open", None)
+        ),
+        "trailing_5m_open_price": _json_safe_number(
+            getattr(features, "trailing_5m_open_price", None)
+        ),
+        "delta_pct_from_trailing_5m_open": _json_safe_number(
+            getattr(features, "delta_pct_from_trailing_5m_open", None)
+        ),
+        "consecutive_flat_ticks": getattr(features, "consecutive_flat_ticks", None),
+        "consecutive_directional_ticks": getattr(features, "consecutive_directional_ticks", None),
+        "last_10_ticks_direction": getattr(features, "last_10_ticks_direction", None),
+        "retained_sample_count": getattr(features, "retained_sample_count", None),
+        "window_sample_count": getattr(features, "window_sample_count", None),
+        "trailing_5m_sample_count": getattr(features, "trailing_5m_sample_count", None),
+    }
+
+
+def _decision_analysis_payload(decision, market=None, features=None) -> Optional[dict]:
+    if decision is None:
+        return None
+    min_confidence = None
+    effective_confidence = None
+    if market is not None:
+        min_confidence = get_effective_min_confidence(market, features=features)
+        effective_confidence = _effective_confidence(decision, market=market, features=features)
+    return {
+        "side": getattr(decision, "side", None),
+        "confidence": _json_safe_number(getattr(decision, "confidence", None)),
+        "effective_confidence": _json_safe_number(effective_confidence),
+        "min_confidence": _json_safe_number(min_confidence),
+        "max_price_to_pay": _json_safe_number(getattr(decision, "max_price_to_pay", None)),
+        "reason": getattr(decision, "reason", None),
+        "raw_response": getattr(decision, "raw_response_text", None),
+    }
+
+
+def _execution_result_analysis_payload(result) -> Optional[dict]:
+    if result is None:
+        return None
+    return {
+        "executed": getattr(result, "executed", None),
+        "submission_accepted": getattr(result, "submission_accepted", None),
+        "side": getattr(result, "side", None),
+        "size": _json_safe_number(getattr(result, "size", None)),
+        "price": _json_safe_number(getattr(result, "price", None)),
+        "token_id": getattr(result, "token_id", None),
+        "reason": getattr(result, "reason", None),
+        "live_order_id": getattr(result, "live_order_id", None),
+        "veto_flags": getattr(result, "veto_flags", None),
+        "quoted_price_at_entry": _json_safe_number(getattr(result, "quoted_price_at_entry", None)),
+        "actual_fill_price": _json_safe_number(getattr(result, "actual_fill_price", None)),
+        "realized_slippage_bps": _json_safe_number(getattr(result, "realized_slippage_bps", None)),
+        "order_latency_ms": _json_safe_number(getattr(result, "order_latency_ms", None)),
+        "book_depth_at_fill": _json_safe_number(getattr(result, "book_depth_at_fill", None)),
+        "shares_requested": _json_safe_number(getattr(result, "shares_requested", None)),
+    }
+
+
+def _active_orders_analysis_payload(current_btc_price=None) -> list[dict]:
+    orders = []
+    for order in get_active_orders():
+        orders.append(_order_analysis_payload(order, current_btc_price=current_btc_price))
+    return orders
+
+
+def _order_analysis_payload(order, current_btc_price=None) -> Optional[dict]:
+    if order is None:
+        return None
+    position_state = None
+    if current_btc_price is not None and getattr(order, "filled", False):
+        position_state = classify_position(order, current_btc_price)
+    elif current_btc_price is not None:
+        position_state = "UNFILLED"
+    return {
+        "market_slug": getattr(order, "market_slug", None),
+        "side": getattr(order, "side", None),
+        "shares": _json_safe_number(getattr(order, "shares", None)),
+        "entry_price": _json_safe_number(getattr(order, "entry_price", None)),
+        "entry_btc_price": _json_safe_number(getattr(order, "entry_btc_price", None)),
+        "target_btc_price": _json_safe_number(getattr(order, "target_btc_price", None)),
+        "filled": getattr(order, "filled", False),
+        "api_state": getattr(order, "api_state", None),
+        "position_state": position_state,
+        "live_order_id": getattr(order, "live_order_id", None),
+        "actual_fill_price": _json_safe_number(getattr(order, "actual_fill_price", None)),
+        "realized_slippage_bps": _json_safe_number(getattr(order, "realized_slippage_bps", None)),
+        "trade_number_in_period": getattr(order, "trade_number_in_period", None),
+    }
+
+
+def _llm_analysis_payload() -> dict:
+    try:
+        cfg = get_llm_config()
+        return {"engine": cfg.engine, "model": cfg.model}
+    except Exception as exc:
+        return {
+            "engine": os.getenv("AI_ENGINE"),
+            "model": os.getenv("OPENAI_MODEL") or os.getenv("GEMINI_MODEL"),
+            "error": str(exc),
+        }
+
+
+def _period_analysis_should_sample(market_slug: str, observed_at: datetime, force: bool) -> bool:
+    if force:
+        _PERIOD_ANALYSIS_LAST_SAMPLE_BY_SLUG[market_slug] = observed_at.timestamp()
+        return True
+    cfg = get_trading_config()
+    interval = max(int(getattr(cfg, "period_analysis_interval_seconds", 30)), 0)
+    if interval <= 0:
+        return False
+    last_sample = _PERIOD_ANALYSIS_LAST_SAMPLE_BY_SLUG.get(market_slug)
+    current_sample = observed_at.timestamp()
+    if last_sample is None or current_sample - last_sample >= interval:
+        _PERIOD_ANALYSIS_LAST_SAMPLE_BY_SLUG[market_slug] = current_sample
+        return True
+    return False
+
+
+def append_period_analysis_sample(
+    market,
+    *,
+    phase: str,
+    up_snapshot: TokenQuoteSnapshot = None,
+    down_snapshot: TokenQuoteSnapshot = None,
+    features=None,
+    decision=None,
+    result=None,
+    order=None,
+    skip_reason: str = "",
+    outcome_label: Optional[str] = None,
+    outcome_reason: Optional[str] = None,
+    observed_at: datetime = None,
+    current_btc_price=None,
+    session_win_trades: Optional[int] = None,
+    session_loss_trades: Optional[int] = None,
+    force: bool = False,
+) -> None:
+    if market is None:
+        return
+    observed_at = observed_at or datetime.now(timezone.utc)
+    if not hasattr(observed_at, "timestamp"):
+        observed_at = datetime.now(timezone.utc)
+    market_slug = getattr(market, "slug", None) or "unknown"
+    if not _period_analysis_should_sample(market_slug, observed_at, force):
+        return
+
+    realized_pnl, current_drawdown = get_realized_pnl_snapshot()
+    cfg = get_trading_config()
+    if current_btc_price is None and features is not None:
+        current_btc_price = getattr(features, "price_usd", None)
+    win_trades = _SESSION_WIN_TRADES if session_win_trades is None else int(session_win_trades)
+    loss_trades = _SESSION_LOSS_TRADES if session_loss_trades is None else int(session_loss_trades)
+    regime_fingerprint = _build_regime_fingerprint(
+        market_slug=market_slug,
+        market=market,
+        observed_at=observed_at,
+        features=features,
+        up_snapshot=up_snapshot,
+        down_snapshot=down_snapshot,
+        current_btc_price=current_btc_price,
+        period_open_price_to_beat=getattr(market, "settlement_threshold", None),
+    )
+    record = {
+        "schema_version": 1,
+        "format": "jsonl",
+        "observed_at": observed_at.isoformat(),
+        "phase": phase,
+        "market": {
+            "slug": market_slug,
+            "title": getattr(market, "title", None),
+            "slug_timestamp": _extract_slug_timestamp(market_slug),
+            "period_open_price_to_beat": _json_safe_number(
+                getattr(market, "settlement_threshold", None)
+            ),
+            "time_remaining_seconds": _market_time_remaining_seconds(market_slug, observed_at),
+            "time_remaining_mmss": _fmt_mmss_from_seconds(
+                _market_time_remaining_seconds(market_slug, observed_at)
+            ),
+            "up_market_probability": _json_safe_number(
+                getattr(market, "up_market_probability", None)
+            ),
+            "down_market_probability": _json_safe_number(
+                getattr(market, "down_market_probability", None)
+            ),
+            "up_token_id": getattr(market, "up_token_id", None),
+            "down_token_id": getattr(market, "down_token_id", None),
+        },
+        "llm": _llm_analysis_payload(),
+        "pnl": {
+            "realized_pnl": _json_safe_number(realized_pnl),
+            "current_drawdown": _json_safe_number(current_drawdown),
+            "session_win_trades": win_trades,
+            "session_loss_trades": loss_trades,
+            "session_resolved_trades": win_trades + loss_trades,
+            "session_win_rate": None
+            if win_trades + loss_trades <= 0
+            else round(win_trades / (win_trades + loss_trades), 4),
+        },
+        "config": {
+            "paper_trading": getattr(cfg, "paper_trading", None),
+            "shares_per_trade": _json_safe_number(getattr(cfg, "shares_per_trade", None)),
+            "min_confidence": _json_safe_number(getattr(cfg, "min_confidence", None)),
+            "analysis_interval_seconds": getattr(cfg, "period_analysis_interval_seconds", None),
+        },
+        "quotes": {
+            "up": _snapshot_analysis_payload(up_snapshot),
+            "down": _snapshot_analysis_payload(down_snapshot),
+        },
+        "features": _features_analysis_payload(features),
+        "regime_fingerprint": regime_fingerprint,
+        "decision": _decision_analysis_payload(decision, market=market, features=features),
+        "execution": _execution_result_analysis_payload(result),
+        "order": _order_analysis_payload(order, current_btc_price=current_btc_price),
+        "outcome": {
+            "label": outcome_label,
+            "reason": outcome_reason,
+        },
+        "skip_reason": skip_reason or None,
+        "active_orders": _active_orders_analysis_payload(current_btc_price=current_btc_price),
+    }
+    with open(_period_analysis_log_path(market_slug), "a", encoding="utf-8") as analysis_file:
+        analysis_file.write(json.dumps(record, sort_keys=True, default=str) + "\n")
+
+
 def append_pending_period_tick_analysis(
     market,
     *,
@@ -871,6 +1170,16 @@ def append_pending_period_tick_analysis(
 
         lines.append("")
         log_file.write("\n".join(lines))
+    append_period_analysis_sample(
+        market,
+        phase="PRE_ORDER_TICK",
+        up_snapshot=up_snapshot,
+        down_snapshot=down_snapshot,
+        features=features,
+        decision=decision,
+        skip_reason=skip_reason,
+        observed_at=observed_at,
+    )
 
 
 def promote_pending_period_log_to_completed(
@@ -1100,10 +1409,39 @@ def append_completed_order_tick(
             os.replace(log_path, final_path)
         except FileNotFoundError:
             pass
+        append_period_analysis_sample(
+            type(
+                "CompletedOrderMarket",
+                (),
+                {
+                    "slug": order.market_slug,
+                    "title": order.market_title,
+                    "settlement_threshold": order.target_btc_price,
+                    "up_market_probability": None,
+                    "down_market_probability": None,
+                    "up_token_id": None,
+                    "down_token_id": None,
+                },
+            )(),
+            phase="COMPLETED_ORDER",
+            features=features,
+            up_snapshot=up_snapshot,
+            down_snapshot=down_snapshot,
+            order=order,
+            outcome_label=outcome_label,
+            outcome_reason=outcome_reason,
+            observed_at=observed_at,
+            current_btc_price=current_btc_price,
+            session_win_trades=_SESSION_WIN_TRADES + (1 if outcome_label == "win" else 0),
+            session_loss_trades=_SESSION_LOSS_TRADES + (1 if outcome_label == "loss" else 0),
+            force=True,
+        )
     return outcome_label
 
 
 def finalize_completed_orders(previous_orders, current_btc_price: float) -> int:
+    global _SESSION_WIN_TRADES
+    global _SESSION_LOSS_TRADES
     loss_count = 0
     for order in previous_orders:
         outcome_label = append_completed_order_tick(
@@ -1113,8 +1451,11 @@ def finalize_completed_orders(previous_orders, current_btc_price: float) -> int:
         )
         if outcome_label in ("win", "loss"):
             record_realized_pnl_for_order(order, outcome_label)
+        if outcome_label == "win":
+            _SESSION_WIN_TRADES += 1
         if outcome_label == "loss":
             loss_count += 1
+            _SESSION_LOSS_TRADES += 1
     return loss_count
 
 
@@ -1899,7 +2240,7 @@ def run_once() -> None:
                     _apply_slippage_cooldown_if_needed(filled_order)
                 for filled_order in maintain_unfilled_live_orders(previous_orders, market):
                     _apply_slippage_cooldown_if_needed(filled_order)
-                _SESSION_LOSS_TRADES += finalize_completed_orders(
+                finalize_completed_orders(
                     previous_orders,
                     final_resolution_btc_price if final_resolution_btc_price is not None else fetch_btc_spot_price(),
                 )
@@ -2147,12 +2488,34 @@ def run_once() -> None:
             observed_at=features.as_of,
             trade_number_in_period=state.trades_executed + 1,
         )
+        append_period_analysis_sample(
+            market,
+            phase="LIVE_ORDER_RUNTIME_FAILURE",
+            up_snapshot=up_snapshot,
+            down_snapshot=down_snapshot,
+            features=features,
+            decision=decision,
+            skip_reason=str(exc),
+            observed_at=features.as_of,
+            force=True,
+        )
         if cfg.debug:
             print("-" * 80)
         return
     if result.execution_snapshot is not None and cfg.debug:
         print_quote_snapshot_from_snapshot("Execution", result.execution_snapshot, debug=True)
     print_trade_execution_result(result, debug=cfg.debug)
+    append_period_analysis_sample(
+        market,
+        phase="TRADE_EVALUATION",
+        up_snapshot=up_snapshot,
+        down_snapshot=down_snapshot,
+        features=features,
+        decision=decision,
+        result=result,
+        observed_at=features.as_of,
+        force=True,
+    )
 
     if _should_log_failed_order_attempt(cfg, decision, result):
         append_failed_order_attempt(

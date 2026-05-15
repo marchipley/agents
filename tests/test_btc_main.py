@@ -4,6 +4,7 @@ import unittest
 import os
 import glob
 import io
+import json
 from datetime import datetime, timezone
 from contextlib import ExitStack
 from unittest.mock import patch
@@ -25,6 +26,7 @@ from custom.btc_agent.main import (
     append_failed_order_attempt,
     append_failed_live_order,
     append_pending_period_tick_analysis,
+    append_period_analysis_sample,
     finalize_current_period_logs_on_exit,
     finalize_pending_period_log,
     enforce_session_loss_trade_limit,
@@ -90,6 +92,146 @@ class TestBtcMain(unittest.TestCase):
             stdout.getvalue(),
         )
 
+    def test_append_period_analysis_sample_throttles_and_forces_trade_records(self):
+        from custom.btc_agent import main as main_module
+
+        main_module._PERIOD_ANALYSIS_LAST_SAMPLE_BY_SLUG.clear()
+        analysis_glob = "/tmp/completed_orders/period_analysis_*.json"
+        for path in glob.glob(analysis_glob):
+            try:
+                os.remove(path)
+            except FileNotFoundError:
+                pass
+
+        market = SimpleNamespace(
+            slug="btc-updown-5m-1777513500",
+            title="Bitcoin Up or Down",
+            settlement_threshold=80000.0,
+            up_market_probability=0.62,
+            down_market_probability=0.38,
+            up_token_id="up-token",
+            down_token_id="down-token",
+        )
+        features = SimpleNamespace(
+            price_usd=80018.0,
+            delta_from_previous_tick=2.0,
+            momentum_1m=6.0,
+            momentum_5m=12.0,
+            velocity_15s=2.0,
+            velocity_30s=4.0,
+            momentum_acceleration=1.0,
+            volatility_5m=14.0,
+            rsi_9=64.0,
+            rsi_14=58.0,
+            rsi_speed_divergence=6.0,
+            ema_9=80010.0,
+            ema_21=80000.0,
+            ema_alignment=True,
+            ema_cross_direction="bullish",
+            adx_14=31.0,
+            atr_14=8.0,
+            window_open_price=79990.0,
+            delta_pct_from_window_open=0.00035,
+            trailing_5m_open_price=79980.0,
+            delta_pct_from_trailing_5m_open=0.00048,
+            consecutive_flat_ticks=0,
+            consecutive_directional_ticks=4,
+            last_10_ticks_direction="UUUD",
+            retained_sample_count=25,
+            window_sample_count=12,
+            trailing_5m_sample_count=20,
+        )
+        decision = SimpleNamespace(
+            side="UP",
+            confidence=0.72,
+            max_price_to_pay=1.0,
+            reason="test",
+            raw_response_text='{"decision":"UP"}',
+        )
+        result = SimpleNamespace(
+            executed=False,
+            submission_accepted=False,
+            side="UP",
+            size=0.0,
+            price=0.64,
+            token_id="up-token",
+            reason="test rejection",
+            veto_flags=["test_veto"],
+            live_order_id=None,
+            quoted_price_at_entry=None,
+            actual_fill_price=None,
+            realized_slippage_bps=None,
+            order_latency_ms=None,
+            book_depth_at_fill=None,
+            shares_requested=7.0,
+        )
+
+        with patch("custom.btc_agent.main.os.getcwd", return_value="/tmp"), patch(
+            "custom.btc_agent.main.get_trading_config",
+            return_value=SimpleNamespace(
+                period_analysis_interval_seconds=30,
+                paper_trading=True,
+                shares_per_trade=7.0,
+                min_confidence=0.64,
+            ),
+        ), patch(
+            "custom.btc_agent.main.get_llm_config",
+            return_value=SimpleNamespace(engine="openai", model="gpt-4.1-mini"),
+        ), patch(
+            "custom.btc_agent.main.get_realized_pnl_snapshot",
+            return_value=(1.25, 0.50),
+        ), patch(
+            "custom.btc_agent.main._SESSION_WIN_TRADES",
+            2,
+        ), patch(
+            "custom.btc_agent.main._SESSION_LOSS_TRADES",
+            1,
+        ):
+            append_period_analysis_sample(
+                market,
+                phase="PRE_ORDER_TICK",
+                features=features,
+                decision=decision,
+                observed_at=datetime.fromtimestamp(1777513510, tz=timezone.utc),
+            )
+            append_period_analysis_sample(
+                market,
+                phase="PRE_ORDER_TICK",
+                features=features,
+                decision=decision,
+                observed_at=datetime.fromtimestamp(1777513515, tz=timezone.utc),
+            )
+            append_period_analysis_sample(
+                market,
+                phase="TRADE_EVALUATION",
+                features=features,
+                decision=decision,
+                result=result,
+                observed_at=datetime.fromtimestamp(1777513516, tz=timezone.utc),
+                force=True,
+            )
+
+        analysis_paths = glob.glob(analysis_glob)
+        self.assertEqual(analysis_paths, ["/tmp/completed_orders/period_analysis_1777513500.json"])
+        with open(analysis_paths[0], encoding="utf-8") as analysis_file:
+            records = [json.loads(line) for line in analysis_file if line.strip()]
+
+        self.assertEqual(len(records), 2)
+        self.assertEqual(records[0]["llm"]["model"], "gpt-4.1-mini")
+        self.assertEqual(records[0]["market"]["slug"], market.slug)
+        self.assertEqual(records[0]["features"]["btc_price"], 80018.0)
+        self.assertEqual(records[0]["pnl"]["session_win_trades"], 2)
+        self.assertEqual(records[0]["pnl"]["session_loss_trades"], 1)
+        self.assertEqual(records[0]["pnl"]["session_resolved_trades"], 3)
+        self.assertEqual(records[1]["phase"], "TRADE_EVALUATION")
+        self.assertEqual(records[1]["execution"]["veto_flags"], ["test_veto"])
+
+        for path in analysis_paths:
+            try:
+                os.remove(path)
+            except FileNotFoundError:
+                pass
+
     TEST_TIMESTAMPS = (
         "1777056000",
         "1777513500",
@@ -126,7 +268,11 @@ class TestBtcMain(unittest.TestCase):
             "/appl/agents/logs/priceToBeatDebug.txt",
             "/appl/agents/logs/priceToBeatDebugPg2.txt",
             "/appl/agents/logs/priceToBeatDebugPg3.txt",
+            "/appl/agents/completed_orders/period_analysis.json",
+            "/tmp/completed_orders/period_analysis.json",
         ]
+        paths.extend(glob.glob("/appl/agents/completed_orders/period_analysis_*.json"))
+        paths.extend(glob.glob("/tmp/completed_orders/period_analysis_*.json"))
         for timestamp in cls.TEST_TIMESTAMPS:
             paths.extend(glob.glob(f"/appl/agents/completed_orders/*{timestamp}*.txt"))
 
