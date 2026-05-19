@@ -2123,6 +2123,108 @@ class TestBtcExecutor(unittest.TestCase):
         self.assertIsNotNone(rejection)
         self.assertIn("Rocket Spike Veto", rejection.reason)
 
+    def test_validate_trade_candidate_rejects_down_when_upward_velocity_exceeds_cushion(self):
+        market = types.SimpleNamespace(
+            up_token_id="up-token",
+            down_token_id="down-token",
+            settlement_threshold=100.0,
+            end_ts=1_000_000_180,
+            volume=5000.0,
+        )
+        decision = types.SimpleNamespace(
+            side="DOWN",
+            confidence=0.90,
+            max_price_to_pay=1.0,
+            reason="test",
+        )
+        features = types.SimpleNamespace(
+            price_usd=91.12,
+            volatility_5m=30.0,
+            atr_14=20.0,
+            delta_prev_tick=16.0,
+            rsi_9=50.0,
+        )
+        snapshot = TokenQuoteSnapshot(
+            token_id="down-token",
+            buy_quote=0.50,
+            midpoint=0.50,
+            last_trade_price=0.50,
+            reference_price=0.50,
+            target_limit_price=0.50,
+            recommended_limit_price=0.50,
+            ok_to_submit=True,
+            submit_reason="ok",
+            best_bid=0.49,
+            best_ask=0.50,
+            tick_size=0.01,
+            spread=0.01,
+        )
+
+        fake_now = datetime.fromtimestamp(1_000_000_000, tz=timezone.utc)
+        with patch("custom.btc_agent.executor.datetime") as mock_datetime:
+            mock_datetime.now.return_value = fake_now
+            validated_snapshot, rejection = _validate_trade_candidate(
+                market,
+                decision,
+                features=features,
+                snapshot=snapshot,
+            )
+
+        self.assertIsNone(validated_snapshot)
+        self.assertIsNotNone(rejection)
+        self.assertIn("Rocket Spike Cushion Veto", rejection.reason)
+
+    def test_validate_trade_candidate_rejects_up_when_downward_velocity_exceeds_cushion(self):
+        market = types.SimpleNamespace(
+            up_token_id="up-token",
+            down_token_id="down-token",
+            settlement_threshold=100.0,
+            end_ts=1_000_000_180,
+            volume=5000.0,
+        )
+        decision = types.SimpleNamespace(
+            side="UP",
+            confidence=0.90,
+            max_price_to_pay=1.0,
+            reason="test",
+        )
+        features = types.SimpleNamespace(
+            price_usd=108.88,
+            volatility_5m=30.0,
+            atr_14=20.0,
+            delta_prev_tick=-16.0,
+            rsi_9=50.0,
+        )
+        snapshot = TokenQuoteSnapshot(
+            token_id="up-token",
+            buy_quote=0.50,
+            midpoint=0.50,
+            last_trade_price=0.50,
+            reference_price=0.50,
+            target_limit_price=0.50,
+            recommended_limit_price=0.50,
+            ok_to_submit=True,
+            submit_reason="ok",
+            best_bid=0.49,
+            best_ask=0.50,
+            tick_size=0.01,
+            spread=0.01,
+        )
+
+        fake_now = datetime.fromtimestamp(1_000_000_000, tz=timezone.utc)
+        with patch("custom.btc_agent.executor.datetime") as mock_datetime:
+            mock_datetime.now.return_value = fake_now
+            validated_snapshot, rejection = _validate_trade_candidate(
+                market,
+                decision,
+                features=features,
+                snapshot=snapshot,
+            )
+
+        self.assertIsNone(validated_snapshot)
+        self.assertIsNotNone(rejection)
+        self.assertIn("Falling Knife Cushion Veto", rejection.reason)
+
     def test_validate_trade_candidate_rejects_itm_down_when_momentum_accelerates_up(self):
         market = types.SimpleNamespace(
             up_token_id="up-token",

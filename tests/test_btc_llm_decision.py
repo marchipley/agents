@@ -216,6 +216,7 @@ class TestBtcLlmDecision(unittest.TestCase):
         self.assertIn("DISTANCE_FROM_STRIKE_USD=", prompt)
         self.assertIn("MARKET_WIN_CHANCE_UP=0.495", prompt)
         self.assertIn("MARKET_WIN_CHANCE_DOWN=0.505", prompt)
+        self.assertIn("momentum_direction=UP", prompt)
         self.assertIn("momentum_alignment=", prompt)
         self.assertIn("rsi_speed_divergence=", prompt)
         self.assertIn("trend_regime=", prompt)
@@ -263,6 +264,7 @@ class TestBtcLlmDecision(unittest.TestCase):
 
         self.assertIn("Parabolic Exception", prompt)
         self.assertIn("Gamma Discrepancy Rule", prompt)
+        self.assertIn("CRITICAL VELOCITY RULE", prompt)
         self.assertIn("entry quote is < 0.85", prompt)
         self.assertIn("Alpha Override Rule: If confidence is > 0.75", prompt)
         self.assertIn("ITM AGGRESSION RULE: If the trade is ITM by more than $15.00", prompt)

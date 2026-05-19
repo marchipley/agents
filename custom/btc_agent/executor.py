@@ -1689,6 +1689,24 @@ def _validate_trade_candidate(
                 f"Rocket Spike Veto: Price surging ({delta_prev:.2f} > 1.5*ATR)",
             )
 
+    if delta_prev is not None and gap_to_target is not None:
+        if decision.side == "DOWN" and delta_prev > 0 and delta_prev > abs(gap_to_target):
+            return _reject(
+                submission_limit_price,
+                (
+                    "Rocket Spike Cushion Veto: "
+                    f"Upward velocity {delta_prev:.2f} exceeds DOWN cushion {abs(gap_to_target):.2f}"
+                ),
+            )
+        if decision.side == "UP" and delta_prev < 0 and abs(delta_prev) > abs(gap_to_target):
+            return _reject(
+                submission_limit_price,
+                (
+                    "Falling Knife Cushion Veto: "
+                    f"Downward velocity {abs(delta_prev):.2f} exceeds UP cushion {abs(gap_to_target):.2f}"
+                ),
+            )
+
     if decision.side == "UP" and rsi_9 is not None and rsi_9 > 85.0 and not parabolic_up_regime:
         return _reject(
             submission_limit_price,
