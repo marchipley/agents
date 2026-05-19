@@ -294,6 +294,7 @@ class TestBtcExecutor(unittest.TestCase):
         self.assertTrue(changed)
         self.assertEqual(order.actual_fill_price, 0.61)
         self.assertTrue(order.filled)
+        self.assertEqual(order.api_order_state, "ORDER_STATE_FILLED")
         self.assertEqual(order.api_state, "ORDER_STATE_FILLED")
 
     def test_refresh_live_order_fill_status_accepts_filled_state_alias(self):
@@ -314,7 +315,31 @@ class TestBtcExecutor(unittest.TestCase):
         self.assertTrue(changed)
         self.assertEqual(order.actual_fill_price, 0.61)
         self.assertTrue(order.filled)
+        self.assertEqual(order.api_order_state, "FILLED")
         self.assertEqual(order.api_state, "FILLED")
+
+    def test_refresh_live_order_fill_status_preserves_new_state_as_unfilled(self):
+        order = types.SimpleNamespace(
+            live_order_id="order-1",
+            token_id="up-token",
+            actual_fill_price=None,
+            filled=False,
+            quoted_price_at_entry=0.50,
+            shares_requested=5,
+        )
+        with patch(
+            "custom.btc_agent.executor._fetch_live_order_status",
+            return_value={"state": "ORDER_STATE_NEW", "avgPrice": None, "filledSize": 0},
+        ), patch(
+            "custom.btc_agent.executor._fetch_actual_fill_details_from_trades",
+            return_value=(None, 0.0),
+        ):
+            changed = refresh_live_order_fill_status(order)
+
+        self.assertFalse(changed)
+        self.assertFalse(order.filled)
+        self.assertEqual(order.api_order_state, "ORDER_STATE_NEW")
+        self.assertEqual(order.api_state, "ORDER_STATE_NEW")
 
     def test_refresh_live_order_fill_status_uses_trade_fallback_when_state_unknown(self):
         order = types.SimpleNamespace(
@@ -337,6 +362,7 @@ class TestBtcExecutor(unittest.TestCase):
         self.assertTrue(changed)
         self.assertEqual(order.actual_fill_price, 0.61)
         self.assertTrue(order.filled)
+        self.assertEqual(order.api_order_state, "UNKNOWN")
         self.assertEqual(order.api_state, "FILLED_BY_TRADES")
 
     def test_refresh_live_order_fill_status_updates_partial_fill_without_marking_filled(self):
@@ -356,6 +382,7 @@ class TestBtcExecutor(unittest.TestCase):
         self.assertFalse(changed)
         self.assertEqual(order.actual_fill_price, 0.61)
         self.assertFalse(order.filled)
+        self.assertEqual(order.api_order_state, "ORDER_STATE_PARTIALLY_FILLED")
         self.assertEqual(order.api_state, "ORDER_STATE_PARTIALLY_FILLED")
 
     def test_account_balance_snapshot_uses_pusd_as_cash_balance(self):

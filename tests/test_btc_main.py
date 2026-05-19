@@ -57,6 +57,7 @@ class TestBtcMain(unittest.TestCase):
             target_btc_price=80000.0,
             entry_btc_price=80010.0,
             actual_fill_price=None,
+            api_order_state="ORDER_STATE_OPEN",
             api_state="ORDER_STATE_OPEN",
         )
 
@@ -65,7 +66,13 @@ class TestBtcMain(unittest.TestCase):
         ) as stdout:
             print_active_orders(80020.0)
 
-        self.assertIn("order_1_position_state = UNFILLED (State: ORDER_STATE_OPEN)", stdout.getvalue())
+        output = stdout.getvalue()
+        self.assertIn("order_1_polymarket_api_state = ORDER_STATE_OPEN", output)
+        self.assertIn("order_1_internal_filled_flag = False", output)
+        self.assertIn(
+            "order_1_position_state = UNFILLED (Polymarket State: ORDER_STATE_OPEN)",
+            output,
+        )
 
     def test_print_active_orders_uses_filled_flag_even_with_fill_price(self):
         order = ActivePaperOrder(
@@ -79,6 +86,7 @@ class TestBtcMain(unittest.TestCase):
             entry_btc_price=80010.0,
             actual_fill_price=0.71,
             filled=False,
+            api_order_state="ORDER_STATE_PARTIALLY_FILLED",
             api_state="ORDER_STATE_PARTIALLY_FILLED",
         )
 
@@ -88,7 +96,7 @@ class TestBtcMain(unittest.TestCase):
             print_active_orders(80020.0)
 
         self.assertIn(
-            "order_1_position_state = UNFILLED (State: ORDER_STATE_PARTIALLY_FILLED)",
+            "order_1_position_state = UNFILLED (Polymarket State: ORDER_STATE_PARTIALLY_FILLED)",
             stdout.getvalue(),
         )
 
@@ -733,6 +741,8 @@ class TestBtcMain(unittest.TestCase):
             order_latency_ms=342,
             book_depth_at_fill=12.5,
             shares_requested=5.0,
+            api_order_state="ORDER_STATE_FILLED",
+            api_state="ORDER_STATE_FILLED",
             llm_prompt_text="SYSTEM PROMPT:\nfoo\n\nUSER PROMPT:\nbar",
             llm_raw_response_text='{"decision":"UP","confidence":0.8,"max_price_to_pay":1.0,"reason":"test"}',
         )
@@ -755,6 +765,10 @@ class TestBtcMain(unittest.TestCase):
         self.assertIn("btc_move_from_entry=10.00", content)
         self.assertIn("btc_gap_to_target=6.99", content)
         self.assertIn("market_time_remaining_mmss=", content)
+        self.assertIn("polymarket_api_state=ORDER_STATE_FILLED", content)
+        self.assertIn("internal_filled_flag=True", content)
+        self.assertIn("order_1_polymarket_api_state=ORDER_STATE_FILLED", content)
+        self.assertIn("order_1_internal_filled_flag=True", content)
         self.assertIn("outcome_label=win", content)
         self.assertIn("quoted_price_at_entry=0.440", content)
         self.assertIn("actual_fill_price=0.450", content)
@@ -1952,6 +1966,7 @@ class TestBtcMain(unittest.TestCase):
         self.assertIn("outcome_label=unfilled", content)
         self.assertIn("position_state=UNFILLED", content)
         self.assertIn("filled=False", content)
+        self.assertIn("internal_filled_flag=False", content)
 
     def test_run_once_tracks_live_submitted_but_unfilled_order_without_creating_win_file(self):
         market = SimpleNamespace(
@@ -2030,6 +2045,7 @@ class TestBtcMain(unittest.TestCase):
             book_depth_at_fill=100.0,
             shares_requested=5.0,
             live_order_id="order-123",
+            api_order_state="ORDER_STATE_NEW",
         )
 
         with ExitStack() as stack:
@@ -2087,6 +2103,7 @@ class TestBtcMain(unittest.TestCase):
         mock_record.assert_called_once()
         tracked_order = mock_record.call_args.args[0]
         self.assertEqual(tracked_order.live_order_id, "order-123")
+        self.assertEqual(tracked_order.api_order_state, "ORDER_STATE_NEW")
         self.assertIsNone(tracked_order.actual_fill_price)
         self.assertFalse(
             os.path.exists(

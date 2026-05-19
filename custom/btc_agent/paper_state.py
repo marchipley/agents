@@ -24,6 +24,7 @@ class ActivePaperOrder:
     shares_requested: Optional[float] = None
     live_order_id: Optional[str] = None
     filled: bool = False
+    api_order_state: Optional[str] = None
     api_state: Optional[str] = None
     live_reprice_attempts: int = 0
     llm_prompt_text: Optional[str] = None

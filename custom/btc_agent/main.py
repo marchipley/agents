@@ -864,6 +864,7 @@ def _execution_result_analysis_payload(result) -> Optional[dict]:
         "token_id": getattr(result, "token_id", None),
         "reason": getattr(result, "reason", None),
         "live_order_id": getattr(result, "live_order_id", None),
+        "api_order_state": getattr(result, "api_order_state", None),
         "veto_flags": getattr(result, "veto_flags", None),
         "quoted_price_at_entry": _json_safe_number(getattr(result, "quoted_price_at_entry", None)),
         "actual_fill_price": _json_safe_number(getattr(result, "actual_fill_price", None)),
@@ -897,6 +898,7 @@ def _order_analysis_payload(order, current_btc_price=None) -> Optional[dict]:
         "entry_btc_price": _json_safe_number(getattr(order, "entry_btc_price", None)),
         "target_btc_price": _json_safe_number(getattr(order, "target_btc_price", None)),
         "filled": getattr(order, "filled", False),
+        "api_order_state": getattr(order, "api_order_state", None),
         "api_state": getattr(order, "api_state", None),
         "position_state": position_state,
         "live_order_id": getattr(order, "live_order_id", None),
@@ -1318,6 +1320,10 @@ def append_completed_order_tick(
                     f"entry_price={order.entry_price:.3f}",
                     f"entry_btc_price={order.entry_btc_price:.2f}",
                     f"live_order_id={getattr(order, 'live_order_id', None)}",
+                    f"polymarket_api_state={getattr(order, 'api_order_state', None) or getattr(order, 'api_state', None) or 'UNKNOWN'}",
+                    f"internal_filled_flag={filled}",
+                    f"order_1_polymarket_api_state={getattr(order, 'api_order_state', None) or getattr(order, 'api_state', None) or 'UNKNOWN'}",
+                    f"order_1_internal_filled_flag={filled}",
                     f"filled={filled}",
                     f"period_open_price_to_beat={order.target_btc_price:.2f}",
                     f"current_btc_price={current_btc_price:.2f}",
@@ -1491,6 +1497,8 @@ def maintain_unfilled_live_orders(active_orders, market):
             order.order_latency_ms = getattr(result, "order_latency_ms", None)
             order.book_depth_at_fill = getattr(result, "book_depth_at_fill", None)
             order.shares_requested = getattr(result, "shares_requested", None)
+            order.api_order_state = getattr(result, "api_order_state", None) or getattr(order, "api_order_state", None)
+            order.api_state = getattr(result, "api_order_state", None) or getattr(order, "api_state", None)
             if getattr(result, "actual_fill_price", None) is not None:
                 order.actual_fill_price = result.actual_fill_price
                 order.filled = True
@@ -1604,6 +1612,8 @@ def append_failed_order_attempt(
             f"attempted_size={_fmt(getattr(result, 'size', None))}",
             f"attempt_token_id={getattr(result, 'token_id', None)}",
             f"live_order_id={getattr(result, 'live_order_id', None)}",
+            f"polymarket_api_state={getattr(result, 'api_order_state', None) or 'UNKNOWN'}",
+            f"internal_filled_flag={getattr(result, 'executed', False)}",
             f"attempt_reason={getattr(result, 'reason', '')}",
             f"market_impact_ratio={_fmt(market_impact_ratio)}",
             *_execution_microstructure_lines(
@@ -2065,11 +2075,12 @@ def print_active_orders(current_btc_price: float) -> None:
 
     print("Active orders:")
     for idx, order in enumerate(active_orders, start=1):
-        api_state = getattr(order, "api_state", None) or "unknown"
+        filled_status = bool(getattr(order, "filled", False))
+        api_state_label = getattr(order, "api_order_state", None) or getattr(order, "api_state", None) or "UNKNOWN"
         status = (
             classify_position(order, current_btc_price)
-            if getattr(order, "filled", False)
-            else f"UNFILLED (State: {api_state})"
+            if filled_status
+            else f"UNFILLED (Polymarket State: {api_state_label})"
         )
         win_condition = (
             f"BTC must finish above {order.target_btc_price:.2f}"
@@ -2086,6 +2097,8 @@ def print_active_orders(current_btc_price: float) -> None:
         print(f"  order_{idx}_win_condition  = {win_condition}")
         print(f"  order_{idx}_target         = {describe_target(order)}")
         print(f"  order_{idx}_current_btc    = {current_btc_price:.2f}")
+        print(f"  order_{idx}_polymarket_api_state = {api_state_label}")
+        print(f"  order_{idx}_internal_filled_flag = {filled_status}")
         print(f"  order_{idx}_position_state = {status}")
 
 
@@ -2570,6 +2583,8 @@ def run_once() -> None:
             shares_requested=getattr(result, "shares_requested", None),
             live_order_id=getattr(result, "live_order_id", None),
             filled=getattr(result, "executed", False),
+            api_order_state=getattr(result, "api_order_state", None),
+            api_state=getattr(result, "api_order_state", None),
             llm_prompt_text=getattr(decision, "prompt_text", None),
             llm_raw_response_text=getattr(decision, "raw_response_text", None),
             target_is_approximate=target_is_approximate,

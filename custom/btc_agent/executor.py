@@ -36,6 +36,7 @@ class TradeExecutionResult:
     shares_requested: Optional[float] = None
     submission_accepted: bool = False
     live_order_id: Optional[str] = None
+    api_order_state: Optional[str] = None
     veto_flags: Optional[List[str]] = None
 
 
@@ -912,6 +913,20 @@ def _fetch_live_order_status(order_id: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _extract_api_order_state(response: Any) -> Optional[str]:
+    if not isinstance(response, dict):
+        return None
+    value = response.get("state")
+    if value:
+        return str(value).strip() or None
+    for key in ("data", "order", "result"):
+        nested = response.get(key)
+        nested_value = _extract_api_order_state(nested)
+        if nested_value:
+            return nested_value
+    return None
+
+
 def _extract_order_status_text(order_data: Optional[Dict[str, Any]]) -> Optional[str]:
     if not isinstance(order_data, dict):
         return None
@@ -1090,6 +1105,8 @@ def refresh_live_order_fill_status(order) -> bool:
         return False
     order_data = _fetch_live_order_status(order_id)
     state = _extract_order_state(order_data)
+    api_order_state = _extract_api_order_state(order_data) or state or "UNKNOWN"
+    order.api_order_state = api_order_state
     order.api_state = state or "UNKNOWN"
 
     average_fill = _extract_average_fill_price_from_order_data(order_data)
@@ -1109,6 +1126,7 @@ def refresh_live_order_fill_status(order) -> bool:
         )
         if trades_fill is not None and trades_filled_size > 0:
             order.actual_fill_price = trades_fill
+            order.api_order_state = api_order_state
             order.api_state = (
                 "FILLED_BY_TRADES"
                 if _is_full_fill_size(trades_filled_size, requested_size)
@@ -1289,6 +1307,7 @@ def retry_unfilled_live_order(order, market: BtcUpDownMarket) -> Optional[TradeE
         getattr(order, "token_id", None),
         requested_size=getattr(order, "shares_requested", None) or getattr(order, "shares", None),
     )
+    api_order_state = _extract_api_order_state_from_submission(response)
     realized_slippage_bps = _compute_realized_slippage_bps(
         quoted_price_at_entry,
         actual_fill_price,
@@ -1316,6 +1335,7 @@ def retry_unfilled_live_order(order, market: BtcUpDownMarket) -> Optional[TradeE
             shares_requested=size,
             submission_accepted=True,
             live_order_id=new_order_id,
+            api_order_state=api_order_state,
         )
 
     return TradeExecutionResult(
@@ -1339,6 +1359,7 @@ def retry_unfilled_live_order(order, market: BtcUpDownMarket) -> Optional[TradeE
         shares_requested=size,
         submission_accepted=True,
         live_order_id=new_order_id,
+        api_order_state=api_order_state,
     )
 
 
@@ -1374,6 +1395,16 @@ def _resolve_actual_fill_price(
     if not order_id:
         return response_fill_price
     return None
+
+
+def _extract_api_order_state_from_submission(response: Any) -> Optional[str]:
+    order_id = _extract_order_id_from_live_response(response)
+    if order_id:
+        order_data = _fetch_live_order_status(order_id)
+        api_state = _extract_api_order_state(order_data)
+        if api_state:
+            return api_state
+    return _extract_api_order_state(response)
 
 
 def _slug_start_ts(slug: Optional[str]) -> Optional[int]:
@@ -2360,6 +2391,7 @@ def _execute_live_trade(
         snapshot.token_id,
         requested_size=size,
     )
+    api_order_state = _extract_api_order_state_from_submission(response)
     if actual_fill_price is None:
         return TradeExecutionResult(
             executed=False,
@@ -2386,6 +2418,7 @@ def _execute_live_trade(
             shares_requested=size,
             submission_accepted=True,
             live_order_id=order_id,
+            api_order_state=api_order_state,
         )
     realized_slippage_bps = _compute_realized_slippage_bps(
         quoted_price_at_entry,
@@ -2439,6 +2472,7 @@ def _execute_live_trade(
         shares_requested=size,
         submission_accepted=True,
         live_order_id=order_id,
+        api_order_state=api_order_state,
     )
 
 
