@@ -1989,6 +1989,23 @@ def _validate_trade_candidate(
         )
 
     if (
+        time_remaining_seconds > 90
+        and volatility_5m not in (None, 0)
+        and gap_to_target is not None
+    ):
+        required_vol_cushion = float(volatility_5m)
+        if abs(gap_to_target) < required_vol_cushion:
+            return _reject(
+                submission_limit_price,
+                (
+                    "Volatility Margin Veto: "
+                    f"Tight lead ({abs(gap_to_target):.2f} USD) is less than "
+                    f"1.0x 5m Volatility ({required_vol_cushion:.2f} USD) "
+                    f"with {time_remaining_seconds}s left."
+                ),
+            )
+
+    if (
         snapshot.spread is not None
         and snapshot.spread > float(getattr(cfg, "max_spread", 0.10))
     ):

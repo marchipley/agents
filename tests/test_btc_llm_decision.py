@@ -265,6 +265,7 @@ class TestBtcLlmDecision(unittest.TestCase):
         self.assertIn("Parabolic Exception", prompt)
         self.assertIn("Gamma Discrepancy Rule", prompt)
         self.assertIn("CRITICAL VELOCITY RULE", prompt)
+        self.assertIn("VOLATILITY RATIO RULE", prompt)
         self.assertIn("entry quote is < 0.85", prompt)
         self.assertIn("Alpha Override Rule: If confidence is > 0.75", prompt)
         self.assertIn("ITM AGGRESSION RULE: If the trade is ITM by more than $15.00", prompt)
