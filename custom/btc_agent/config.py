@@ -199,7 +199,7 @@ LIVE_ORDER_STATUS_POLL_INTERVAL_SECONDS = 0.75
 PERIOD_ANALYSIS_INTERVAL_SECONDS = 30
 
 # Enabling tis will output additional debug info in the output
-BTC_AGENT_DEBUG=False
+BTC_AGENT_DEBUG=True
 
 # Disabling this will disable warmup if BTC_AGENT_DEBUG is enabled
 BTC_AGENT_DEBUG_WARMUP=False
@@ -218,7 +218,7 @@ LLM_CONNECTION_DEBUG=False
 LLM_SHOW_DETAIL=False
 
 BTC_AGENT_LOOP_INTERVAL=5
-USE_PAPER_TRADES=False
+USE_PAPER_TRADES=True
 BTC_AGENT_MAX_PRICE=2
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))

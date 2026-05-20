@@ -281,7 +281,7 @@ def _build_system_prompt() -> str:
 def _build_openai_realtime_system_prompt() -> str:
     cfg = get_trading_config()
     return (
-        "Return one JSON object only: decision, confidence, max_price_to_pay, reason. "
+        "Return ONE raw JSON object only containing exactly these keys: 'decision', 'confidence', 'max_price_to_pay', and 'reason'. CRITICAL: Do NOT output markdown blocks, and do NOT output conversational filler like 'Here is the analysis'. "
         "decision=UP|DOWN|NO_TRADE. confidence is win probability 0..1. "
         "Use DISTANCE_FROM_STRIKE_USD and DISTANCE_FROM_STRIKE_PCT as the settlement baseline: positive means above strike, negative means below strike. "
         "Use MARKET_WIN_CHANCE_UP and MARKET_WIN_CHANCE_DOWN as crowd consensus and velocity_30s only for entry timing, not side selection. "
@@ -640,10 +640,10 @@ def _extract_json_payload(raw_text: str) -> dict:
         return json.loads(cleaned[start : end + 1])
 
     key_value_match = re.search(
-        r"decision\s*:\s*(?P<decision>UP|DOWN|NO_TRADE)\s*,\s*"
-        r"confidence\s*:\s*(?P<confidence>-?\d+(?:\.\d+)?)\s*,\s*"
-        r"max_price_to_pay\s*:\s*(?P<max_price>-?\d+(?:\.\d+)?)\s*,\s*"
-        r"reason\s*:\s*(?P<reason>.+)$",
+        r"[\"']?\s*decision\s*[\"']?\s*:\s*[\"']?(?P<decision>UP|DOWN|NO_TRADE)[\"']?\s*[,;\n]*\s*"
+        r"[\"']?\s*confidence\s*[\"']?\s*:\s*[\"']?(?P<confidence>-?\d+(?:\.\d+)?)[\"']?\s*[,;\n]*\s*"
+        r"[\"']?\s*(?:max_price_to_pay|max price to pay)\s*[\"']?\s*:\s*[\"']?(?P<max_price>-?\d+(?:\.\d+)?)[\"']?\s*[,;\n]*\s*"
+        r"[\"']?\s*reason\s*[\"']?\s*:\s*[\"']?(?P<reason>.+)",
         cleaned,
         re.IGNORECASE | re.DOTALL,
     )
@@ -750,7 +750,6 @@ class OpenAIRealtimeClient:
             f"wss://api.openai.com/v1/realtime?model={self.model}",
             header=[
                 f"Authorization: Bearer {self.api_key}",
-                "OpenAI-Beta: realtime=v1",
             ],
             timeout=self.timeout_seconds,
             enable_multithread=True,
@@ -774,8 +773,9 @@ class OpenAIRealtimeClient:
                         {
                             "type": "session.update",
                             "session": {
+                                "type": "realtime",
+                                "output_modalities": ["text"],
                                 "instructions": system_prompt,
-                                "modalities": ["text"],
                             },
                         }
                     )
@@ -802,8 +802,7 @@ class OpenAIRealtimeClient:
                         {
                             "type": "response.create",
                             "response": {
-                                "modalities": ["text"],
-                                "max_output_tokens": 120,
+                                "max_output_tokens": 512,
                                 "metadata": {"request_id": request_id},
                             },
                         }
@@ -814,12 +813,12 @@ class OpenAIRealtimeClient:
                     raw_message = self.ws.recv()
                     event = json.loads(raw_message)
                     event_type = event.get("type")
-                    if event_type in {"response.output_text.delta", "response.text.delta"}:
+                    if event_type == "response.output_text.delta":
                         delta = event.get("delta") or ""
                         if delta:
                             chunks.append(str(delta))
-                    elif event_type in {"response.output_text.done", "response.text.done"}:
-                        text = event.get("text") or ""
+                    elif event_type == "response.output_text.done":
+                        text = event.get("output_text") or event.get("text") or ""
                         if text and not chunks:
                             chunks.append(str(text))
                     elif event_type == "response.done":

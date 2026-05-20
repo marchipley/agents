@@ -1,4 +1,5 @@
 import unittest
+import json
 from datetime import datetime, timezone
 from unittest.mock import Mock, patch
 import types
@@ -17,6 +18,7 @@ from custom.btc_agent.llm_decision import (
     _build_user_prompt,
     _extract_json_payload,
     _get_openai_realtime_client,
+    OpenAIRealtimeClient,
     _stream_openai_chat_completion,
     decide_trade,
 )
@@ -80,6 +82,26 @@ class TestBtcLlmDecision(unittest.TestCase):
         self.assertEqual(payload["max_price_to_pay"], 1.0)
         self.assertIn("prefer no trade", payload["reason"].lower())
 
+    def test_extract_json_payload_accepts_multiline_key_value_response_without_commas(self):
+        payload = _extract_json_payload(
+            "decision: DOWN\nconfidence: 0.72\nmax price to pay: 1.0\nreason: Price is below strike\nand momentum agrees"
+        )
+
+        self.assertEqual(payload["decision"], "DOWN")
+        self.assertEqual(payload["confidence"], 0.72)
+        self.assertEqual(payload["max_price_to_pay"], 1.0)
+        self.assertIn("momentum agrees", payload["reason"])
+
+    def test_extract_json_payload_accepts_quoted_key_value_response_with_semicolons(self):
+        payload = _extract_json_payload(
+            "\"decision\": \"UP\"; \"confidence\": \"0.81\"; \"max_price_to_pay\": \"1.0\"; \"reason\": \"Breakout continuation\""
+        )
+
+        self.assertEqual(payload["decision"], "UP")
+        self.assertEqual(payload["confidence"], 0.81)
+        self.assertEqual(payload["max_price_to_pay"], 1.0)
+        self.assertIn("Breakout", payload["reason"])
+
     def test_get_openai_realtime_client_reuses_existing_client(self):
         fake_client = Mock()
         fake_client.api_key = "test-key"
@@ -99,6 +121,60 @@ class TestBtcLlmDecision(unittest.TestCase):
 
         self.assertIs(client, fake_client)
         mock_client_cls.assert_not_called()
+
+    def test_openai_realtime_client_uses_ga_session_schema(self):
+        sent_payloads = []
+
+        class FakeRealtimeSocket:
+            def __init__(self):
+                self.messages = [
+                    json.dumps(
+                        {
+                            "type": "response.output_text.delta",
+                            "delta": '{"decision":"UP","confidence":0.8,',
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "response.output_text.delta",
+                            "delta": '"max_price_to_pay":1.0,"reason":"ok"}',
+                        }
+                    ),
+                    json.dumps({"type": "response.done"}),
+                ]
+
+            def settimeout(self, _timeout):
+                pass
+
+            def send(self, payload):
+                sent_payloads.append(json.loads(payload))
+
+            def recv(self):
+                return self.messages.pop(0)
+
+            def close(self):
+                pass
+
+        with patch(
+            "custom.btc_agent.llm_decision.websocket.create_connection",
+            return_value=FakeRealtimeSocket(),
+        ) as create_connection:
+            client = OpenAIRealtimeClient("test-key", "gpt-realtime-mini", 15.0)
+            response = client.request("system", "user")
+
+        self.assertIn('"decision":"UP"', response)
+        create_connection.assert_called_once()
+        session_update = sent_payloads[0]
+        response_create = sent_payloads[2]
+        self.assertEqual(session_update["type"], "session.update")
+        self.assertEqual(session_update["session"]["type"], "realtime")
+        self.assertEqual(session_update["session"]["output_modalities"], ["text"])
+        self.assertEqual(session_update["session"]["instructions"], "system")
+        self.assertNotIn("modalities", session_update["session"])
+        self.assertNotIn("temperature", session_update["session"])
+        self.assertEqual(response_create["type"], "response.create")
+        self.assertNotIn("modalities", response_create["response"])
+        self.assertEqual(response_create["response"]["max_output_tokens"], 512)
 
     def test_stream_openai_chat_completion_reassembles_sse_content(self):
         fake_response = Mock()
@@ -274,11 +350,21 @@ class TestBtcLlmDecision(unittest.TestCase):
         self.assertIn("ITM Velocity Rule: If trend_regime is weak", prompt)
         self.assertIn("Weak Regime Rule: If trend_regime contains 'weak' and RSI speed divergence", prompt)
         self.assertIn("STAGNATION RULE: If ADX < 12.0", prompt)
-        self.assertIn("Crowded Trade Rule: If the chosen side MARKET_WIN_CHANCE is greater than 0.90", prompt)
-        self.assertIn("ITM Decay Rule: If ITM gap is decreasing", prompt)
-        self.assertIn("Parabolic Authority Rule: If rsi_regime is labeled PARABOLIC", prompt)
+
+    def test_openai_realtime_prompt_forbids_conversational_filler(self):
+        from custom.btc_agent.llm_decision import _build_openai_realtime_system_prompt
+
+        prompt = _build_openai_realtime_system_prompt()
+
+        self.assertIn("Return ONE raw JSON object only", prompt)
+        self.assertIn("'decision', 'confidence', 'max_price_to_pay', and 'reason'", prompt)
+        self.assertIn("Do NOT output markdown blocks", prompt)
+        self.assertIn("do NOT output conversational filler", prompt)
+        self.assertIn("If the chosen side MARKET_WIN_CHANCE is greater than 0.90", prompt)
+        self.assertIn("If ITM gap is decreasing", prompt)
+        self.assertIn("If rsi_regime is labeled PARABOLIC", prompt)
         self.assertIn("trust the price action over the oscillator", prompt)
-        self.assertIn("Execution Edge Rule: For OTM trades, you must have an execution edge of at least 0.05", prompt)
+        self.assertIn("For OTM trades, you must have an execution edge of at least 0.05", prompt)
         self.assertIn("VELOCITY OVERRIDE: If delta_prev_tick is moving against your chosen side", prompt)
 
     def test_gemini_503_returns_no_trade(self):

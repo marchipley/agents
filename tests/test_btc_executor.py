@@ -20,6 +20,7 @@ from custom.btc_agent.executor import (
     _scale_live_size_for_min_notional,
     _execute_paper_trade,
     _execute_live_trade,
+    _fetch_actual_fill_details_from_trades,
     _resolve_actual_fill_price,
     _resolve_confirmed_live_fill,
     refresh_live_order_fill_status,
@@ -239,6 +240,78 @@ class TestBtcExecutor(unittest.TestCase):
             )
 
         self.assertEqual(resolved, 0.61)
+
+    def test_fetch_actual_fill_details_filters_unmatched_global_trades(self):
+        response = types.SimpleNamespace(
+            status_code=200,
+            raise_for_status=lambda: None,
+            json=lambda: {
+                "data": [
+                    {
+                        "maker_order_id": "other-order",
+                        "price": "0.61",
+                        "size": "5",
+                    },
+                    {
+                        "price": "0.62",
+                        "size": "5",
+                    },
+                ]
+            },
+        )
+        with patch(
+            "custom.btc_agent.executor.get_polymarket_config",
+            return_value=types.SimpleNamespace(data_api="https://data-api.polymarket.com"),
+        ), patch(
+            "custom.btc_agent.executor.http_get",
+            return_value=response,
+        ):
+            average_fill, filled_size = _fetch_actual_fill_details_from_trades(
+                "order-1",
+                "up-token",
+            )
+
+        self.assertIsNone(average_fill)
+        self.assertEqual(filled_size, 0.0)
+
+    def test_fetch_actual_fill_details_uses_only_matching_order_trades(self):
+        response = types.SimpleNamespace(
+            status_code=200,
+            raise_for_status=lambda: None,
+            json=lambda: {
+                "trades": [
+                    {
+                        "makerOrderId": "other-order",
+                        "price": "0.10",
+                        "size": "99",
+                    },
+                    {
+                        "takerOrderId": "order-1",
+                        "price": "0.61",
+                        "size": "2",
+                    },
+                    {
+                        "orderID": "order-1",
+                        "price": "0.63",
+                        "size": "3",
+                    },
+                ]
+            },
+        )
+        with patch(
+            "custom.btc_agent.executor.get_polymarket_config",
+            return_value=types.SimpleNamespace(data_api="https://data-api.polymarket.com"),
+        ), patch(
+            "custom.btc_agent.executor.http_get",
+            return_value=response,
+        ):
+            average_fill, filled_size = _fetch_actual_fill_details_from_trades(
+                "order-1",
+                "up-token",
+            )
+
+        self.assertAlmostEqual(average_fill, 0.622)
+        self.assertEqual(filled_size, 5.0)
 
     def test_resolve_actual_fill_price_uses_order_state_before_submission_avg_price(self):
         response = {"id": "order-1", "avgPrice": 0.61}
