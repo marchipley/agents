@@ -885,7 +885,31 @@ def _fetch_actual_fill_details_from_trades(
         else:
             trades = []
 
-        average_fill, filled_size = _weighted_average_fill_details(trades)
+        valid_trades = []
+        for trade in trades:
+            if not isinstance(trade, dict):
+                continue
+            is_match = False
+            for key in (
+                "orderID",
+                "orderId",
+                "order_id",
+                "maker_order_id",
+                "taker_order_id",
+                "makerOrderId",
+                "takerOrderId",
+            ):
+                value = trade.get(key)
+                if value and str(value) == str(order_id):
+                    is_match = True
+                    break
+            if is_match:
+                valid_trades.append(trade)
+
+        if not valid_trades:
+            continue
+
+        average_fill, filled_size = _weighted_average_fill_details(valid_trades)
         if average_fill is not None and filled_size > 0:
             return average_fill, filled_size
     return None, 0.0
