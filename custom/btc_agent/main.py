@@ -1914,7 +1914,7 @@ def _get_losing_active_orders(current_btc_price: float) -> list[ActivePaperOrder
     ]
 
 
-def resolve_price_to_beat_with_retries(market, retry_attempts: int = 2, retry_delay_seconds: int = 3):
+def resolve_price_to_beat_with_retries(market, retry_attempts: int = 5, retry_delay_seconds: int = 5):
     if has_valid_price_to_beat(market.settlement_threshold):
         return market
 
