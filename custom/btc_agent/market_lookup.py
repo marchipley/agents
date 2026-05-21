@@ -15,6 +15,23 @@ import websocket
 from .config import get_polymarket_config, get_trading_config
 from .network import http_get
 
+try:
+    from selenium import webdriver
+    from selenium.webdriver.chrome.options import Options
+    from selenium.webdriver.chrome.service import Service
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support import expected_conditions as EC
+    from selenium.webdriver.support.ui import WebDriverWait
+    from webdriver_manager.chrome import ChromeDriverManager
+except Exception:
+    webdriver = None
+    Options = None
+    Service = None
+    By = None
+    EC = None
+    WebDriverWait = None
+    ChromeDriverManager = None
+
 
 _SETTLEMENT_THRESHOLD_CACHE: dict[str, float] = {}
 _MARKET_CACHE: dict[str, "BtcUpDownMarket"] = {}
@@ -24,6 +41,8 @@ _NEXT_DATA_CHAIN_MAX_PAGES = 3
 _NEXT_DATA_CHAIN_INTER_REQUEST_DELAY_SECONDS = 1.0
 _CLOB_MARKET_WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 _CLOB_MARKET_WS_TIMEOUT_SECONDS = 1.0
+_CLOB_RESOLUTION_WS_TIMEOUT_SECONDS = 45.0
+_CLOB_RESOLUTION_WS_CONNECT_TIMEOUT_SECONDS = 30.0
 
 
 @dataclass
@@ -74,6 +93,48 @@ def _parse_live_market_probabilities_message(
             down_probability = best_ask
 
     return up_probability, down_probability
+
+
+def _extract_resolution_price_from_clob_payload(payload) -> Optional[float]:
+    if isinstance(payload, list):
+        for item in payload:
+            price = _extract_resolution_price_from_clob_payload(item)
+            if price is not None:
+                return price
+        return None
+
+    if not isinstance(payload, dict):
+        return None
+
+    for key in (
+        "finalPrice",
+        "final_price",
+        "closePrice",
+        "close_price",
+        "settlementPrice",
+        "settlement_price",
+        "priceToBeat",
+        "price_to_beat",
+    ):
+        price = _coerce_btc_threshold(payload.get(key))
+        if price is not None:
+            return price
+
+    for value in payload.values():
+        price = _extract_resolution_price_from_clob_payload(value)
+        if price is not None:
+            return price
+
+    return None
+
+
+def _parse_live_market_resolution_price_message(message: str) -> Optional[float]:
+    try:
+        payload = json.loads(message)
+    except Exception:
+        return None
+
+    return _extract_resolution_price_from_clob_payload(payload)
 
 
 def fetch_live_market_probabilities_from_clob_ws(
@@ -141,7 +202,15 @@ def _current_btc_5m_slug() -> str:
 def _fetch_event_by_slug(slug: str) -> dict:
     cfg = get_polymarket_config()
     url = f"{cfg.gamma_api}/events/slug/{slug}"
-    resp = http_get(url, timeout=10)
+    resp = http_get(
+        url,
+        params={"_ts": int(time.time() * 1000)},
+        headers={
+            "cache-control": "no-cache",
+            "pragma": "no-cache",
+        },
+        timeout=10,
+    )
     resp.raise_for_status()
     return resp.json()
 
@@ -308,26 +377,26 @@ def _extract_settlement_threshold(
     question: str,
     slug: Optional[str] = None,
 ) -> Optional[float]:
-    if slug and slug.startswith("btc-updown-5m-"):
-        return _parse_threshold_from_text(
-            question,
-            str(market.get("description") or ""),
-            title,
-        )
-
+    # Do not hard-block 5-minute BTC markets here. Native Gamma/Polymarket
+    # payloads sometimes carry the correct price-to-beat and should be used
+    # before slower page/API fallbacks.
     event_metadata = event.get("eventMetadata") or {}
-    return (
-        _coerce_btc_threshold(event_metadata.get("priceToBeat"))
-        or _coerce_btc_threshold(event_metadata.get("price_to_beat"))
-        or _coerce_btc_threshold(event_metadata.get("price_to_beat_usd"))
-        or _coerce_btc_threshold(market.get("groupItemThreshold"))
-        or _coerce_btc_threshold(market.get("threshold"))
-        or _parse_threshold_from_text(
-            question,
-            str(market.get("description") or ""),
-            title,
-        )
+    ptb1 = _coerce_btc_threshold(event_metadata.get("priceToBeat"))
+    ptb2 = _coerce_btc_threshold(event_metadata.get("price_to_beat"))
+    ptb3 = _coerce_btc_threshold(event_metadata.get("price_to_beat_usd"))
+    git = _coerce_btc_threshold(market.get("groupItemThreshold"))
+    threshold = _coerce_btc_threshold(market.get("threshold"))
+    text_threshold = _parse_threshold_from_text(
+        question,
+        str(market.get("description") or ""),
+        title,
     )
+    ans = ptb1 or ptb2 or ptb3 or git or threshold or text_threshold
+
+    if get_trading_config().debug and slug:
+        print(f"[DEBUG] Gamma Extract for {slug}: priceToBeat={ptb1}, groupItemThreshold={git} -> Result={ans}")
+
+    return ans
 
 
 def _extract_event_from_next_data(payload: dict, slug: str) -> Optional[dict]:
@@ -1017,22 +1086,62 @@ def _fetch_vatic_price_to_beat_by_slug(slug: str) -> Optional[float]:
             "asset": "btc",
             "type": "5min",
             "timestamp": timestamp,
+            "_ts": int(time.time() * 1000),
+        },
+        headers={
+            "cache-control": "no-cache",
+            "pragma": "no-cache",
         },
         timeout=10,
     )
     if resp.status_code == 404:
+        if get_trading_config().debug:
+            print(f"[DEBUG] Vatic API returned 404 for {slug}")
         return None
     resp.raise_for_status()
 
     try:
         payload = resp.json()
+        if get_trading_config().debug:
+            print(f"[DEBUG] Vatic API Response: {json.dumps(payload)}")
     except ValueError:
+        if get_trading_config().debug:
+            print(f"[DEBUG] Vatic API Raw Text: {resp.text.strip()}")
         return _coerce_btc_threshold(resp.text.strip())
 
     return _extract_vatic_price_from_response(payload)
 
 
-def fetch_btc_resolution_price_for_slug(slug: str) -> Optional[float]:
+def _fetch_btc_resolution_price_from_clob_ws(slug: str) -> Optional[float]:
+    ws = None
+    try:
+        ws = websocket.create_connection(
+            _CLOB_MARKET_WS_URL,
+            timeout=_CLOB_RESOLUTION_WS_CONNECT_TIMEOUT_SECONDS,
+        )
+        ws.send(json.dumps({"type": "subscribe", "market": slug}))
+
+        deadline = time.monotonic() + _CLOB_RESOLUTION_WS_TIMEOUT_SECONDS
+        while time.monotonic() < deadline:
+            message = ws.recv()
+            if message in {"PONG", "[]", "", None}:
+                continue
+            final_price = _parse_live_market_resolution_price_message(message)
+            if final_price is not None:
+                return final_price
+
+        return None
+    except Exception:
+        return None
+    finally:
+        if ws is not None:
+            try:
+                ws.close()
+            except Exception:
+                pass
+
+
+def _fetch_btc_resolution_price_from_rest_sources(slug: str) -> Optional[float]:
     if not slug.startswith("btc-updown-5m-"):
         return None
 
@@ -1068,18 +1177,42 @@ def fetch_btc_resolution_price_for_slug(slug: str) -> Optional[float]:
     return None
 
 
-def _fetch_price_to_beat_by_slug(slug: str) -> Optional[float]:
-    if slug.startswith("btc-updown-5m-"):
+def fetch_btc_resolution_price_for_slug(slug: str) -> Optional[float]:
+    if not slug.startswith("btc-updown-5m-"):
         return None
 
-    resp = http_get(f"https://polymarket.com/api/equity/price-to-beat/{slug}", timeout=10)
+    websocket_price = _fetch_btc_resolution_price_from_clob_ws(slug)
+    if websocket_price is not None:
+        return websocket_price
+
+    return _fetch_btc_resolution_price_from_rest_sources(slug)
+
+
+def _fetch_price_to_beat_by_slug(slug: str) -> Optional[float]:
+    # Allow the standard Polymarket endpoint for 5-minute BTC markets too.
+    # It is a useful fallback when Vatic or page-derived sources are down.
+    resp = http_get(
+        f"https://polymarket.com/api/equity/price-to-beat/{slug}",
+        params={"_ts": int(time.time() * 1000)},
+        headers={
+            "cache-control": "no-cache",
+            "pragma": "no-cache",
+        },
+        timeout=10,
+    )
     if resp.status_code == 404:
+        if get_trading_config().debug:
+            print(f"[DEBUG] Polymarket P2B API returned 404 for {slug}")
         return None
     resp.raise_for_status()
 
     try:
         payload = resp.json()
+        if get_trading_config().debug:
+            print(f"[DEBUG] Polymarket P2B API Response: {json.dumps(payload)}")
     except ValueError:
+        if get_trading_config().debug:
+            print(f"[DEBUG] Polymarket P2B API Raw Text: {resp.text.strip()}")
         return _coerce_btc_threshold(resp.text.strip())
 
     return _extract_threshold_from_price_to_beat_response(payload)
@@ -1140,6 +1273,48 @@ def _fetch_polymarket_page(slug: str) -> str:
     resp = http_get(url, timeout=10)
     resp.raise_for_status()
     return resp.text
+
+
+def _fetch_price_via_selenium(slug: str) -> Optional[float]:
+    if any(
+        dependency is None
+        for dependency in (webdriver, Options, Service, By, EC, WebDriverWait, ChromeDriverManager)
+    ):
+        if get_trading_config().debug:
+            print(f"[DEBUG] Selenium unavailable for {slug}: selenium/webdriver_manager imports failed")
+        return None
+
+    url = f"https://polymarket.com/market/{slug}"
+    chrome_options = Options()
+    chrome_options.add_argument("--headless=new")
+    chrome_options.add_argument("--disable-gpu")
+    chrome_options.add_argument("--no-sandbox")
+
+    driver = None
+    try:
+        driver = webdriver.Chrome(
+            service=Service(ChromeDriverManager().install()),
+            options=chrome_options,
+        )
+        driver.get(url)
+        wait = WebDriverWait(driver, 10)
+        element = wait.until(
+            EC.presence_of_element_located(
+                (By.CSS_SELECTOR, ".text-text-secondary.text-heading-2xl")
+            )
+        )
+        text = str(element.text or "").strip().replace("$", "").replace(",", "")
+        return _coerce_btc_threshold(text)
+    except Exception as exc:
+        if get_trading_config().debug:
+            print(f"[DEBUG] Selenium Scrape Failed for {slug}: {exc}")
+        return None
+    finally:
+        if driver is not None:
+            try:
+                driver.quit()
+            except Exception:
+                pass
 
 
 def _fetch_event_from_polymarket_page(slug: str) -> Optional[dict]:
@@ -1233,129 +1408,29 @@ def _hydrate_missing_threshold_from_page(market: Optional[BtcUpDownMarket], slug
     if market is None:
         return market
 
-    if slug.startswith("btc-updown-5m-"):
-        try:
-            vatic_threshold = _fetch_vatic_price_to_beat_by_slug(slug)
-        except Exception:
-            vatic_threshold = None
-        if vatic_threshold is not None:
-            market.settlement_threshold = vatic_threshold
-            return market
+    try:
+        vatic_threshold = _fetch_vatic_price_to_beat_by_slug(slug)
+    except Exception as exc:
+        vatic_threshold = None
+        print(f"[DEBUG] Vatic API Exception: {exc}")
+    if vatic_threshold is not None:
+        market.settlement_threshold = vatic_threshold
+        return market
 
     try:
         api_threshold = _fetch_price_to_beat_by_slug(slug)
-    except Exception:
-        api_threshold = None
-    if api_threshold is not None:
-        market.settlement_threshold = api_threshold
-        return market
-
-    try:
-        html = _fetch_polymarket_page(slug)
-    except Exception:
-        return market
-
-    embedded_payload = _extract_embedded_next_data_payload(html)
-
-    build_id = _extract_next_build_id(html)
-    payload_chain: list[tuple[str, Optional[dict]]] = []
-    if build_id:
-        next_data_attempts = 1
-        if slug.startswith("btc-updown-5m-"):
-            next_data_attempts = _BTC_LIVE_PERIOD_OPEN_ATTEMPTS
-
-        for attempt in range(next_data_attempts):
-            try:
-                candidate_payload_chain = _fetch_next_data_payload_chain(slug, build_id)
-            except Exception:
-                candidate_payload_chain = []
-            if candidate_payload_chain:
-                payload_chain = candidate_payload_chain
-
-            if attempt < next_data_attempts - 1:
-                time.sleep(_BTC_LIVE_PERIOD_OPEN_RETRY_DELAY_SECONDS)
-
-        dataset = _build_current_period_dataset(
-            slug=slug,
-            html=html,
-            embedded_payload=embedded_payload if isinstance(embedded_payload, dict) else None,
-            build_id=build_id,
-            payload_chain=payload_chain,
-        )
-        _write_current_period_dataset_file(dataset)
-
-        if isinstance(embedded_payload, dict) and _apply_threshold_from_next_data_payload(
-            market,
-            slug,
-            embedded_payload,
-        ):
+        if api_threshold is not None:
+            market.settlement_threshold = api_threshold
             return market
+    except Exception as exc:
+        print(f"[DEBUG] Polymarket P2B API Exception: {exc}")
 
-        for _, next_data_payload in payload_chain:
-            if isinstance(next_data_payload, dict) and _apply_threshold_from_next_data_payload(
-                market,
-                slug,
-                next_data_payload,
-            ):
-                return market
-
-        for _, next_data_payload in payload_chain:
-            next_data_event = (
-                _extract_event_from_next_data(next_data_payload, slug)
-                if isinstance(next_data_payload, dict)
-                else None
-            )
-            if isinstance(next_data_event, dict):
-                next_data_threshold = _extract_settlement_threshold(
-                    next_data_event,
-                    (next_data_event.get("markets") or [{}])[0],
-                    str(next_data_event.get("title") or market.title),
-                    str(((next_data_event.get("markets") or [{}])[0]).get("question") or market.question),
-                )
-                if next_data_threshold is not None:
-                    market.settlement_threshold = next_data_threshold
-                    return market
-
-        if slug.startswith("btc-updown-5m-"):
+    if slug.startswith("btc-updown-5m-"):
+        print(f"[DEBUG] Vatic and Polymarket API failed, attempting Selenium scrape for {slug}...")
+        selenium_threshold = _fetch_price_via_selenium(slug)
+        if selenium_threshold is not None:
+            market.settlement_threshold = selenium_threshold
             return market
-
-    dataset = _build_current_period_dataset(
-        slug=slug,
-        html=html,
-        embedded_payload=embedded_payload if isinstance(embedded_payload, dict) else None,
-        build_id=build_id,
-        payload_chain=payload_chain,
-    )
-    _write_current_period_dataset_file(dataset)
-
-    if isinstance(embedded_payload, dict) and _apply_threshold_from_next_data_payload(
-        market,
-        slug,
-        embedded_payload,
-    ):
-        return market
-
-    page_threshold = _extract_threshold_from_page_html(html)
-    if page_threshold is not None:
-        market.settlement_threshold = page_threshold
-        return market
-
-    match = re.search(
-        r'<script id="__NEXT_DATA__" type="application/json" crossorigin="anonymous">(.*?)</script>',
-        html,
-        flags=re.DOTALL,
-    )
-    if not match:
-        return market
-
-    payload = json.loads(match.group(1))
-    page_event = _extract_event_from_next_data(payload, slug)
-    if not page_event:
-        return market
-
-    hydrated_market = _extract_market_from_event(page_event, slug)
-    if hydrated_market and hydrated_market.settlement_threshold is not None:
-        return hydrated_market
 
     return market
 
@@ -1483,6 +1558,14 @@ def get_btc_updown_market_by_slug(slug: str) -> Optional[BtcUpDownMarket]:
     if _coerce_btc_threshold(market.settlement_threshold) is not None:
         return _cache_settlement_threshold(market)
     market = _hydrate_missing_threshold_from_page(market, slug)
+    if (
+        market is not None
+        and slug.startswith("btc-updown-5m-")
+        and _coerce_btc_threshold(market.settlement_threshold) is None
+    ):
+        websocket_threshold = fetch_btc_resolution_price_for_slug(slug)
+        if websocket_threshold is not None:
+            market.settlement_threshold = websocket_threshold
     return _cache_settlement_threshold(market)
 
 def find_current_btc_updown_market() -> Optional[BtcUpDownMarket]:

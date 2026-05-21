@@ -199,10 +199,10 @@ LIVE_ORDER_STATUS_POLL_INTERVAL_SECONDS = 0.75
 PERIOD_ANALYSIS_INTERVAL_SECONDS = 30
 
 # Enabling tis will output additional debug info in the output
-BTC_AGENT_DEBUG=False
+BTC_AGENT_DEBUG=True
 
 # Disabling this will disable warmup if BTC_AGENT_DEBUG is enabled
-BTC_AGENT_DEBUG_WARMUP=False
+BTC_AGENT_DEBUG_WARMUP=True
 
 # When enabled, the program will disable the geolocation check and send a small test prompt to the LLM to check connection
 # then do a test connection to google if it fails so we can see if there is any basic connection

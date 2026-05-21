@@ -1,4 +1,5 @@
 import json
+import io
 import sys
 import types
 import unittest
@@ -11,10 +12,12 @@ sys.modules.setdefault("websocket", types.SimpleNamespace(WebSocketApp=object, c
 from custom.btc_agent.market_lookup import (
     BtcUpDownMarket,
     _parse_live_market_probabilities_message,
+    _parse_live_market_resolution_price_message,
     _build_current_period_dataset,
     build_price_to_beat_debug_report,
     build_price_to_beat_debug_reports,
     fetch_live_market_probabilities_from_clob_ws,
+    fetch_btc_resolution_price_for_slug,
     get_btc_updown_market_by_slug,
     _extract_current_period_open_from_next_data,
     _extract_embedded_next_data_payload,
@@ -32,13 +35,159 @@ from custom.btc_agent.market_lookup import (
     _fetch_next_data_payload,
     _fetch_price_to_beat_by_slug,
     _fetch_vatic_price_to_beat_by_slug,
+    _fetch_btc_resolution_price_from_clob_ws,
+    _fetch_price_via_selenium,
     _write_current_period_dataset_file,
     _extract_threshold_from_page_html,
     _parse_threshold_from_text,
+    _fetch_event_by_slug,
 )
 
 
 class TestBtcMarketLookup(unittest.TestCase):
+    def test_parse_live_market_resolution_price_message_reads_final_price(self):
+        message = json.dumps(
+            {
+                "event_type": "market_resolved",
+                "market": {
+                    "slug": "btc-updown-5m-1777513800",
+                    "finalPrice": 77763.01,
+                },
+            }
+        )
+
+        self.assertEqual(_parse_live_market_resolution_price_message(message), 77763.01)
+
+    def test_parse_live_market_resolution_price_message_reads_close_price(self):
+        message = json.dumps(
+            [
+                {
+                    "event_type": "market_resolved",
+                    "closePrice": "77722.39",
+                }
+            ]
+        )
+
+        self.assertEqual(_parse_live_market_resolution_price_message(message), 77722.39)
+
+    def test_fetch_btc_resolution_price_from_clob_ws_subscribes_and_reads_final_price(self):
+        fake_ws = Mock()
+        fake_ws.recv.return_value = json.dumps({"finalPrice": 77763.01})
+
+        with patch(
+            "custom.btc_agent.market_lookup.websocket.create_connection",
+            return_value=fake_ws,
+        ) as mock_create_connection:
+            price = _fetch_btc_resolution_price_from_clob_ws("btc-updown-5m-1777513800")
+
+        self.assertEqual(price, 77763.01)
+        mock_create_connection.assert_called_once_with(
+            "wss://ws-subscriptions-clob.polymarket.com/ws/market",
+            timeout=30.0,
+        )
+        fake_ws.send.assert_called_once_with(
+            json.dumps({"type": "subscribe", "market": "btc-updown-5m-1777513800"})
+        )
+        fake_ws.close.assert_called_once()
+
+    def test_fetch_btc_resolution_price_for_slug_prefers_websocket_before_rest_fallback(self):
+        with patch(
+            "custom.btc_agent.market_lookup._fetch_btc_resolution_price_from_clob_ws",
+            return_value=77763.01,
+        ) as mock_ws, patch(
+            "custom.btc_agent.market_lookup._fetch_btc_resolution_price_from_rest_sources",
+        ) as mock_rest:
+            price = fetch_btc_resolution_price_for_slug("btc-updown-5m-1777513800")
+
+        self.assertEqual(price, 77763.01)
+        mock_ws.assert_called_once_with("btc-updown-5m-1777513800")
+        mock_rest.assert_not_called()
+
+    def test_fetch_btc_resolution_price_for_slug_uses_rest_when_websocket_has_no_price(self):
+        with patch(
+            "custom.btc_agent.market_lookup._fetch_btc_resolution_price_from_clob_ws",
+            return_value=None,
+        ), patch(
+            "custom.btc_agent.market_lookup._fetch_btc_resolution_price_from_rest_sources",
+            return_value=77722.39,
+        ) as mock_rest:
+            price = fetch_btc_resolution_price_for_slug("btc-updown-5m-1777513800")
+
+        self.assertEqual(price, 77722.39)
+        mock_rest.assert_called_once_with("btc-updown-5m-1777513800")
+
+    def test_get_btc_updown_market_by_slug_uses_resolution_ws_when_hydration_fails(self):
+        event = {
+            "id": "event-1",
+            "title": "Bitcoin Up or Down",
+            "markets": [
+                {
+                    "id": "market-1",
+                    "question": "Bitcoin Up or Down",
+                    "clobTokenIds": '["up-token","down-token"]',
+                    "outcomes": '["Up","Down"]',
+                    "outcomePrices": '["0.495","0.505"]',
+                    "startDate": "2026-05-04T00:00:00Z",
+                    "endDate": "2026-05-04T00:05:00Z",
+                }
+            ],
+        }
+
+        with patch(
+            "custom.btc_agent.market_lookup._MARKET_CACHE",
+            {},
+        ), patch(
+            "custom.btc_agent.market_lookup._SETTLEMENT_THRESHOLD_CACHE",
+            {},
+        ), patch(
+            "custom.btc_agent.market_lookup._fetch_event_by_slug",
+            return_value=event,
+        ), patch(
+            "custom.btc_agent.market_lookup._refresh_market_probabilities",
+            side_effect=lambda market: market,
+        ), patch(
+            "custom.btc_agent.market_lookup._hydrate_missing_threshold_from_page",
+            side_effect=lambda market, slug: market,
+        ), patch(
+            "custom.btc_agent.market_lookup.fetch_btc_resolution_price_for_slug",
+            return_value=77763.01,
+        ) as mock_fetch_resolution:
+            market = get_btc_updown_market_by_slug("btc-updown-5m-1777513800")
+
+        self.assertIsNotNone(market)
+        self.assertEqual(market.settlement_threshold, 77763.01)
+        mock_fetch_resolution.assert_called_once_with("btc-updown-5m-1777513800")
+
+    def test_fetch_event_by_slug_adds_cache_buster_and_no_cache_headers(self):
+        mock_response = Mock(status_code=200)
+        mock_response.json.return_value = {"id": "event-1"}
+
+        with patch(
+            "custom.btc_agent.market_lookup.http_get",
+            return_value=mock_response,
+        ) as mock_http_get, patch(
+            "custom.btc_agent.market_lookup.time.time",
+            return_value=1777512000.123,
+        ), patch(
+            "custom.btc_agent.market_lookup.get_polymarket_config",
+            return_value=types.SimpleNamespace(gamma_api="https://gamma-api.polymarket.com"),
+        ):
+            event = _fetch_event_by_slug("btc-updown-5m-1777513800")
+
+        self.assertEqual(event, {"id": "event-1"})
+        self.assertEqual(
+            mock_http_get.call_args.args[0],
+            "https://gamma-api.polymarket.com/events/slug/btc-updown-5m-1777513800",
+        )
+        self.assertEqual(mock_http_get.call_args.kwargs["params"], {"_ts": 1777512000123})
+        self.assertEqual(
+            mock_http_get.call_args.kwargs["headers"],
+            {
+                "cache-control": "no-cache",
+                "pragma": "no-cache",
+            },
+        )
+
     def test_parse_live_market_probabilities_message_uses_best_ask_from_price_change(self):
         message = json.dumps(
             {
@@ -325,7 +474,7 @@ class TestBtcMarketLookup(unittest.TestCase):
         self.assertEqual(market.down_market_probability, 0.33)
         mock_fetch_live.assert_called_once_with("up-token", "down-token")
 
-    def test_extract_market_ignores_structured_thresholds_for_btc_updown_markets(self):
+    def test_extract_market_reads_structured_thresholds_for_btc_updown_markets(self):
         event = {
             "id": "1",
             "title": "Bitcoin Up or Down - April 22, 6:10PM-6:15PM ET",
@@ -350,9 +499,44 @@ class TestBtcMarketLookup(unittest.TestCase):
         market = _extract_market_from_event(event, "btc-updown-5m-1776895800")
 
         self.assertIsNotNone(market)
-        self.assertIsNone(market.settlement_threshold)
+        self.assertEqual(market.settlement_threshold, 78842.09031747903)
 
-    def test_extract_market_ignores_group_item_threshold_for_btc_updown_markets(self):
+    def test_extract_market_prints_gamma_threshold_debug_when_enabled(self):
+        event = {
+            "id": "1",
+            "title": "Bitcoin Up or Down - April 22, 6:10PM-6:15PM ET",
+            "eventMetadata": {
+                "priceToBeat": 78842.09031747903,
+            },
+            "markets": [
+                {
+                    "id": "2",
+                    "question": "Bitcoin Up or Down - April 22, 6:10PM-6:15PM ET",
+                    "groupItemThreshold": "0",
+                    "tokens": [
+                        {"outcome": "Up", "token_id": "up-token"},
+                        {"outcome": "Down", "token_id": "down-token"},
+                    ],
+                    "start_ts": 1776895800,
+                    "end_ts": 1776896100,
+                }
+            ],
+        }
+
+        with patch(
+            "custom.btc_agent.market_lookup.get_trading_config",
+            return_value=types.SimpleNamespace(debug=True),
+        ), patch("sys.stdout", new_callable=io.StringIO) as stdout:
+            market = _extract_market_from_event(event, "btc-updown-5m-1776895800")
+
+        self.assertIsNotNone(market)
+        self.assertIn(
+            "[DEBUG] Gamma Extract for btc-updown-5m-1776895800: "
+            "priceToBeat=78842.09031747903, groupItemThreshold=None -> Result=78842.09031747903",
+            stdout.getvalue(),
+        )
+
+    def test_extract_market_reads_group_item_threshold_for_btc_updown_markets(self):
         event = {
             "id": "1",
             "title": "Bitcoin Up or Down - April 22, 1:40PM-1:45PM ET",
@@ -374,7 +558,7 @@ class TestBtcMarketLookup(unittest.TestCase):
         market = _extract_market_from_event(event, "btc-updown-5m-1776879600")
 
         self.assertIsNotNone(market)
-        self.assertIsNone(market.settlement_threshold)
+        self.assertEqual(market.settlement_threshold, 78860.0)
         self.assertEqual(market.question, "Bitcoin Up or Down - April 22, 1:40PM-1:45PM ET")
 
     def test_extract_market_rejects_unrealistic_small_structured_thresholds(self):
@@ -1133,220 +1317,85 @@ class TestBtcMarketLookup(unittest.TestCase):
             ],
         )
 
-    def test_hydrate_missing_threshold_prefers_live_period_open_after_retry(self):
+    def test_hydrate_missing_threshold_prints_debug_api_exceptions(self):
         market = BtcUpDownMarket(
             event_id="1",
             market_id="2",
             up_token_id="up-token",
             down_token_id="down-token",
-            title="Bitcoin Up or Down - April 29, 3:15PM-3:20PM ET",
-            question="Bitcoin Up or Down - April 29, 3:15PM-3:20PM ET",
+            title="Bitcoin Up or Down",
+            question="Bitcoin Up or Down",
             slug="btc-updown-5m-1777490100",
             start_ts=1777490100,
             end_ts=1777490400,
             settlement_threshold=None,
         )
-        first_payload = {
-            "pageProps": {
-                "dehydratedState": {
-                    "queries": [
-                        {
-                            "state": {
-                                "data": {
-                                    "data": {
-                                        "results": [
-                                            {
-                                                "startTime": "2026-04-29T19:05:00.000Z",
-                                                "endTime": "2026-04-29T19:10:00.000Z",
-                                                "openPrice": 75491.41106368953,
-                                                "closePrice": 75374.81761843128,
-                                                "outcome": "down",
-                                                "percentChange": -0.15444597420479106,
-                                            }
-                                        ]
-                                    }
-                                }
-                            }
-                        }
-                    ]
-                }
-            }
-        }
-        second_payload = {
-            "pageProps": {
-                "dehydratedState": {
-                    "queries": [
-                        {
-                            "queryKey": [
-                                "crypto-prices",
-                                "price",
-                                "BTC",
-                                "2026-04-29T19:15:00Z",
-                                "fiveminute",
-                                "2026-04-29T19:20:00Z",
-                            ],
-                            "state": {
-                                "data": {
-                                    "openPrice": 75403.56802142781,
-                                    "closePrice": None,
-                                }
-                            },
-                        }
-                    ]
-                }
-            }
-        }
 
         with patch(
             "custom.btc_agent.market_lookup._fetch_vatic_price_to_beat_by_slug",
-            return_value=None,
+            side_effect=RuntimeError("vatic down"),
         ), patch(
             "custom.btc_agent.market_lookup._fetch_price_to_beat_by_slug",
+            side_effect=RuntimeError("p2b down"),
+        ), patch(
+            "custom.btc_agent.market_lookup._fetch_price_via_selenium",
             return_value=None,
         ), patch(
-            "custom.btc_agent.market_lookup._fetch_polymarket_page",
-            return_value='<script id="__NEXT_DATA__" type="application/json">{"buildId":"build-TfctsWXpff2fKS"}</script>',
-        ), patch(
-            "custom.btc_agent.market_lookup._fetch_next_data_payload_chain",
-            side_effect=[
-                [("build-TfctsWXpff2fKS", first_payload)],
-                [("build-TfctsWXpff2fKS", second_payload)],
-            ],
-        ), patch(
-            "custom.btc_agent.market_lookup.time.sleep",
-        ):
-            hydrated_market = _hydrate_missing_threshold_from_page(
-                market,
-                "btc-updown-5m-1777490100",
-            )
+            "custom.btc_agent.market_lookup.get_trading_config",
+            return_value=types.SimpleNamespace(debug=True),
+        ), patch("sys.stdout", new_callable=io.StringIO) as stdout:
+            hydrated = _hydrate_missing_threshold_from_page(market, market.slug)
 
-        self.assertEqual(hydrated_market.settlement_threshold, 75403.56802142781)
+        self.assertIs(hydrated, market)
+        self.assertIn("[DEBUG] Vatic API Exception: vatic down", stdout.getvalue())
+        self.assertIn("[DEBUG] Polymarket P2B API Exception: p2b down", stdout.getvalue())
+        self.assertIn(
+            "[DEBUG] Vatic and Polymarket API failed, attempting Selenium scrape for btc-updown-5m-1777490100...",
+            stdout.getvalue(),
+        )
 
-    def test_hydrate_missing_threshold_fetches_next_data_when_embedded_payload_lacks_value(self):
+    def test_hydrate_missing_threshold_prefers_polymarket_api_after_vatic_miss(self):
         market = BtcUpDownMarket(
             event_id="1",
             market_id="2",
             up_token_id="up-token",
             down_token_id="down-token",
-            title="Bitcoin Up or Down - April 29, 4:05PM-4:10PM ET",
-            question="Bitcoin Up or Down - April 29, 4:05PM-4:10PM ET",
+            title="Bitcoin Up or Down",
+            question="Bitcoin Up or Down",
             slug="btc-updown-5m-1777493100",
             start_ts=1777493100,
             end_ts=1777493400,
             settlement_threshold=None,
         )
-        embedded_html = """
-        <script id="__NEXT_DATA__" type="application/json">
-        {"buildId":"build-TfctsWXpff2fKS","pageProps":{"event":{"id":"1"}}}
-        </script>
-        """
-        next_data_payload = {
-            "pageProps": {
-                "dehydratedState": {
-                    "queries": [
-                        {
-                            "queryKey": [
-                                "crypto-prices",
-                                "price",
-                                "BTC",
-                                "2026-04-29T20:05:00Z",
-                                "fiveminute",
-                                "2026-04-29T20:10:00Z",
-                            ],
-                            "state": {
-                                "data": {
-                                    "openPrice": 75600.465495,
-                                    "closePrice": None,
-                                }
-                            },
-                        },
-                        {
-                            "state": {
-                                "data": {
-                                    "data": {
-                                        "results": [
-                                            {
-                                                "startTime": "2026-04-29T20:00:00.000Z",
-                                                "endTime": "2026-04-29T20:05:00.000Z",
-                                                "openPrice": 75580.125,
-                                                "closePrice": 75529.57330485078,
-                                                "outcome": "down",
-                                                "percentChange": -0.0669,
-                                            }
-                                        ]
-                                    }
-                                }
-                            }
-                        },
-                    ]
-                }
-            }
-        }
 
         with patch(
             "custom.btc_agent.market_lookup._fetch_vatic_price_to_beat_by_slug",
             return_value=None,
         ), patch(
             "custom.btc_agent.market_lookup._fetch_price_to_beat_by_slug",
-            return_value=None,
-        ), patch(
-            "custom.btc_agent.market_lookup._fetch_polymarket_page",
-            return_value=embedded_html,
-        ), patch(
-            "custom.btc_agent.market_lookup._fetch_next_data_payload_chain",
-            return_value=[("build-TfctsWXpff2fKS", next_data_payload)],
-        ):
+            return_value=75600.465495,
+        ), patch("custom.btc_agent.market_lookup._fetch_price_via_selenium") as mock_selenium:
             hydrated_market = _hydrate_missing_threshold_from_page(
                 market,
                 "btc-updown-5m-1777493100",
             )
 
         self.assertEqual(hydrated_market.settlement_threshold, 75600.465495)
+        mock_selenium.assert_not_called()
 
-    def test_hydrate_missing_threshold_uses_prior_close_when_open_sources_missing(self):
+    def test_hydrate_missing_threshold_uses_selenium_after_api_misses(self):
         market = BtcUpDownMarket(
             event_id="1",
             market_id="2",
             up_token_id="up-token",
             down_token_id="down-token",
-            title="Bitcoin Up or Down - April 29, 5:00PM-5:05PM ET",
-            question="Bitcoin Up or Down - April 29, 5:00PM-5:05PM ET",
+            title="Bitcoin Up or Down",
+            question="Bitcoin Up or Down",
             slug="btc-updown-5m-1777496400",
             start_ts=1777496400,
             end_ts=1777496700,
             settlement_threshold=None,
         )
-        embedded_html = """
-        <script id="__NEXT_DATA__" type="application/json">
-        {"buildId":"build-TfctsWXpff2fKS","pageProps":{"event":{"id":"1"}}}
-        </script>
-        """
-        next_data_payload = {
-            "pageProps": {
-                "dehydratedState": {
-                    "queries": [
-                        {
-                            "state": {
-                                "data": {
-                                    "data": {
-                                        "results": [
-                                            {
-                                                "startTime": "2026-04-29T20:55:00.000Z",
-                                                "endTime": "2026-04-29T21:00:00.000Z",
-                                                "openPrice": 75820.0,
-                                                "closePrice": 75855.07855,
-                                                "outcome": "up",
-                                                "percentChange": 0.0462,
-                                            }
-                                        ]
-                                    }
-                                }
-                            }
-                        }
-                    ]
-                }
-            }
-        }
 
         with patch(
             "custom.btc_agent.market_lookup._fetch_vatic_price_to_beat_by_slug",
@@ -1355,11 +1404,8 @@ class TestBtcMarketLookup(unittest.TestCase):
             "custom.btc_agent.market_lookup._fetch_price_to_beat_by_slug",
             return_value=None,
         ), patch(
-            "custom.btc_agent.market_lookup._fetch_polymarket_page",
-            return_value=embedded_html,
-        ), patch(
-            "custom.btc_agent.market_lookup._fetch_next_data_payload_chain",
-            return_value=[("build-TfctsWXpff2fKS", next_data_payload)],
+            "custom.btc_agent.market_lookup._fetch_price_via_selenium",
+            return_value=75855.07855,
         ):
             hydrated_market = _hydrate_missing_threshold_from_page(
                 market,
@@ -1367,140 +1413,6 @@ class TestBtcMarketLookup(unittest.TestCase):
             )
 
         self.assertEqual(hydrated_market.settlement_threshold, 75855.07855)
-
-    def test_hydrate_missing_threshold_uses_prior_close_only_after_open_sources_fail(self):
-        market = BtcUpDownMarket(
-            event_id="1",
-            market_id="2",
-            up_token_id="up-token",
-            down_token_id="down-token",
-            title="Bitcoin Up or Down - April 29, 5:00PM-5:05PM ET",
-            question="Bitcoin Up or Down - April 29, 5:00PM-5:05PM ET",
-            slug="btc-updown-5m-1777496400",
-            start_ts=1777496400,
-            end_ts=1777496700,
-            settlement_threshold=None,
-        )
-        embedded_html = """
-        <script id="__NEXT_DATA__" type="application/json">
-        {"buildId":"build-TfctsWXpff2fKS","pageProps":{"event":{"id":"1"}}}
-        </script>
-        """
-        next_data_payload = {
-            "pageProps": {
-                "dehydratedState": {
-                    "queries": [
-                        {
-                            "state": {
-                                "data": {
-                                    "data": {
-                                        "results": [
-                                            {
-                                                "startTime": "2026-04-29T20:55:00.000Z",
-                                                "endTime": "2026-04-29T21:00:00.000Z",
-                                                "openPrice": 75820.0,
-                                                "closePrice": 75855.07855,
-                                                "outcome": "up",
-                                                "percentChange": 0.0462,
-                                            }
-                                        ]
-                                    }
-                                }
-                            }
-                        }
-                    ]
-                }
-            }
-        }
-
-        with patch(
-            "custom.btc_agent.market_lookup._fetch_vatic_price_to_beat_by_slug",
-            return_value=None,
-        ), patch(
-            "custom.btc_agent.market_lookup._fetch_price_to_beat_by_slug",
-            return_value=None,
-        ), patch(
-            "custom.btc_agent.market_lookup._fetch_polymarket_page",
-            return_value=embedded_html,
-        ), patch(
-            "custom.btc_agent.market_lookup._fetch_next_data_payload_chain",
-            return_value=[("build-TfctsWXpff2fKS", next_data_payload)],
-        ):
-            hydrated_market = _hydrate_missing_threshold_from_page(
-                market,
-                "btc-updown-5m-1777496400",
-            )
-
-        self.assertEqual(hydrated_market.settlement_threshold, 75855.07855)
-
-    def test_hydrate_missing_threshold_uses_later_next_data_page_for_prior_close(self):
-        market = BtcUpDownMarket(
-            event_id="1",
-            market_id="2",
-            up_token_id="up-token",
-            down_token_id="down-token",
-            title="Bitcoin Up or Down - April 29, 7:45PM-7:50PM ET",
-            question="Bitcoin Up or Down - April 29, 7:45PM-7:50PM ET",
-            slug="btc-updown-5m-1777503900",
-            start_ts=1777503900,
-            end_ts=1777504200,
-            settlement_threshold=None,
-        )
-        embedded_html = """
-        <script id="__NEXT_DATA__" type="application/json">
-        {"buildId":"build-TfctsWXpff2fKS","pageProps":{"event":{"id":"1"}}}
-        </script>
-        """
-        payload_one = {"pageProps": {"dehydratedState": {"queries": []}}}
-        payload_two = {
-            "pageProps": {
-                "dehydratedState": {
-                    "queries": [
-                        {
-                            "state": {
-                                "data": {
-                                    "data": {
-                                        "results": [
-                                            {
-                                                "startTime": "2026-04-29T23:00:00.000Z",
-                                                "endTime": "2026-04-29T23:05:00.000Z",
-                                                "openPrice": 75710.0,
-                                                "closePrice": 75827.61894026335,
-                                                "outcome": "up",
-                                                "percentChange": 0.155,
-                                            }
-                                        ]
-                                    }
-                                }
-                            }
-                        }
-                    ]
-                }
-            }
-        }
-
-        with patch(
-            "custom.btc_agent.market_lookup._fetch_vatic_price_to_beat_by_slug",
-            return_value=None,
-        ), patch(
-            "custom.btc_agent.market_lookup._fetch_price_to_beat_by_slug",
-            return_value=None,
-        ), patch(
-            "custom.btc_agent.market_lookup._fetch_polymarket_page",
-            return_value=embedded_html,
-        ), patch(
-            "custom.btc_agent.market_lookup._fetch_next_data_payload_chain",
-            return_value=[("build-TfctsWXpff2fKS", payload_one), ("build-TfctsWXpff2fKS", payload_two)],
-        ), patch(
-            "custom.btc_agent.market_lookup.os.getcwd",
-            return_value="/appl/agents",
-        ):
-            hydrated_market = _hydrate_missing_threshold_from_page(
-                market,
-                "btc-updown-5m-1777503900",
-            )
-
-        self.assertEqual(hydrated_market.settlement_threshold, 75827.61894026335)
 
     def test_hydrate_missing_threshold_prefers_vatic_price_for_btc_updown_markets(self):
         market = BtcUpDownMarket(
@@ -1520,15 +1432,31 @@ class TestBtcMarketLookup(unittest.TestCase):
             "custom.btc_agent.market_lookup._fetch_vatic_price_to_beat_by_slug",
             return_value=77761.01,
         ), patch(
-            "custom.btc_agent.market_lookup._fetch_polymarket_page",
-        ) as mock_fetch_page:
+            "custom.btc_agent.market_lookup._fetch_price_to_beat_by_slug",
+        ) as mock_fetch_api, patch(
+            "custom.btc_agent.market_lookup._fetch_price_via_selenium",
+        ) as mock_selenium:
             hydrated_market = _hydrate_missing_threshold_from_page(
                 market,
                 "btc-updown-5m-1777513800",
             )
 
         self.assertEqual(hydrated_market.settlement_threshold, 77761.01)
-        mock_fetch_page.assert_not_called()
+        mock_fetch_api.assert_not_called()
+        mock_selenium.assert_not_called()
+
+    def test_fetch_price_via_selenium_returns_none_when_dependencies_missing(self):
+        with patch("custom.btc_agent.market_lookup.webdriver", None), patch(
+            "custom.btc_agent.market_lookup.get_trading_config",
+            return_value=types.SimpleNamespace(debug=True),
+        ), patch("sys.stdout", new_callable=io.StringIO) as stdout:
+            threshold = _fetch_price_via_selenium("btc-updown-5m-1777513800")
+
+        self.assertIsNone(threshold)
+        self.assertIn(
+            "[DEBUG] Selenium unavailable for btc-updown-5m-1777513800",
+            stdout.getvalue(),
+        )
 
     def test_extract_threshold_from_price_to_beat_response_handles_nested_payload(self):
         threshold = _extract_threshold_from_price_to_beat_response(
@@ -1561,10 +1489,22 @@ class TestBtcMarketLookup(unittest.TestCase):
         with patch(
             "custom.btc_agent.market_lookup.http_get",
             return_value=mock_response,
+        ) as mock_http_get, patch(
+            "custom.btc_agent.market_lookup.time.time",
+            return_value=1777512000.123,
         ):
             threshold = _fetch_price_to_beat_by_slug("tesla-up-or-down")
 
         self.assertEqual(threshold, 77722.39)
+        mock_http_get.assert_called_once_with(
+            "https://polymarket.com/api/equity/price-to-beat/tesla-up-or-down",
+            params={"_ts": 1777512000123},
+            headers={
+                "cache-control": "no-cache",
+                "pragma": "no-cache",
+            },
+            timeout=10,
+        )
 
     def test_fetch_vatic_price_to_beat_by_slug_parses_price_response(self):
         mock_response = Mock(status_code=200)
@@ -1573,7 +1513,10 @@ class TestBtcMarketLookup(unittest.TestCase):
         with patch(
             "custom.btc_agent.market_lookup.http_get",
             return_value=mock_response,
-        ) as mock_http_get:
+        ) as mock_http_get, patch(
+            "custom.btc_agent.market_lookup.time.time",
+            return_value=1777512000.123,
+        ):
             threshold = _fetch_vatic_price_to_beat_by_slug("btc-updown-5m-1777513800")
 
         self.assertEqual(threshold, 77763.01)
@@ -1583,15 +1526,72 @@ class TestBtcMarketLookup(unittest.TestCase):
                 "asset": "btc",
                 "type": "5min",
                 "timestamp": "1777513800",
+                "_ts": 1777512000123,
+            },
+        )
+        self.assertEqual(
+            mock_http_get.call_args.kwargs["headers"],
+            {
+                "cache-control": "no-cache",
+                "pragma": "no-cache",
             },
         )
 
-    def test_fetch_price_to_beat_by_slug_skips_btc_updown_market_slugs(self):
-        with patch("custom.btc_agent.market_lookup.http_get") as mock_http_get:
+    def test_fetch_vatic_price_to_beat_by_slug_prints_debug_response(self):
+        mock_response = Mock(status_code=200)
+        mock_response.json.return_value = {"price": 77763.01}
+
+        with patch(
+            "custom.btc_agent.market_lookup.http_get",
+            return_value=mock_response,
+        ), patch(
+            "custom.btc_agent.market_lookup.get_trading_config",
+            return_value=types.SimpleNamespace(debug=True),
+        ), patch("sys.stdout", new_callable=io.StringIO) as stdout:
+            threshold = _fetch_vatic_price_to_beat_by_slug("btc-updown-5m-1777513800")
+
+        self.assertEqual(threshold, 77763.01)
+        self.assertIn('[DEBUG] Vatic API Response: {"price": 77763.01}', stdout.getvalue())
+
+    def test_fetch_price_to_beat_by_slug_tries_standard_endpoint_for_btc_updown_market_slugs(self):
+        mock_response = Mock(status_code=200)
+        mock_response.json.return_value = {"priceToBeat": "77722.39"}
+
+        with patch("custom.btc_agent.market_lookup.http_get", return_value=mock_response) as mock_http_get, patch(
+            "custom.btc_agent.market_lookup.time.time",
+            return_value=1777512000.123,
+        ):
             threshold = _fetch_price_to_beat_by_slug("btc-updown-5m-1776971400")
 
-        self.assertIsNone(threshold)
-        mock_http_get.assert_not_called()
+        self.assertEqual(threshold, 77722.39)
+        mock_http_get.assert_called_once_with(
+            "https://polymarket.com/api/equity/price-to-beat/btc-updown-5m-1776971400",
+            params={"_ts": 1777512000123},
+            headers={
+                "cache-control": "no-cache",
+                "pragma": "no-cache",
+            },
+            timeout=10,
+        )
+
+    def test_fetch_price_to_beat_by_slug_prints_debug_response(self):
+        mock_response = Mock(status_code=200)
+        mock_response.json.return_value = {"priceToBeat": "77722.39"}
+
+        with patch(
+            "custom.btc_agent.market_lookup.http_get",
+            return_value=mock_response,
+        ), patch(
+            "custom.btc_agent.market_lookup.get_trading_config",
+            return_value=types.SimpleNamespace(debug=True),
+        ), patch("sys.stdout", new_callable=io.StringIO) as stdout:
+            threshold = _fetch_price_to_beat_by_slug("btc-updown-5m-1776971400")
+
+        self.assertEqual(threshold, 77722.39)
+        self.assertIn(
+            '[DEBUG] Polymarket P2B API Response: {"priceToBeat": "77722.39"}',
+            stdout.getvalue(),
+        )
 
     def test_extract_threshold_from_page_html_parses_price_to_beat_label(self):
         html = """

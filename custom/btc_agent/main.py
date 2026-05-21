@@ -1914,19 +1914,39 @@ def _get_losing_active_orders(current_btc_price: float) -> list[ActivePaperOrder
     ]
 
 
-def resolve_price_to_beat_with_retries(market, retry_attempts: int = 5, retry_delay_seconds: int = 5):
+def resolve_price_to_beat_with_retries(market, retry_attempts: int = 12, retry_delay_seconds: int = 5):
     if has_valid_price_to_beat(market.settlement_threshold):
         return market
 
+    cfg = get_trading_config()
+    debug_enabled = bool(getattr(cfg, "debug", False))
+    log_path = _pending_period_log_path(market.slug)
+
     for attempt in range(1, retry_attempts + 1):
-        print(
-            "price_to_beat_retry: "
-            f"attempt {attempt}/{retry_attempts} for {market.slug} after {retry_delay_seconds}s"
-        )
+        msg = f"price_to_beat_retry: attempt {attempt}/{retry_attempts} for {market.slug} after {retry_delay_seconds}s"
+        print(msg)
+
+        if debug_enabled:
+            try:
+                with open(log_path, "a", encoding="utf-8") as log_file:
+                    log_file.write(f"[{datetime.now(timezone.utc).isoformat()}] {msg}\n")
+            except Exception:
+                pass
+
         time.sleep(retry_delay_seconds)
         refreshed_market = get_btc_updown_market_by_slug(market.slug)
         if refreshed_market is not None:
             market = refreshed_market
+
+        if debug_enabled:
+            debug_msg = f"[DEBUG] Retry {attempt} resulted in threshold: {market.settlement_threshold}"
+            print(debug_msg)
+            try:
+                with open(log_path, "a", encoding="utf-8") as log_file:
+                    log_file.write(f"[{datetime.now(timezone.utc).isoformat()}] {debug_msg}\n")
+            except Exception:
+                pass
+
         if has_valid_price_to_beat(market.settlement_threshold):
             return market
 

@@ -1305,6 +1305,51 @@ class TestBtcMain(unittest.TestCase):
         self.assertEqual(market.settlement_threshold, 77560.75)
         mock_get_by_slug.assert_called_once_with("btc-updown-5m-1777056000")
 
+    def test_resolve_price_to_beat_with_retries_defaults_to_twelve_attempts(self):
+        initial_market = SimpleNamespace(slug="btc-updown-5m-1777056000", settlement_threshold=None)
+
+        with patch(
+            "custom.btc_agent.main.get_trading_config",
+            return_value=SimpleNamespace(debug=False),
+        ), patch(
+            "custom.btc_agent.main.get_btc_updown_market_by_slug",
+            return_value=None,
+        ) as mock_get_by_slug, patch(
+            "custom.btc_agent.main.time.sleep",
+        ):
+            market = resolve_price_to_beat_with_retries(initial_market, retry_delay_seconds=0)
+
+        self.assertIs(market, initial_market)
+        self.assertEqual(mock_get_by_slug.call_count, 12)
+
+    def test_resolve_price_to_beat_with_retries_writes_debug_attempts_to_pending_period_log(self):
+        initial_market = SimpleNamespace(slug="btc-updown-5m-1777056000", settlement_threshold=None)
+        refreshed_market = SimpleNamespace(
+            slug="btc-updown-5m-1777056000",
+            settlement_threshold=77560.75,
+        )
+        log_path = "/tmp/completed_orders/pending_period_1777056000.txt"
+
+        with patch(
+            "custom.btc_agent.main.get_trading_config",
+            return_value=SimpleNamespace(debug=True),
+        ), patch(
+            "custom.btc_agent.main.get_btc_updown_market_by_slug",
+            return_value=refreshed_market,
+        ), patch(
+            "custom.btc_agent.main.time.sleep",
+        ), patch(
+            "custom.btc_agent.main.os.getcwd",
+            return_value="/tmp",
+        ):
+            market = resolve_price_to_beat_with_retries(initial_market, retry_attempts=1, retry_delay_seconds=0)
+
+        self.assertEqual(market.settlement_threshold, 77560.75)
+        with open(log_path, encoding="utf-8") as pending_log:
+            content = pending_log.read()
+        self.assertIn("price_to_beat_retry: attempt 1/1 for btc-updown-5m-1777056000 after 0s", content)
+        self.assertIn("[DEBUG] Retry 1 resulted in threshold: 77560.75", content)
+
     def test_resolve_price_to_beat_with_retries_skips_retries_when_debug_price_to_beat_enabled(self):
         initial_market = SimpleNamespace(slug="btc-updown-5m-1777056000", settlement_threshold=None)
         refreshed_market = SimpleNamespace(
