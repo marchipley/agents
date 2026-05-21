@@ -41,7 +41,6 @@ from .executor import (
     get_token_quote_snapshot,
     maybe_execute_trade,
     refresh_live_order_fill_status,
-    retry_unfilled_live_order,
 )
 from .paper_state import (
     ActivePaperOrder,
@@ -1477,36 +1476,66 @@ def refresh_active_live_order_fills(active_orders):
 
 
 def maintain_unfilled_live_orders(active_orders, market):
-    updated_orders = []
+    from .executor import cancel_live_order
+
+    newly_filled_orders = []
+    cancel_timeout = float(
+        os.getenv(
+            "CANCEL_UNFILLED_TIMER",
+            str(getattr(config_module, "CANCEL_UNFILLED_TIMER", 10.0)),
+        )
+    )
+
     for order in active_orders or []:
         try:
             if refresh_live_order_fill_status(order):
-                updated_orders.append(order)
+                newly_filled_orders.append(order)
                 continue
+
             if getattr(order, "actual_fill_price", None) is not None:
                 continue
-            if int(getattr(order, "live_reprice_attempts", 0) or 0) >= 1:
+
+            api_state = str(getattr(order, "api_state", "") or "").upper()
+            api_order_state = str(getattr(order, "api_order_state", "") or "").upper()
+            if api_state in {"CANCELED", "CANCELLED", "ORDER_STATE_CANCELED"} or api_order_state in {
+                "CANCELED",
+                "CANCELLED",
+                "ORDER_STATE_CANCELED",
+            }:
                 continue
-            result = retry_unfilled_live_order(order, market)
-            if result is None:
-                continue
-            order.live_reprice_attempts = int(getattr(order, "live_reprice_attempts", 0) or 0) + 1
-            order.live_order_id = getattr(result, "live_order_id", None) or getattr(order, "live_order_id", None)
-            order.entry_price = getattr(result, "price", order.entry_price) or order.entry_price
-            order.quoted_price_at_entry = getattr(result, "quoted_price_at_entry", None)
-            order.order_latency_ms = getattr(result, "order_latency_ms", None)
-            order.book_depth_at_fill = getattr(result, "book_depth_at_fill", None)
-            order.shares_requested = getattr(result, "shares_requested", None)
-            order.api_order_state = getattr(result, "api_order_state", None) or getattr(order, "api_order_state", None)
-            order.api_state = getattr(result, "api_order_state", None) or getattr(order, "api_state", None)
-            if getattr(result, "actual_fill_price", None) is not None:
-                order.actual_fill_price = result.actual_fill_price
-                order.filled = True
-                order.realized_slippage_bps = getattr(result, "realized_slippage_bps", None)
-                updated_orders.append(order)
+
+            placed_at = getattr(order, "placed_at", None)
+            if placed_at:
+                elapsed = (datetime.now(timezone.utc) - placed_at).total_seconds()
+                if elapsed >= cancel_timeout:
+                    order_id = getattr(order, "live_order_id", None)
+                    if order_id:
+                        canceled = cancel_live_order(order_id)
+                        if canceled:
+                            msg = (
+                                f"Unfilled order {order_id} was placed but cancelled because it was "
+                                f"not filled within {cancel_timeout} seconds."
+                            )
+
+                            print(f"[{datetime.now(timezone.utc).isoformat()}] CANCELED: {msg}")
+
+                            order.api_order_state = "CANCELED"
+                            order.api_state = "CANCELED"
+                            order.filled = False
+
+                            log_path = _completed_order_log_path_for_trade(
+                                order.market_slug,
+                                getattr(order, "trade_number_in_period", None),
+                            )
+                            with open(log_path, "a", encoding="utf-8") as log_file:
+                                log_file.write(f"\nobserved_at={datetime.now(timezone.utc).isoformat()}\n")
+                                log_file.write("phase=LIVE_ORDER_CANCELED_TIMEOUT\n")
+                                log_file.write(f"reason={msg}\n\n")
+
         except Exception:
             continue
-    return updated_orders
+
+    return newly_filled_orders
 
 
 def finalize_current_period_logs_on_exit() -> None:

@@ -180,7 +180,7 @@ SLIPPAGE_COOLDOWN_SECONDS = 300
 
 # The total number of completed losing trades allowed in a single run before the
 # bot stops. This is a repo-visible non-secret runtime cap.
-MAX_LOSSES_PER_RUN = 5
+MAX_LOSSES_PER_RUN = 3
 
 # Number of times to poll Polymarket order status right after live submission
 # before deciding the order is still unfilled.
@@ -199,7 +199,7 @@ LIVE_ORDER_STATUS_POLL_INTERVAL_SECONDS = 0.75
 PERIOD_ANALYSIS_INTERVAL_SECONDS = 30
 
 # Enabling tis will output additional debug info in the output
-BTC_AGENT_DEBUG=True
+BTC_AGENT_DEBUG=False
 
 # Disabling this will disable warmup if BTC_AGENT_DEBUG is enabled
 BTC_AGENT_DEBUG_WARMUP=False
@@ -218,8 +218,9 @@ LLM_CONNECTION_DEBUG=False
 LLM_SHOW_DETAIL=False
 
 BTC_AGENT_LOOP_INTERVAL=5
-USE_PAPER_TRADES=True
+USE_PAPER_TRADES=False
 BTC_AGENT_MAX_PRICE=2
+CANCEL_UNFILLED_TIMER=10
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 load_dotenv(os.path.join(REPO_ROOT, ".env"))

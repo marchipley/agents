@@ -5,6 +5,17 @@ from typing import Any, Optional
 import requests
 
 
+_GLOBAL_SESSION = None
+
+
+def _get_session() -> requests.Session:
+    global _GLOBAL_SESSION
+    if _GLOBAL_SESSION is None:
+        _GLOBAL_SESSION = requests.Session()
+        _GLOBAL_SESSION.trust_env = False
+    return _GLOBAL_SESSION
+
+
 def is_proxy_enabled() -> bool:
     raw_value = os.getenv("USE_PROXY")
     if raw_value is None:
@@ -125,7 +136,8 @@ def _request_with_direct_timeout_fallback(
     proxies: Optional[dict],
     request_kwargs: dict,
 ):
-    request_callable = requests.get if method == "GET" else requests.post
+    session = _get_session()
+    request_callable = session.get if method == "GET" else session.post
     try:
         return request_callable(url, proxies=proxies, **request_kwargs)
     except (requests.ConnectTimeout, requests.ReadTimeout) as exc:
@@ -135,26 +147,14 @@ def _request_with_direct_timeout_fallback(
             raise
         if not _should_retry_direct_without_proxy(url):
             raise
-        session = requests.Session()
-        session.trust_env = False
-        try:
-            if method == "GET":
-                return session.get(url, proxies=None, **request_kwargs)
-            return session.post(url, proxies=None, **request_kwargs)
-        finally:
-            session.close()
+        return request_callable(url, proxies=None, **request_kwargs)
 
 
 def http_get(url: str, **kwargs: Any) -> requests.Response:
     request_kwargs = dict(kwargs)
     proxies = request_kwargs.pop("proxies", None)
     if not is_proxy_enabled():
-        session = requests.Session()
-        session.trust_env = False
-        try:
-            return session.get(url, proxies=proxies, **request_kwargs)
-        finally:
-            session.close()
+        return _get_session().get(url, proxies=proxies, **request_kwargs)
     if proxies is None:
         proxy_url = get_proxy_url_for_requests("https" if url.startswith("https://") else "http")
         if proxy_url:
@@ -172,12 +172,7 @@ def http_post(url: str, **kwargs: Any) -> requests.Response:
     request_kwargs = dict(kwargs)
     proxies = request_kwargs.pop("proxies", None)
     if not is_proxy_enabled():
-        session = requests.Session()
-        session.trust_env = False
-        try:
-            return session.post(url, proxies=proxies, **request_kwargs)
-        finally:
-            session.close()
+        return _get_session().post(url, proxies=proxies, **request_kwargs)
     if proxies is None:
         proxy_url = get_proxy_url_for_requests("https" if url.startswith("https://") else "http")
         if proxy_url:

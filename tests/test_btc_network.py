@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch
 
 import requests
 
+import custom.btc_agent.network as network
 from custom.btc_agent.network import (
     check_internet_connectivity,
     describe_proxy_configuration,
@@ -17,6 +18,12 @@ from custom.btc_agent.network import (
 
 
 class TestBtcNetwork(unittest.TestCase):
+    def setUp(self):
+        network._GLOBAL_SESSION = None
+
+    def tearDown(self):
+        network._GLOBAL_SESSION = None
+
     def test_proxy_enabled_by_default(self):
         with patch.dict(os.environ, {}, clear=True):
             self.assertTrue(is_proxy_enabled())
@@ -83,7 +90,27 @@ class TestBtcNetwork(unittest.TestCase):
         self.assertIs(response, fake_response)
         self.assertFalse(fake_session.trust_env)
         fake_session.post.assert_called_once()
-        fake_session.close.assert_called_once()
+        fake_session.close.assert_not_called()
+
+    def test_http_get_reuses_global_session_for_keep_alive(self):
+        fake_session = MagicMock()
+        fake_response_1 = object()
+        fake_response_2 = object()
+        fake_session.get.side_effect = [fake_response_1, fake_response_2]
+
+        with patch.dict(os.environ, {"USE_PROXY": "false"}, clear=False), patch(
+            "custom.btc_agent.network.requests.Session",
+            return_value=fake_session,
+        ) as session_cls:
+            response_1 = http_get("https://example.com/a", timeout=5)
+            response_2 = http_get("https://example.com/b", timeout=5)
+
+        self.assertIs(response_1, fake_response_1)
+        self.assertIs(response_2, fake_response_2)
+        session_cls.assert_called_once()
+        self.assertFalse(fake_session.trust_env)
+        self.assertEqual(fake_session.get.call_count, 2)
+        fake_session.close.assert_not_called()
 
     def test_check_internet_connectivity_reports_success(self):
         fake_session = MagicMock()
@@ -121,7 +148,10 @@ class TestBtcNetwork(unittest.TestCase):
     def test_http_get_retries_direct_without_proxy_on_polymarket_timeout(self):
         fake_session = MagicMock()
         fake_response = MagicMock()
-        fake_session.get.return_value = fake_response
+        fake_session.get.side_effect = [
+            requests.ConnectTimeout("proxy timeout"),
+            fake_response,
+        ]
 
         with patch.dict(
             os.environ,
@@ -130,9 +160,6 @@ class TestBtcNetwork(unittest.TestCase):
                 "ALL_PROXY": "socks5h://10.64.0.1:1080",
             },
             clear=False,
-        ), patch(
-            "custom.btc_agent.network.requests.get",
-            side_effect=requests.ConnectTimeout("proxy timeout"),
         ), patch(
             "custom.btc_agent.network.requests.Session",
             return_value=fake_session,
@@ -141,14 +168,24 @@ class TestBtcNetwork(unittest.TestCase):
 
         self.assertIs(response, fake_response)
         self.assertFalse(fake_session.trust_env)
-        fake_session.get.assert_called_once()
-        self.assertIsNone(fake_session.get.call_args.kwargs["proxies"])
-        fake_session.close.assert_called_once()
+        self.assertEqual(fake_session.get.call_count, 2)
+        self.assertEqual(
+            fake_session.get.call_args_list[0].kwargs["proxies"],
+            {
+                "http": "socks5h://10.64.0.1:1080",
+                "https": "socks5h://10.64.0.1:1080",
+            },
+        )
+        self.assertIsNone(fake_session.get.call_args_list[1].kwargs["proxies"])
+        fake_session.close.assert_not_called()
 
     def test_http_post_retries_direct_without_proxy_on_polymarket_timeout(self):
         fake_session = MagicMock()
         fake_response = MagicMock()
-        fake_session.post.return_value = fake_response
+        fake_session.post.side_effect = [
+            requests.ReadTimeout("proxy timeout"),
+            fake_response,
+        ]
 
         with patch.dict(
             os.environ,
@@ -158,9 +195,6 @@ class TestBtcNetwork(unittest.TestCase):
             },
             clear=False,
         ), patch(
-            "custom.btc_agent.network.requests.post",
-            side_effect=requests.ReadTimeout("proxy timeout"),
-        ), patch(
             "custom.btc_agent.network.requests.Session",
             return_value=fake_session,
         ):
@@ -168,9 +202,16 @@ class TestBtcNetwork(unittest.TestCase):
 
         self.assertIs(response, fake_response)
         self.assertFalse(fake_session.trust_env)
-        fake_session.post.assert_called_once()
-        self.assertIsNone(fake_session.post.call_args.kwargs["proxies"])
-        fake_session.close.assert_called_once()
+        self.assertEqual(fake_session.post.call_count, 2)
+        self.assertEqual(
+            fake_session.post.call_args_list[0].kwargs["proxies"],
+            {
+                "http": "socks5h://10.64.0.1:1080",
+                "https": "socks5h://10.64.0.1:1080",
+            },
+        )
+        self.assertIsNone(fake_session.post.call_args_list[1].kwargs["proxies"])
+        fake_session.close.assert_not_called()
 
     def test_http_get_does_not_retry_direct_for_non_polymarket_timeout(self):
         with patch.dict(
@@ -180,9 +221,10 @@ class TestBtcNetwork(unittest.TestCase):
                 "ALL_PROXY": "socks5h://10.64.0.1:1080",
             },
             clear=False,
-        ), patch(
-            "custom.btc_agent.network.requests.get",
-            side_effect=requests.ConnectTimeout("proxy timeout"),
+        ), patch.object(
+            network,
+            "_GLOBAL_SESSION",
+            MagicMock(get=MagicMock(side_effect=requests.ConnectTimeout("proxy timeout"))),
         ):
             with self.assertRaises(requests.ConnectTimeout):
                 http_get("https://example.com/data", timeout=10)
