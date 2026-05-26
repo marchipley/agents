@@ -342,6 +342,8 @@ class TestBtcLlmDecision(unittest.TestCase):
         self.assertIn("Gamma Discrepancy Rule", prompt)
         self.assertIn("CRITICAL VELOCITY RULE", prompt)
         self.assertIn("VOLATILITY RATIO RULE", prompt)
+        self.assertIn("LATE WINDOW VOLATILITY PENALTY", prompt)
+        self.assertIn("EXHAUSTION REVERSION RULE", prompt)
         self.assertIn("entry quote is < 0.85", prompt)
         self.assertIn("Alpha Override Rule: If confidence is > 0.75", prompt)
         self.assertIn("ITM AGGRESSION RULE: If the trade is ITM by more than $15.00", prompt)
@@ -366,6 +368,8 @@ class TestBtcLlmDecision(unittest.TestCase):
         self.assertIn("trust the price action over the oscillator", prompt)
         self.assertIn("For OTM trades, you must have an execution edge of at least 0.05", prompt)
         self.assertIn("VELOCITY OVERRIDE: If delta_prev_tick is moving against your chosen side", prompt)
+        self.assertIn("LATE WINDOW VOLATILITY PENALTY", prompt)
+        self.assertIn("EXHAUSTION REVERSION RULE", prompt)
 
     def test_gemini_503_returns_no_trade(self):
         error_response = requests.Response()
