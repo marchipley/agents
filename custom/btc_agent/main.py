@@ -2223,6 +2223,19 @@ def print_market_context(
     print(f"  period_open_price_to_beat = {_fmt(market.settlement_threshold)}")
     print(f"  up_market_probability = {_fmt(getattr(market, 'up_market_probability', None))}")
     print(f"  down_market_probability = {_fmt(getattr(market, 'down_market_probability', None))}")
+    
+    # NEW: Display the execution edge components for the UP token
+    if up_snapshot is not None:
+        print(f"  up_buy_quote          = {_fmt(getattr(up_snapshot, 'buy_quote', None))}")
+        print(f"  up_best_ask           = {_fmt(getattr(up_snapshot, 'best_ask', None))}")
+        print(f"  up_reference_price    = {_fmt(getattr(up_snapshot, 'reference_price', None))}")
+        
+    # NEW: Display the execution edge components for the DOWN token
+    if down_snapshot is not None:
+        print(f"  down_buy_quote        = {_fmt(getattr(down_snapshot, 'buy_quote', None))}")
+        print(f"  down_best_ask         = {_fmt(getattr(down_snapshot, 'best_ask', None))}")
+        print(f"  down_reference_price  = {_fmt(getattr(down_snapshot, 'reference_price', None))}")
+
     realized_pnl, current_drawdown = get_realized_pnl_snapshot()
     print(f"  realized_pnl          = {_fmt(realized_pnl)}")
     print(f"  current_drawdown      = {_fmt(current_drawdown)}")
