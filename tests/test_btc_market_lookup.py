@@ -18,6 +18,7 @@ from custom.btc_agent.market_lookup import (
     build_price_to_beat_debug_reports,
     fetch_live_market_probabilities_from_clob_ws,
     fetch_btc_resolution_price_for_slug,
+    find_current_btc_updown_market,
     get_btc_updown_market_by_slug,
     _extract_current_period_open_from_next_data,
     _extract_embedded_next_data_payload,
@@ -45,6 +46,96 @@ from custom.btc_agent.market_lookup import (
 
 
 class TestBtcMarketLookup(unittest.TestCase):
+    def test_hydrate_missing_threshold_prefers_rtds_before_vatic(self):
+        market = BtcUpDownMarket(
+            event_id="1",
+            market_id="2",
+            up_token_id="up-token",
+            down_token_id="down-token",
+            title="Bitcoin Up or Down",
+            question="Bitcoin Up or Down",
+            slug="btc-updown-5m-1777513800",
+            start_ts=1777513800,
+            end_ts=1777514100,
+            settlement_threshold=None,
+        )
+
+        with patch(
+            "custom.btc_agent.indicators._ensure_rtds_thread",
+        ), patch(
+            "custom.btc_agent.indicators.get_cached_rtds_boundary_price",
+            return_value=77763.01,
+        ), patch(
+            "custom.btc_agent.market_lookup._fetch_vatic_price_to_beat_by_slug",
+        ) as mock_vatic:
+            hydrated = _hydrate_missing_threshold_from_page(market, market.slug)
+
+        self.assertEqual(hydrated.settlement_threshold, 77763.01)
+        mock_vatic.assert_not_called()
+
+    def test_find_current_market_starts_rtds_and_fetches_current_slug(self):
+        expected_market = BtcUpDownMarket(
+            event_id="1",
+            market_id="2",
+            up_token_id="up-token",
+            down_token_id="down-token",
+            title="Bitcoin Up or Down",
+            question="Bitcoin Up or Down",
+            slug="btc-updown-5m-1777513800",
+            start_ts=1777513800,
+            end_ts=1777514100,
+            settlement_threshold=77763.01,
+        )
+
+        with patch(
+            "custom.btc_agent.market_lookup.time.time",
+            return_value=1777513820,
+        ), patch(
+            "custom.btc_agent.market_lookup.get_trading_config",
+            return_value=types.SimpleNamespace(debug=True, market_slug_override=None),
+        ), patch(
+            "custom.btc_agent.indicators._ensure_rtds_thread",
+        ) as ensure_thread, patch(
+            "custom.btc_agent.market_lookup.get_btc_updown_market_by_slug",
+            return_value=expected_market,
+        ) as mock_get_market:
+            market = find_current_btc_updown_market()
+
+        self.assertIs(market, expected_market)
+        ensure_thread.assert_called_once()
+        mock_get_market.assert_called_once_with("btc-updown-5m-1777513800")
+
+    def test_find_current_market_fetches_current_slug_without_startup_gate(self):
+        expected_market = BtcUpDownMarket(
+            event_id="1",
+            market_id="2",
+            up_token_id="up-token",
+            down_token_id="down-token",
+            title="Bitcoin Up or Down",
+            question="Bitcoin Up or Down",
+            slug="btc-updown-5m-1777514100",
+            start_ts=1777514100,
+            end_ts=1777514400,
+            settlement_threshold=77763.01,
+        )
+
+        with patch(
+            "custom.btc_agent.market_lookup.time.time",
+            return_value=1777514102,
+        ), patch(
+            "custom.btc_agent.market_lookup.get_trading_config",
+            return_value=types.SimpleNamespace(debug=False, market_slug_override=None),
+        ), patch(
+            "custom.btc_agent.indicators._ensure_rtds_thread",
+        ), patch(
+            "custom.btc_agent.market_lookup.get_btc_updown_market_by_slug",
+            return_value=expected_market,
+        ) as mock_get_market:
+            market = find_current_btc_updown_market()
+
+        self.assertIs(market, expected_market)
+        mock_get_market.assert_called_once_with("btc-updown-5m-1777514100")
+
     def test_parse_live_market_resolution_price_message_reads_final_price(self):
         message = json.dumps(
             {

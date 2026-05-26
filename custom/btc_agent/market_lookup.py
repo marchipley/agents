@@ -1408,6 +1408,24 @@ def _hydrate_missing_threshold_from_page(market: Optional[BtcUpDownMarket], slug
     if market is None:
         return market
 
+    if slug.startswith("btc-updown-5m-"):
+        from .indicators import _ensure_rtds_thread, get_cached_rtds_boundary_price
+
+        _ensure_rtds_thread()
+        try:
+            slug_match = re.search(r"btc-updown-5m-(\d+)$", slug)
+            if slug_match:
+                target_ts_ms = int(slug_match.group(1)) * 1000
+                rtds_threshold = get_cached_rtds_boundary_price(target_ts_ms, timeout=3.0)
+                if rtds_threshold is not None:
+                    if get_trading_config().debug:
+                        print(f"[DEBUG] Instant RTDS boundary match for {slug}: {rtds_threshold}")
+                    market.settlement_threshold = rtds_threshold
+                    return market
+        except Exception as exc:
+            if get_trading_config().debug:
+                print(f"[DEBUG] RTDS WS API Exception: {exc}")
+
     try:
         vatic_threshold = _fetch_vatic_price_to_beat_by_slug(slug)
     except Exception as exc:
@@ -1569,25 +1587,24 @@ def get_btc_updown_market_by_slug(slug: str) -> Optional[BtcUpDownMarket]:
     return _cache_settlement_threshold(market)
 
 def find_current_btc_updown_market() -> Optional[BtcUpDownMarket]:
-    """
-    1) If BTC_AGENT_MARKET_SLUG is set, try that first (debugging / backtesting).
-    2) Otherwise, compute the slug for the current 5-minute window.
-    3) If override fails, fall back to dynamic slug.
-    """
+    from .indicators import _ensure_rtds_thread
+
+    _ensure_rtds_thread()
+
     trading_cfg = get_trading_config()
     override_slug = trading_cfg.market_slug_override or os.getenv("BTC_AGENT_MARKET_SLUG")
 
-    # 1. Try override slug if provided
     if override_slug:
         try:
             market = get_btc_updown_market_by_slug(override_slug)
             if market:
                 return market
         except requests.HTTPError:
-            pass  # fall through to dynamic
+            pass
 
-    # 2. Use dynamic current window slug
-    slug = _current_btc_5m_slug()
+    now_ts = int(time.time())
+    window_start = now_ts - (now_ts % 300)
+    slug = f"btc-updown-5m-{window_start}"
     try:
         market = get_btc_updown_market_by_slug(slug)
         if market:

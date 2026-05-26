@@ -14,6 +14,10 @@ class TestBtcIndicators(unittest.TestCase):
         indicators._LAST_SUCCESSFUL_PROVIDER_INDEX = 0
         indicators._PRICE_HISTORY_BACKFILLED = False
         indicators._LIVE_PRICE_SAMPLES_RECORDED = 0
+        indicators._RTDS_THREAD = None
+        indicators._RTDS_BOUNDARY_CACHE.clear()
+        indicators._LATEST_RTDS_PRICE = None
+        indicators._LATEST_RTDS_TIME = None
 
     @staticmethod
     def _recorded_price_return(price: float):
@@ -41,7 +45,7 @@ class TestBtcIndicators(unittest.TestCase):
 
         self.assertEqual(price, 75123.0)
         self.assertEqual(indicators.get_latest_cached_price(), 75123.0)
-        self.assertEqual(indicators._LAST_SUCCESSFUL_PROVIDER_INDEX, 2)
+        self.assertEqual(indicators._LAST_SUCCESSFUL_PROVIDER_INDEX, 3)
 
     def test_fetch_btc_spot_price_prefers_poly_reference_provider(self):
         with patch(
@@ -58,7 +62,7 @@ class TestBtcIndicators(unittest.TestCase):
 
         self.assertAlmostEqual(price, 80382.12345, places=5)
         self.assertAlmostEqual(indicators.get_latest_cached_price(), 80382.12345, places=5)
-        self.assertEqual(indicators._LAST_SUCCESSFUL_PROVIDER_INDEX, 0)
+        self.assertEqual(indicators._LAST_SUCCESSFUL_PROVIDER_INDEX, 1)
 
     def test_fetch_btc_spot_price_uses_cached_value_when_all_providers_fail(self):
         indicators._record_price_sample(75000.0)
@@ -147,63 +151,84 @@ class TestBtcIndicators(unittest.TestCase):
 
         self.assertEqual(price, 75927.01)
 
-    def test_fetch_spot_price_from_polymarket_rtds_prefers_live_update_over_snapshot(self):
-        fake_socket = MagicMock()
-        fake_socket.recv.side_effect = [
-            json.dumps(
-                {
-                    "topic": "crypto_prices",
-                    "type": "subscribe",
-                    "payload": {
-                        "symbol": "btcusdt",
-                        "data": [{"timestamp": 1_777_000_000_000, "value": 75920.0}],
-                    },
-                }
-            ),
-            json.dumps(
-                {
-                    "topic": "crypto_prices",
-                    "type": "update",
-                    "payload": {"symbol": "btcusdt", "timestamp": 1_777_000_001_000, "value": 75927.0},
-                }
-            ),
-        ]
+    def test_fetch_spot_price_from_polymarket_rtds_returns_fresh_background_price(self):
+        indicators._LATEST_RTDS_PRICE = 75927.0
+        indicators._LATEST_RTDS_TIME = datetime.fromtimestamp(1_777_000_001, tz=timezone.utc)
 
-        with patch(
-            "custom.btc_agent.indicators._create_polymarket_rtds_connection",
-            return_value=fake_socket,
-        ):
+        with patch("custom.btc_agent.indicators._ensure_rtds_thread") as ensure_thread, patch(
+            "custom.btc_agent.indicators.datetime",
+        ) as mock_datetime:
+            mock_datetime.now.return_value = datetime.fromtimestamp(1_777_000_002, tz=timezone.utc)
+            mock_datetime.fromtimestamp.side_effect = datetime.fromtimestamp
+            mock_datetime.timezone = timezone
             price = indicators._fetch_spot_price_from_polymarket_rtds()
 
         self.assertEqual(price, 75927.0)
+        ensure_thread.assert_called_once()
 
-    def test_fetch_spot_price_from_polymarket_rtds_rejects_stale_snapshot(self):
-        fake_socket = MagicMock()
-        fake_socket.recv.side_effect = [
-            json.dumps(
-                {
-                    "topic": "crypto_prices",
-                    "type": "subscribe",
-                    "payload": {
-                        "symbol": "btcusdt",
-                        "data": [{"timestamp": 1_700_000_000_000, "value": 75920.0}],
-                    },
-                }
-            ),
-            TimeoutError("no fresh update"),
-        ]
+    def test_fetch_spot_price_from_polymarket_rtds_rejects_stale_background_price(self):
+        indicators._LATEST_RTDS_PRICE = 75927.0
+        indicators._LATEST_RTDS_TIME = datetime.fromtimestamp(1_777_000_001, tz=timezone.utc)
 
-        with patch(
-            "custom.btc_agent.indicators._create_polymarket_rtds_connection",
-            return_value=fake_socket,
-        ), patch(
+        with patch("custom.btc_agent.indicators._ensure_rtds_thread"), patch(
             "custom.btc_agent.indicators.datetime",
         ) as mock_datetime:
-            mock_datetime.now.return_value = datetime.fromtimestamp(1_777_000_100, tz=timezone.utc)
+            mock_datetime.now.return_value = datetime.fromtimestamp(1_777_000_010, tz=timezone.utc)
             mock_datetime.fromtimestamp.side_effect = datetime.fromtimestamp
             mock_datetime.timezone = timezone
             with self.assertRaises(requests.RequestException):
                 indicators._fetch_spot_price_from_polymarket_rtds()
+
+    def test_rtds_ws_loop_records_updates_and_boundary_ticks(self):
+        fake_socket = MagicMock()
+        fake_socket.recv.side_effect = [
+            json.dumps(
+                {
+                    "topic": "crypto_prices_chainlink",
+                    "type": "subscribe",
+                    "payload": {
+                        "symbol": "btc/usd",
+                        "data": [
+                            {"timestamp": 1_777_000_200_000, "value": 75920.0},
+                            {"timestamp": 1_777_000_001_000, "value": 75927.0},
+                        ],
+                    },
+                }
+            ),
+            RuntimeError("stop loop"),
+        ]
+
+        with patch(
+            "custom.btc_agent.indicators._create_polymarket_rtds_connection",
+            return_value=fake_socket,
+        ), patch("custom.btc_agent.indicators.time.sleep", side_effect=RuntimeError("stop test")):
+            with self.assertRaises(RuntimeError):
+                indicators._rtds_ws_loop()
+
+        self.assertEqual(indicators._LATEST_RTDS_PRICE, 75927.0)
+        self.assertEqual(indicators._RTDS_BOUNDARY_CACHE[1_777_000_200_000], 75920.0)
+        fake_socket.send.assert_called_once_with(
+            json.dumps(
+                {
+                    "action": "subscribe",
+                    "subscriptions": [
+                        {
+                            "topic": "crypto_prices_chainlink",
+                            "type": "*",
+                            "filters": json.dumps({"symbol": "btc/usd"}),
+                        }
+                    ],
+                }
+            )
+        )
+
+    def test_get_cached_rtds_boundary_price_returns_cached_tick(self):
+        indicators._RTDS_BOUNDARY_CACHE[1_777_000_000_000] = 75920.0
+
+        self.assertEqual(
+            indicators.get_cached_rtds_boundary_price(1_777_000_000_000, timeout=0.1),
+            75920.0,
+        )
 
     def test_record_price_sample_skips_near_duplicate_same_price_samples(self):
         sample_time = datetime.fromtimestamp(1_777_000_000, tz=timezone.utc)
