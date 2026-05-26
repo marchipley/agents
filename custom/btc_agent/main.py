@@ -1479,6 +1479,13 @@ def maintain_unfilled_live_orders(active_orders, market):
     from .executor import cancel_live_order
 
     newly_filled_orders = []
+    filled_states = {
+        "FILLED",
+        "MATCHED",
+        "ORDER_STATE_FILLED",
+        "ORDER_STATE_MATCHED",
+        "FILLED_BY_TRADES",
+    }
     cancel_timeout = float(
         os.getenv(
             "CANCEL_UNFILLED_TIMER",
@@ -1497,6 +1504,8 @@ def maintain_unfilled_live_orders(active_orders, market):
 
             api_state = str(getattr(order, "api_state", "") or "").upper()
             api_order_state = str(getattr(order, "api_order_state", "") or "").upper()
+            if getattr(order, "filled", False) or api_state in filled_states or api_order_state in filled_states:
+                continue
             if api_state in {"CANCELED", "CANCELLED", "ORDER_STATE_CANCELED"} or api_order_state in {
                 "CANCELED",
                 "CANCELLED",
@@ -1510,6 +1519,24 @@ def maintain_unfilled_live_orders(active_orders, market):
                 if elapsed >= cancel_timeout:
                     order_id = getattr(order, "live_order_id", None)
                     if order_id:
+                        try:
+                            if refresh_live_order_fill_status(order):
+                                newly_filled_orders.append(order)
+                                continue
+                        except Exception:
+                            # Do not cancel when the final status check fails; stale local
+                            # state is riskier than leaving a resting order for the next tick.
+                            continue
+
+                        api_state = str(getattr(order, "api_state", "") or "").upper()
+                        api_order_state = str(getattr(order, "api_order_state", "") or "").upper()
+                        if (
+                            getattr(order, "filled", False)
+                            or api_state in filled_states
+                            or api_order_state in filled_states
+                        ):
+                            continue
+
                         canceled = cancel_live_order(order_id)
                         if canceled:
                             msg = (

@@ -171,6 +171,59 @@ class TestBtcMain(unittest.TestCase):
             content,
         )
 
+    def test_maintain_unfilled_live_orders_final_status_check_blocks_cancel(self):
+        order = ActivePaperOrder(
+            market_slug="btc-updown-5m-1779999903",
+            market_title="Bitcoin Up or Down",
+            side="UP",
+            shares=5.0,
+            entry_price=0.67,
+            token_id="up-token",
+            target_btc_price=80000.0,
+            entry_btc_price=80010.0,
+            live_order_id="order-race-filled",
+            placed_at=datetime.now(timezone.utc) - timedelta(seconds=30),
+            filled=False,
+            actual_fill_price=None,
+        )
+
+        with patch.dict(os.environ, {"CANCEL_UNFILLED_TIMER": "10"}), patch(
+            "custom.btc_agent.main.refresh_live_order_fill_status",
+            side_effect=[False, True],
+        ) as refresh_status, patch("custom.btc_agent.executor.cancel_live_order") as cancel_order:
+            result = maintain_unfilled_live_orders([order], SimpleNamespace())
+
+        self.assertEqual(result, [order])
+        self.assertEqual(refresh_status.call_count, 2)
+        cancel_order.assert_not_called()
+
+    def test_maintain_unfilled_live_orders_skips_matched_state(self):
+        order = ActivePaperOrder(
+            market_slug="btc-updown-5m-1779999904",
+            market_title="Bitcoin Up or Down",
+            side="UP",
+            shares=5.0,
+            entry_price=0.67,
+            token_id="up-token",
+            target_btc_price=80000.0,
+            entry_btc_price=80010.0,
+            live_order_id="order-matched",
+            placed_at=datetime.now(timezone.utc) - timedelta(seconds=30),
+            filled=False,
+            actual_fill_price=None,
+            api_order_state="MATCHED",
+            api_state="MATCHED",
+        )
+
+        with patch.dict(os.environ, {"CANCEL_UNFILLED_TIMER": "10"}), patch(
+            "custom.btc_agent.main.refresh_live_order_fill_status",
+            return_value=False,
+        ), patch("custom.btc_agent.executor.cancel_live_order") as cancel_order:
+            result = maintain_unfilled_live_orders([order], SimpleNamespace())
+
+        self.assertEqual(result, [])
+        cancel_order.assert_not_called()
+
     def test_maintain_unfilled_live_orders_skips_already_canceled_order(self):
         order = ActivePaperOrder(
             market_slug="btc-updown-5m-1779999902",
