@@ -32,6 +32,7 @@ from custom.btc_agent.executor import (
     get_token_quote_snapshot,
     get_submission_limit_price,
     get_submission_limit_label,
+    maybe_execute_trade,
     retry_unfilled_live_order,
     TokenQuoteSnapshot,
 )
@@ -189,6 +190,72 @@ class TestBtcExecutor(unittest.TestCase):
         self.assertEqual(result.order_latency_ms, 0)
         self.assertEqual(result.book_depth_at_fill, 12.5)
         self.assertEqual(result.shares_requested, result.size)
+
+    def test_maybe_execute_trade_blocks_up_on_last_second_drop(self):
+        decision = types.SimpleNamespace(side="UP", confidence=0.8)
+        features = types.SimpleNamespace(price_usd=80000.0)
+        market = types.SimpleNamespace()
+        snapshot = TokenQuoteSnapshot(
+            token_id="up-token",
+            buy_quote=0.62,
+            midpoint=0.62,
+            last_trade_price=0.62,
+            reference_price=0.62,
+            target_limit_price=0.62,
+            recommended_limit_price=0.62,
+            ok_to_submit=True,
+            submit_reason="ok",
+            best_bid=0.61,
+            best_ask=0.62,
+            tick_size=0.01,
+            spread=0.01,
+        )
+
+        with patch(
+            "custom.btc_agent.executor._validate_trade_candidate",
+            return_value=(snapshot, None),
+        ), patch(
+            "custom.btc_agent.indicators.fetch_btc_spot_price",
+            return_value=79989.5,
+        ):
+            result = maybe_execute_trade(market, decision, features=features, snapshot=snapshot)
+
+        self.assertFalse(result.executed)
+        self.assertEqual(result.veto_flags, ["last_second_adverse_slip_up"])
+        self.assertIn("BTC dropped 10.50 USD", result.reason)
+
+    def test_maybe_execute_trade_blocks_down_on_last_second_spike(self):
+        decision = types.SimpleNamespace(side="DOWN", confidence=0.8)
+        features = types.SimpleNamespace(price_usd=80000.0)
+        market = types.SimpleNamespace()
+        snapshot = TokenQuoteSnapshot(
+            token_id="down-token",
+            buy_quote=0.62,
+            midpoint=0.62,
+            last_trade_price=0.62,
+            reference_price=0.62,
+            target_limit_price=0.62,
+            recommended_limit_price=0.62,
+            ok_to_submit=True,
+            submit_reason="ok",
+            best_bid=0.61,
+            best_ask=0.62,
+            tick_size=0.01,
+            spread=0.01,
+        )
+
+        with patch(
+            "custom.btc_agent.executor._validate_trade_candidate",
+            return_value=(snapshot, None),
+        ), patch(
+            "custom.btc_agent.indicators.fetch_btc_spot_price",
+            return_value=80010.5,
+        ):
+            result = maybe_execute_trade(market, decision, features=features, snapshot=snapshot)
+
+        self.assertFalse(result.executed)
+        self.assertEqual(result.veto_flags, ["last_second_adverse_slip_down"])
+        self.assertIn("BTC spiked 10.50 USD", result.reason)
 
     def test_resolve_confirmed_live_fill_requires_positive_filled_size(self):
         with patch(

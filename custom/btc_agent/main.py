@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import math
 import os
 import re
+import requests
 import select
 import time
 import sys
@@ -2295,6 +2296,19 @@ def print_trade_execution_result(result, debug: bool) -> None:
 
 
 def run_once() -> None:
+    try:
+        _run_once_core()
+    except requests.RequestException as exc:
+        print(f"WARNING: Network connection issue encountered during core tick: {exc}")
+        print("Retrying on the next tick interval...")
+        return
+    except Exception as exc:
+        print(f"ERROR: Unexpected internal engine error during core tick: {exc}")
+        print("Skipping active tick frame; retrying on the next tick interval...")
+        return
+
+
+def _run_once_core() -> None:
     global _FIRST_LOOP
     global _SESSION_LOSS_TRADES
     cfg = get_trading_config()

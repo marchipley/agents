@@ -5,6 +5,7 @@ import os
 import glob
 import io
 import json
+import requests
 from datetime import datetime, timezone, timedelta
 from contextlib import ExitStack
 from unittest.mock import patch
@@ -47,6 +48,28 @@ from custom.btc_agent.paper_state import ActivePaperOrder
 
 
 class TestBtcMain(unittest.TestCase):
+    def test_run_once_catches_transient_request_exception(self):
+        with patch(
+            "custom.btc_agent.main._run_once_core",
+            side_effect=requests.ReadTimeout("CLOB timeout"),
+        ), patch("sys.stdout", new_callable=io.StringIO) as stdout:
+            run_once()
+
+        output = stdout.getvalue()
+        self.assertIn("WARNING: Network connection issue encountered during core tick: CLOB timeout", output)
+        self.assertIn("Retrying on the next tick interval", output)
+
+    def test_run_once_catches_unexpected_tick_exception(self):
+        with patch(
+            "custom.btc_agent.main._run_once_core",
+            side_effect=ValueError("bad tick"),
+        ), patch("sys.stdout", new_callable=io.StringIO) as stdout:
+            run_once()
+
+        output = stdout.getvalue()
+        self.assertIn("ERROR: Unexpected internal engine error during core tick: bad tick", output)
+        self.assertIn("Skipping active tick frame", output)
+
     def test_print_active_orders_shows_unfilled_for_pending_live_order(self):
         order = ActivePaperOrder(
             market_slug="btc-updown-5m-1770000000",

@@ -2535,6 +2535,51 @@ def maybe_execute_trade(
         return rejection
 
     assert validated_snapshot is not None
+
+    if features and decision.side in ("UP", "DOWN"):
+        from .indicators import fetch_btc_spot_price
+
+        try:
+            latest_btc_price = fetch_btc_spot_price()
+            price_slip_usd = latest_btc_price - features.price_usd
+            max_adverse_slip_usd = 10.0
+
+            if decision.side == "UP" and price_slip_usd < -max_adverse_slip_usd:
+                return TradeExecutionResult(
+                    executed=False,
+                    side=decision.side,
+                    size=0.0,
+                    price=validated_snapshot.buy_quote,
+                    token_id=validated_snapshot.token_id,
+                    reason=(
+                        "Last-second price veto: BTC dropped "
+                        f"{abs(price_slip_usd):.2f} USD during LLM processing "
+                        f"(from {features.price_usd:.2f} to {latest_btc_price:.2f})."
+                    ),
+                    execution_snapshot=validated_snapshot,
+                    quoted_price_at_entry=validated_snapshot.buy_quote,
+                    veto_flags=["last_second_adverse_slip_up"],
+                )
+
+            if decision.side == "DOWN" and price_slip_usd > max_adverse_slip_usd:
+                return TradeExecutionResult(
+                    executed=False,
+                    side=decision.side,
+                    size=0.0,
+                    price=validated_snapshot.buy_quote,
+                    token_id=validated_snapshot.token_id,
+                    reason=(
+                        "Last-second price veto: BTC spiked "
+                        f"{price_slip_usd:.2f} USD during LLM processing "
+                        f"(from {features.price_usd:.2f} to {latest_btc_price:.2f})."
+                    ),
+                    execution_snapshot=validated_snapshot,
+                    quoted_price_at_entry=validated_snapshot.buy_quote,
+                    veto_flags=["last_second_adverse_slip_down"],
+                )
+        except Exception:
+            pass
+
     effective_confidence = get_effective_decision_confidence(
         decision,
         market,

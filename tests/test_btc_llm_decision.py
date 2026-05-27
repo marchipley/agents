@@ -1,5 +1,7 @@
 import unittest
 import json
+import socket
+import time
 from datetime import datetime, timezone
 from unittest.mock import Mock, patch
 import types
@@ -18,7 +20,9 @@ from custom.btc_agent.llm_decision import (
     _build_user_prompt,
     _extract_json_payload,
     _get_openai_realtime_client,
+    _get_openai_rest_session,
     OpenAIRealtimeClient,
+    _request_openai_once,
     _stream_openai_chat_completion,
     decide_trade,
 )
@@ -164,6 +168,10 @@ class TestBtcLlmDecision(unittest.TestCase):
 
         self.assertIn('"decision":"UP"', response)
         create_connection.assert_called_once()
+        connect_kwargs = create_connection.call_args.kwargs
+        self.assertNotIn("OpenAI-Beta: realtime=v1", connect_kwargs["header"])
+        self.assertIn((socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1), connect_kwargs["sockopt"])
+        self.assertIn((socket.IPPROTO_TCP, socket.TCP_NODELAY, 1), connect_kwargs["sockopt"])
         session_update = sent_payloads[0]
         response_create = sent_payloads[2]
         self.assertEqual(session_update["type"], "session.update")
@@ -175,6 +183,73 @@ class TestBtcLlmDecision(unittest.TestCase):
         self.assertEqual(response_create["type"], "response.create")
         self.assertNotIn("modalities", response_create["response"])
         self.assertEqual(response_create["response"]["max_output_tokens"], 512)
+
+    def test_openai_realtime_client_reconnects_after_idle_window(self):
+        class FakeRealtimeSocket:
+            def __init__(self, text):
+                self.messages = [
+                    json.dumps({"type": "response.output_text.delta", "delta": text}),
+                    json.dumps({"type": "response.done"}),
+                ]
+                self.timeout_values = []
+                self.closed = False
+
+            def settimeout(self, timeout):
+                self.timeout_values.append(timeout)
+
+            def send(self, _payload):
+                pass
+
+            def recv(self):
+                return self.messages.pop(0)
+
+            def close(self):
+                self.closed = True
+
+        sockets = [FakeRealtimeSocket("first"), FakeRealtimeSocket("second")]
+
+        with patch(
+            "custom.btc_agent.llm_decision.websocket.create_connection",
+            side_effect=sockets,
+        ) as create_connection:
+            client = OpenAIRealtimeClient("test-key", "gpt-realtime-mini", 15.0)
+            self.assertEqual(client.request("system", "user"), "first")
+            client._last_request_time = time.monotonic() - 13.0
+            self.assertEqual(client.request("system", "user"), "second")
+
+        self.assertEqual(create_connection.call_count, 2)
+        self.assertTrue(sockets[0].closed)
+        self.assertIn(1.0, sockets[0].timeout_values)
+
+    def test_openai_realtime_client_closes_on_empty_frame(self):
+        class FakeRealtimeSocket:
+            def __init__(self):
+                self.closed = False
+
+            def settimeout(self, _timeout):
+                pass
+
+            def send(self, _payload):
+                pass
+
+            def recv(self):
+                return ""
+
+            def close(self):
+                self.closed = True
+
+        socket = FakeRealtimeSocket()
+
+        with patch(
+            "custom.btc_agent.llm_decision.websocket.create_connection",
+            return_value=socket,
+        ):
+            client = OpenAIRealtimeClient("test-key", "gpt-realtime-mini", 15.0)
+            with self.assertRaisesRegex(RuntimeError, "WebSocket closed unexpectedly"):
+                client.request("system", "user")
+
+        self.assertTrue(socket.closed)
+        self.assertIsNone(client.ws)
 
     def test_stream_openai_chat_completion_reassembles_sse_content(self):
         fake_response = Mock()
@@ -532,28 +607,61 @@ class TestBtcLlmDecision(unittest.TestCase):
         self.assertTrue(any("timeout_seconds   = 15.0" in line for line in printed_lines))
         self.assertTrue(any("proxy             = None" in line for line in printed_lines))
 
-    def test_openai_disables_trust_env_when_use_proxy_false(self):
-        with patch(
-            "custom.btc_agent.llm_decision.get_llm_config",
-            return_value=Mock(
-                engine="openai",
-                api_key="test-key",
-                model="gpt-4.1-mini",
-                api_connection_timeout_seconds=15.0,
-                api_connection_retry_timer_seconds=2.0,
-                api_connection_retry_attempts=1,
+    def test_openai_uses_rest_chat_completions_session(self):
+        response = Mock(
+            ok=True,
+            json=Mock(
+                return_value={
+                    "choices": [
+                        {
+                            "message": {
+                                "content": '{"decision":"UP","confidence":0.8,"max_price_to_pay":0.5,"reason":"ok"}'
+                            }
+                        }
+                    ]
+                }
             ),
-        ), patch(
-            "custom.btc_agent.llm_decision._get_openai_realtime_client",
-            return_value=Mock(
-                request=Mock(
-                    return_value='{"decision":"UP","confidence":0.8,"max_price_to_pay":0.5,"reason":"ok"}'
-                )
-            ),
-        ):
-            decision = decide_trade(DummyFeatures(), DummyMarket())
+        )
+        session = Mock(post=Mock(return_value=response))
+        session.trust_env = True
 
-        self.assertEqual(decision.side, "UP")
+        with patch(
+            "custom.btc_agent.llm_decision._get_openai_rest_session",
+            return_value=session,
+        ), patch(
+            "builtins.print",
+        ):
+            content = _request_openai_once(
+                model="gpt-4.1-mini",
+                api_key="test-key",
+                system_prompt="system",
+                user_prompt="user",
+                timeout_seconds=15.0,
+            )
+
+        self.assertIn('"decision":"UP"', content)
+        session.post.assert_called_once()
+        _, kwargs = session.post.call_args
+        self.assertEqual(kwargs["headers"]["Authorization"], "Bearer test-key")
+        self.assertEqual(kwargs["json"]["model"], "gpt-4.1-mini")
+        self.assertEqual(kwargs["json"]["messages"][0], {"role": "system", "content": "system"})
+        self.assertEqual(kwargs["json"]["messages"][1], {"role": "user", "content": "user"})
+        self.assertEqual(kwargs["json"]["response_format"], {"type": "json_object"})
+        self.assertEqual(kwargs["timeout"], 15.0)
+
+    def test_get_openai_rest_session_reuses_trust_env_false_session(self):
+        from custom.btc_agent import llm_decision as llm_module
+
+        previous_session = llm_module._OPENAI_REST_SESSION
+        llm_module._OPENAI_REST_SESSION = None
+        try:
+            first = _get_openai_rest_session()
+            second = _get_openai_rest_session()
+        finally:
+            llm_module._OPENAI_REST_SESSION = previous_session
+
+        self.assertIs(first, second)
+        self.assertFalse(first.trust_env)
 
     def test_openai_retries_same_minimal_prompt_after_connection_error(self):
         with patch(

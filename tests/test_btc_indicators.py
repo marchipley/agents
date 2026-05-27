@@ -45,7 +45,7 @@ class TestBtcIndicators(unittest.TestCase):
 
         self.assertEqual(price, 75123.0)
         self.assertEqual(indicators.get_latest_cached_price(), 75123.0)
-        self.assertEqual(indicators._LAST_SUCCESSFUL_PROVIDER_INDEX, 3)
+        self.assertEqual(indicators._LAST_SUCCESSFUL_PROVIDER_INDEX, 2)
 
     def test_fetch_btc_spot_price_prefers_poly_reference_provider(self):
         with patch(
@@ -63,6 +63,33 @@ class TestBtcIndicators(unittest.TestCase):
         self.assertAlmostEqual(price, 80382.12345, places=5)
         self.assertAlmostEqual(indicators.get_latest_cached_price(), 80382.12345, places=5)
         self.assertEqual(indicators._LAST_SUCCESSFUL_PROVIDER_INDEX, 1)
+
+    def test_fetch_btc_spot_price_always_rechecks_rtds_after_fallback_success(self):
+        indicators._LAST_SUCCESSFUL_PROVIDER_INDEX = 2
+
+        with patch(
+            "custom.btc_agent.indicators._fetch_spot_price_from_polymarket_rtds",
+            return_value=80444.25,
+        ) as mock_rtds, patch(
+            "custom.btc_agent.indicators._fetch_spot_price_from_binance_websocket",
+            return_value=75123.0,
+        ) as mock_binance:
+            price = indicators.fetch_btc_spot_price()
+
+        self.assertEqual(price, 80444.25)
+        self.assertEqual(indicators._LAST_SUCCESSFUL_PROVIDER_INDEX, 0)
+        mock_rtds.assert_called_once()
+        mock_binance.assert_not_called()
+
+    def test_get_price_providers_contains_single_rtds_entry(self):
+        providers = indicators._get_price_providers()
+
+        rtds_entries = [
+            provider
+            for _, provider in providers
+            if provider == indicators._fetch_spot_price_from_polymarket_rtds
+        ]
+        self.assertEqual(len(rtds_entries), 1)
 
     def test_fetch_btc_spot_price_uses_cached_value_when_all_providers_fail(self):
         indicators._record_price_sample(75000.0)

@@ -320,7 +320,6 @@ def _get_price_providers():
     return [
         ("Polymarket RTDS", _fetch_spot_price_from_polymarket_rtds),
         ("Poly Hermes", _fetch_btc_price_from_poly_reference),
-        ("Polymarket RTDS", _fetch_spot_price_from_polymarket_rtds),
         ("Binance WebSocket", _fetch_spot_price_from_binance_websocket),
         ("Coinbase", _fetch_spot_price_from_coinbase),
         ("CoinGecko", _fetch_spot_price_from_coingecko),
@@ -473,6 +472,14 @@ def ensure_price_history_backfilled(now: Optional[datetime] = None) -> None:
 def fetch_btc_spot_price(allow_cached_fallback: bool = True) -> float:
     global _LAST_SUCCESSFUL_PROVIDER_INDEX
 
+    try:
+        price = _fetch_spot_price_from_polymarket_rtds()
+        _LAST_SUCCESSFUL_PROVIDER_INDEX = 0
+        _record_price_sample(price)
+        return price
+    except requests.RequestException:
+        pass
+
     providers = _get_price_providers()
     provider_count = len(providers)
     last_error = None
@@ -480,6 +487,8 @@ def fetch_btc_spot_price(allow_cached_fallback: bool = True) -> float:
     for offset in range(provider_count):
         provider_index = (_LAST_SUCCESSFUL_PROVIDER_INDEX + offset) % provider_count
         _, provider = providers[provider_index]
+        if provider == _fetch_spot_price_from_polymarket_rtds:
+            continue
         try:
             price = provider()
             _LAST_SUCCESSFUL_PROVIDER_INDEX = provider_index

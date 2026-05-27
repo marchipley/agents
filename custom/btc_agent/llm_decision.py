@@ -3,6 +3,7 @@
 import json
 import os
 import re
+import socket
 import time
 import threading
 import uuid
@@ -739,10 +740,12 @@ class OpenAIRealtimeClient:
         self.ws = None
         self._lock = threading.Lock()
         self._request_count = 0
+        self._last_request_time = time.monotonic()
 
     def close(self) -> None:
         if self.ws is not None:
             try:
+                self.ws.settimeout(1.0)
                 self.ws.close()
             except Exception:
                 pass
@@ -750,6 +753,10 @@ class OpenAIRealtimeClient:
 
     def _connect(self) -> None:
         self.close()
+        sock_opt = (
+            (socket.IPPROTO_TCP, socket.TCP_NODELAY, 1),
+            (socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1),
+        )
         self.ws = websocket.create_connection(
             f"wss://api.openai.com/v1/realtime?model={self.model}",
             header=[
@@ -757,16 +764,23 @@ class OpenAIRealtimeClient:
             ],
             timeout=self.timeout_seconds,
             enable_multithread=True,
+            sockopt=sock_opt,
         )
         self.ws.settimeout(self.timeout_seconds)
 
     def _ensure_connected(self) -> None:
+        now = time.monotonic()
+        if self.ws is not None and (now - self._last_request_time > 12.0):
+            self.close()
+
         if self.ws is None:
             self._connect()
+            self._last_request_time = time.monotonic()
 
     def request(self, system_prompt: str, user_prompt: str) -> str:
         with self._lock:
             self._ensure_connected()
+            self._last_request_time = time.monotonic()
             if self._request_count >= 20:
                 self._connect()
                 self._request_count = 0
@@ -815,6 +829,8 @@ class OpenAIRealtimeClient:
                 chunks = []
                 while True:
                     raw_message = self.ws.recv()
+                    if not raw_message:
+                        raise RuntimeError("WebSocket closed unexpectedly by remote host.")
                     event = json.loads(raw_message)
                     event_type = event.get("type")
                     if event_type == "response.output_text.delta":
@@ -914,6 +930,17 @@ def _stream_openai_chat_completion(
         session.close()
 
 
+_OPENAI_REST_SESSION = None
+
+
+def _get_openai_rest_session() -> requests.Session:
+    global _OPENAI_REST_SESSION
+    if _OPENAI_REST_SESSION is None:
+        _OPENAI_REST_SESSION = requests.Session()
+        _OPENAI_REST_SESSION.trust_env = False
+    return _OPENAI_REST_SESSION
+
+
 def _request_openai_once(
     model: str,
     api_key: str,
@@ -928,12 +955,40 @@ def _request_openai_once(
         timeout_seconds,
         proxy_url,
     )
-    realtime_client = _get_openai_realtime_client(
-        api_key=api_key,
-        model=model,
-        timeout_seconds=timeout_seconds,
+
+    session = _get_openai_rest_session()
+    response = session.post(
+        "https://api.openai.com/v1/chat/completions",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            "temperature": 0.2,
+            "max_tokens": 256,
+            "response_format": {"type": "json_object"},
+        },
+        timeout=timeout_seconds,
     )
-    return realtime_client.request(system_prompt=system_prompt, user_prompt=user_prompt)
+
+    if not response.ok:
+        raise RuntimeError(f"HTTP {response.status_code}: {response.text}")
+
+    payload = response.json()
+    choices = payload.get("choices") or []
+    if not choices:
+        raise RuntimeError("OpenAI REST response contained no choices")
+
+    content = choices[0].get("message", {}).get("content")
+    if not content:
+        raise RuntimeError("OpenAI REST response contained no content")
+
+    return str(content)
 
 
 def _request_openai_decision(
