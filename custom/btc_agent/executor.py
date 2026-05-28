@@ -2537,6 +2537,37 @@ def maybe_execute_trade(
     assert validated_snapshot is not None
 
     if features and decision.side in ("UP", "DOWN"):
+        feature_time_remaining = getattr(features, "time_remaining_seconds", None)
+        time_remaining = (
+            int(feature_time_remaining)
+            if feature_time_remaining is not None
+            else _get_time_remaining_seconds(market)
+        )
+        settlement_threshold = getattr(market, "settlement_threshold", None)
+
+        if settlement_threshold is not None and time_remaining > 240:
+            if decision.side == "UP":
+                distance_usd = float(features.price_usd) - float(settlement_threshold)
+            else:
+                distance_usd = float(settlement_threshold) - float(features.price_usd)
+
+            if distance_usd < 50.0:
+                return TradeExecutionResult(
+                    executed=False,
+                    side=decision.side,
+                    size=0.0,
+                    price=validated_snapshot.buy_quote,
+                    token_id=validated_snapshot.token_id,
+                    reason=(
+                        f"Early-window veto: Cushion (${distance_usd:.2f}) is too thin "
+                        f"to survive {time_remaining}s of volatility. Minimum $50 required early."
+                    ),
+                    execution_snapshot=validated_snapshot,
+                    quoted_price_at_entry=validated_snapshot.buy_quote,
+                    veto_flags=["early_window_micro_cushion_veto"],
+                )
+
+    if features and decision.side in ("UP", "DOWN"):
         from .indicators import fetch_btc_spot_price
 
         try:

@@ -239,6 +239,7 @@ def _build_system_prompt() -> str:
         "time_remaining_seconds is authoritative. Do not infer time from any other number.\n"
         "Final 10 seconds means time_remaining_seconds < 15.\n"
         f"If time_remaining_seconds > 180, you are in the Discovery Phase. If ADX < 12.0, treat the trend as non-existent. If ADX is between 12 and 20, you may trade ONLY if DISTANCE_FROM_STRIKE_USD provides a safety margin of at least 1.0 * vol5m. If ADX > {cfg.trend_priority_adx_threshold:.0f}, prioritize the trend over the time elapsed.\n"
+        "EARLY WINDOW CUSHION RULE: If time remaining (t) > 240 seconds, a DISTANCE_FROM_STRIKE_USD of less than $50 is mere market noise, NOT a strong cushion. Do NOT evaluate cushions under $50 as 'strongly ITM' early in the window. If t > 240 and the cushion is < $50, you MUST heavily penalize confidence and default to NO_TRADE unless momentum is violently accelerating in your favor.\n"
         "Use DISTANCE_FROM_STRIKE_PCT to determine whether UP or DOWN is currently winning versus the price to beat. A positive value means BTC is above the strike; a negative value means BTC is below the strike.\n"
         "Do not confuse DISTANCE_FROM_STRIKE_USD or DISTANCE_FROM_STRIKE_PCT with MARKET_WIN_CHANCE_UP / MARKET_WIN_CHANCE_DOWN. Distance fields are price gaps; market win chance fields are market-implied probabilities.\n"
         "A MARKET_WIN_CHANCE of 65% is an aggressive signal. DO NOT confuse this with DISTANCE_FROM_STRIKE. A distance of $1.00 USD is sufficient for 95% confidence if time remaining is less than 15 seconds.\n"
@@ -277,7 +278,8 @@ def _build_system_prompt() -> str:
         "If DISTANCE_FROM_STRIKE_PCT is positive and you choose DOWN, confidence must be below 0.50 unless trend exhaustion is clear. If DISTANCE_FROM_STRIKE_PCT is negative and you choose UP, confidence must be below 0.50 unless trend exhaustion is clear.\n"
         "`max_price_to_pay` is informational only and is not used by execution.\n"
         "For directional trades, set `max_price_to_pay` to 1.0 unless you have a strong reason not to.\n"
-        "If Window Delta is above 0.15% near T-10, you may set `max_price_to_pay` as high as 0.97."
+        "If Window Delta is above 0.15% near T-10, you may set `max_price_to_pay` as high as 0.97.\n"
+        "CRITICAL: Time is of the essence. You must limit your 'reason' field to 1 or 2 short sentences maximum. Be extremely concise."
     )
 
 
@@ -293,6 +295,7 @@ def _build_openai_realtime_system_prompt() -> str:
         "If adx<20, stay extremely cautious throughout the entire period and prioritize preservation over marginal ITM leads. "
         "If adx<12.0, treat the trend as non-existent. If adx is between 12 and 20, you may trade ONLY if DISTANCE_FROM_STRIKE_USD provides a safety margin of at least 1.0 * vol5m. "
         f"If time_remaining_seconds>180 and adx<{cfg.discovery_adx_caution_threshold:.0f}, stay cautious; if adx>{cfg.trend_priority_adx_threshold:.0f}, prioritize the trend over elapsed time. "
+        "EARLY WINDOW CUSHION RULE: If time remaining (t) > 240 seconds, a DISTANCE_FROM_STRIKE_USD of less than $50 is mere market noise, NOT a strong cushion. Do NOT evaluate cushions under $50 as 'strongly ITM' early in the window. If t > 240 and the cushion is < $50, you MUST heavily penalize confidence and default to NO_TRADE unless momentum is violently accelerating in your favor. "
         "If current side is ITM and time_remaining_seconds<60, enter ONLY if entry quote<0.85; if buy quote>0.85, prefer NO_TRADE regardless of ITM status. "
         "VOLATILITY RATIO RULE: You are strictly prohibited from evaluating any trade with confidence higher than 0.55 if DISTANCE_FROM_STRIKE_USD is less than active volatility_5m when time_remaining_seconds>90. Strong momentum flags can flip into mean reversion when the structural price cushion is narrower than baseline variance. "
         "LATE WINDOW VOLATILITY PENALTY: If t < 90 and ABS(DISTANCE_FROM_STRIKE_USD) < 15.0, the cushion is too fragile to survive random noise. In this state, DO NOT output UP or DOWN if the buy quote is > 0.60. If the market demands > 0.60 for a cushion this thin, you MUST output NO_TRADE. "
@@ -321,7 +324,8 @@ def _build_openai_realtime_system_prompt() -> str:
         f"If rsi9<{cfg.down_rsi_veto_threshold:.0f}, do not choose DOWN. If rsi9>{cfg.up_rsi_veto_base_threshold:.0f}, do not choose UP unless adx>{cfg.up_rsi_veto_adx_threshold:.0f} and continuation remains strong up to rsi9>{cfg.up_rsi_veto_trend_threshold:.0f}. "
         "If RSI speed divergence is negative while price is moving up, lower confidence by 0.10 and only turn it into NO_TRADE when the trade is not deeply ITM (>2.0 * ATR). "
         "If DISTANCE_FROM_STRIKE_PCT>0 and choosing DOWN, confidence must stay below 0.50 unless exhaustion is clear; symmetric for UP when DISTANCE_FROM_STRIKE_PCT<0. "
-        "Use 1.0 for max_price_to_pay on directional trades."
+        "Use 1.0 for max_price_to_pay on directional trades. "
+        "CRITICAL: Time is of the essence. You must limit your 'reason' field to 1 or 2 short sentences maximum. Be extremely concise."
     )
 
 
@@ -897,7 +901,7 @@ def _stream_openai_chat_completion(
                     {"role": "user", "content": user_prompt},
                 ],
                 "temperature": 0.2,
-                "max_tokens": 256,
+                "max_tokens": 100,
                 "response_format": {"type": "json_object"},
                 "stream": True,
             },
@@ -970,7 +974,7 @@ def _request_openai_once(
                 {"role": "user", "content": user_prompt},
             ],
             "temperature": 0.2,
-            "max_tokens": 256,
+            "max_tokens": 100,
             "response_format": {"type": "json_object"},
         },
         timeout=timeout_seconds,

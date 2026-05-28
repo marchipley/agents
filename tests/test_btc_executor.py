@@ -257,6 +257,66 @@ class TestBtcExecutor(unittest.TestCase):
         self.assertEqual(result.veto_flags, ["last_second_adverse_slip_down"])
         self.assertIn("BTC spiked 10.50 USD", result.reason)
 
+    def test_maybe_execute_trade_blocks_early_up_with_thin_cushion(self):
+        decision = types.SimpleNamespace(side="UP", confidence=0.8)
+        features = types.SimpleNamespace(price_usd=80025.0, time_remaining_seconds=250)
+        market = types.SimpleNamespace(settlement_threshold=80000.0)
+        snapshot = TokenQuoteSnapshot(
+            token_id="up-token",
+            buy_quote=0.62,
+            midpoint=0.62,
+            last_trade_price=0.62,
+            reference_price=0.62,
+            target_limit_price=0.62,
+            recommended_limit_price=0.62,
+            ok_to_submit=True,
+            submit_reason="ok",
+            best_bid=0.61,
+            best_ask=0.62,
+            tick_size=0.01,
+            spread=0.01,
+        )
+
+        with patch(
+            "custom.btc_agent.executor._validate_trade_candidate",
+            return_value=(snapshot, None),
+        ):
+            result = maybe_execute_trade(market, decision, features=features, snapshot=snapshot)
+
+        self.assertFalse(result.executed)
+        self.assertEqual(result.veto_flags, ["early_window_micro_cushion_veto"])
+        self.assertIn("Minimum $50 required early", result.reason)
+
+    def test_maybe_execute_trade_blocks_early_down_with_thin_cushion(self):
+        decision = types.SimpleNamespace(side="DOWN", confidence=0.8)
+        features = types.SimpleNamespace(price_usd=79975.0, time_remaining_seconds=250)
+        market = types.SimpleNamespace(settlement_threshold=80000.0)
+        snapshot = TokenQuoteSnapshot(
+            token_id="down-token",
+            buy_quote=0.62,
+            midpoint=0.62,
+            last_trade_price=0.62,
+            reference_price=0.62,
+            target_limit_price=0.62,
+            recommended_limit_price=0.62,
+            ok_to_submit=True,
+            submit_reason="ok",
+            best_bid=0.61,
+            best_ask=0.62,
+            tick_size=0.01,
+            spread=0.01,
+        )
+
+        with patch(
+            "custom.btc_agent.executor._validate_trade_candidate",
+            return_value=(snapshot, None),
+        ):
+            result = maybe_execute_trade(market, decision, features=features, snapshot=snapshot)
+
+        self.assertFalse(result.executed)
+        self.assertEqual(result.veto_flags, ["early_window_micro_cushion_veto"])
+        self.assertIn("Minimum $50 required early", result.reason)
+
     def test_resolve_confirmed_live_fill_requires_positive_filled_size(self):
         with patch(
             "custom.btc_agent.executor._fetch_live_order_status",

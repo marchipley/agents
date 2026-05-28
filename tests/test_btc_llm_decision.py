@@ -285,6 +285,7 @@ class TestBtcLlmDecision(unittest.TestCase):
         )
         self.assertFalse(fake_session.trust_env)
         self.assertTrue(fake_session.post.call_args.kwargs["stream"])
+        self.assertEqual(fake_session.post.call_args.kwargs["json"]["max_tokens"], 100)
 
     def test_user_prompt_includes_price_to_beat(self):
         up_snapshot = Mock(buy_quote=0.84)
@@ -417,6 +418,8 @@ class TestBtcLlmDecision(unittest.TestCase):
         self.assertIn("Gamma Discrepancy Rule", prompt)
         self.assertIn("CRITICAL VELOCITY RULE", prompt)
         self.assertIn("VOLATILITY RATIO RULE", prompt)
+        self.assertIn("EARLY WINDOW CUSHION RULE", prompt)
+        self.assertIn("cushions under $50", prompt)
         self.assertIn("LATE WINDOW VOLATILITY PENALTY", prompt)
         self.assertIn("EXHAUSTION REVERSION RULE", prompt)
         self.assertIn("entry quote is < 0.85", prompt)
@@ -427,6 +430,8 @@ class TestBtcLlmDecision(unittest.TestCase):
         self.assertIn("ITM Velocity Rule: If trend_regime is weak", prompt)
         self.assertIn("Weak Regime Rule: If trend_regime contains 'weak' and RSI speed divergence", prompt)
         self.assertIn("STAGNATION RULE: If ADX < 12.0", prompt)
+        self.assertIn("Time is of the essence", prompt)
+        self.assertIn("reason' field to 1 or 2 short sentences maximum", prompt)
 
     def test_openai_realtime_prompt_forbids_conversational_filler(self):
         from custom.btc_agent.llm_decision import _build_openai_realtime_system_prompt
@@ -443,8 +448,12 @@ class TestBtcLlmDecision(unittest.TestCase):
         self.assertIn("trust the price action over the oscillator", prompt)
         self.assertIn("For OTM trades, you must have an execution edge of at least 0.05", prompt)
         self.assertIn("VELOCITY OVERRIDE: If delta_prev_tick is moving against your chosen side", prompt)
+        self.assertIn("EARLY WINDOW CUSHION RULE", prompt)
+        self.assertIn("cushions under $50", prompt)
         self.assertIn("LATE WINDOW VOLATILITY PENALTY", prompt)
         self.assertIn("EXHAUSTION REVERSION RULE", prompt)
+        self.assertIn("Time is of the essence", prompt)
+        self.assertIn("reason' field to 1 or 2 short sentences maximum", prompt)
 
     def test_gemini_503_returns_no_trade(self):
         error_response = requests.Response()
@@ -647,6 +656,7 @@ class TestBtcLlmDecision(unittest.TestCase):
         self.assertEqual(kwargs["json"]["messages"][0], {"role": "system", "content": "system"})
         self.assertEqual(kwargs["json"]["messages"][1], {"role": "user", "content": "user"})
         self.assertEqual(kwargs["json"]["response_format"], {"type": "json_object"})
+        self.assertEqual(kwargs["json"]["max_tokens"], 100)
         self.assertEqual(kwargs["timeout"], 15.0)
 
     def test_get_openai_rest_session_reuses_trust_env_false_session(self):

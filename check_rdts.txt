@@ -1,0 +1,4 @@
+wscat -c wss://ws-live-data.polymarket.com
+Connected (press CTRL+C to quit)
+> {"action":"subscribe","subscriptions":[{"topic":"crypto_prices_chainlink","type": "*","filters": "{\"symbol\":\"btc/usd\"}"}]}
+<

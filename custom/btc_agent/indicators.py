@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import json
 import os
+import sys
 import threading
 import time
 from typing import Optional, List, Tuple
@@ -19,31 +20,21 @@ from .network import http_get
 
 # Simple in-memory history: list of (timestamp, price)
 _PRICE_HISTORY: List[Tuple[datetime, float]] = []
-_LAST_SUCCESSFUL_PROVIDER_INDEX = 0
 _PRICE_HISTORY_BACKFILLED = False
 _LIVE_PRICE_SAMPLES_RECORDED = 0
 _BACKFILL_WINDOW_SECONDS = 420
 _BACKFILL_BUCKET_SECONDS = 20
 _WINDOW_BASELINE_CARRY_FORWARD_SECONDS = 60
 _WINDOW_BASELINE_LOOKAHEAD_SECONDS = 60
-_BINANCE_WS_URL = "wss://stream.binance.com:9443/ws/btcusdt@ticker"
-_BINANCE_WS_TIMEOUT_SECONDS = 3.0
 _POLYMARKET_RTDS_URL = "wss://ws-live-data.polymarket.com"
 _POLYMARKET_RTDS_SYMBOL = "btc/usd"
-_POLYMARKET_RTDS_FILTERS = json.dumps({"symbol": _POLYMARKET_RTDS_SYMBOL})
-_POLYMARKET_RTDS_TIMEOUT_SECONDS = 3.0
-_POLY_HERMES_URL = "https://hermes.pyth.network/v2/updates/price/latest"
-_POLY_BTC_PRICE_ID = "0xe62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43"
-_POLY_HERMES_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36"
-    )
-}
+_POLYMARKET_RTDS_FILTERS = '{"symbol":"btc/usd"}'
+_POLYMARKET_RTDS_TIMEOUT_SECONDS = 65.0
 _RTDS_THREAD = None
 _RTDS_BOUNDARY_CACHE: dict[int, float] = {}
 _LATEST_RTDS_PRICE: Optional[float] = None
 _LATEST_RTDS_TIME: Optional[datetime] = None
+_LAST_RAW_RTDS_MESSAGE: Optional[str] = None
 
 
 @dataclass
@@ -79,50 +70,6 @@ class BtcFeatures:
     live_sample_count: int = 0
 
 
-def _fetch_spot_price_from_coingecko() -> float:
-    resp = http_get(
-        "https://api.coingecko.com/api/v3/simple/price",
-        params={"ids": "bitcoin", "vs_currencies": "usd"},
-        timeout=10,
-    )
-    resp.raise_for_status()
-    data = resp.json()
-    return float(data["bitcoin"]["usd"])
-
-
-def _fetch_spot_price_from_coinbase() -> float:
-    resp = http_get(
-        "https://api.coinbase.com/v2/prices/BTC-USD/spot",
-        timeout=10,
-    )
-    resp.raise_for_status()
-    data = resp.json()
-    return float(data["data"]["amount"])
-
-
-def _fetch_btc_price_from_poly_reference() -> float:
-    resp = http_get(
-        _POLY_HERMES_URL,
-        params={
-            "ids[]": _POLY_BTC_PRICE_ID,
-            "parsed": "true",
-        },
-        headers=_POLY_HERMES_HEADERS,
-        timeout=5,
-    )
-    resp.raise_for_status()
-    payload = resp.json()
-    parsed = payload.get("parsed") or []
-    if not parsed:
-        raise requests.RequestException("Poly reference price payload did not include parsed data")
-    price_payload = (parsed[0] or {}).get("price") or {}
-    raw_price = price_payload.get("price")
-    expo = price_payload.get("expo")
-    if raw_price is None or expo is None:
-        raise requests.RequestException("Poly reference price payload did not include price/expo")
-    return int(raw_price) * (10 ** int(expo))
-
-
 def _create_polymarket_rtds_connection():
     if websocket is None:
         raise requests.RequestException("websocket-client is not installed")
@@ -151,87 +98,15 @@ def _create_polymarket_rtds_connection():
                 os.environ[name] = value
 
 
-def _create_binance_connection():
-    if websocket is None:
-        raise requests.RequestException("websocket-client is not installed")
-
-    proxy_env_names = (
-        "ALL_PROXY",
-        "all_proxy",
-        "HTTP_PROXY",
-        "http_proxy",
-        "HTTPS_PROXY",
-        "https_proxy",
-    )
-    saved_proxy_env = {name: os.environ.get(name) for name in proxy_env_names}
-    try:
-        for name in proxy_env_names:
-            os.environ.pop(name, None)
-        return websocket.create_connection(
-            _BINANCE_WS_URL,
-            timeout=_BINANCE_WS_TIMEOUT_SECONDS,
-        )
-    except Exception as exc:
-        raise requests.RequestException(f"Unable to connect to Binance websocket: {exc}") from exc
-    finally:
-        for name, value in saved_proxy_env.items():
-            if value is not None:
-                os.environ[name] = value
-
-
-def _parse_binance_ticker_price(message: dict) -> Optional[Tuple[float, datetime]]:
-    symbol = str(message.get("s", "")).upper()
-    if symbol != "BTCUSDT":
-        return None
-    last_price = message.get("c")
-    event_time_ms = message.get("E")
-    if last_price is None or event_time_ms is None:
-        return None
-    return (
-        float(last_price),
-        datetime.fromtimestamp(float(event_time_ms) / 1000, tz=timezone.utc),
-    )
-
-
-def _fetch_spot_price_from_binance_websocket() -> float:
-    ws = None
-    try:
-        ws = _create_binance_connection()
-        raw_message = ws.recv()
-        if not raw_message:
-            raise requests.RequestException("Binance websocket returned no data")
-        message = json.loads(raw_message)
-        parsed = _parse_binance_ticker_price(message)
-        if parsed is None:
-            raise requests.RequestException("Binance websocket returned an unexpected ticker payload")
-        price, as_of = parsed
-        _record_price_sample(price, as_of=as_of)
-        return price
-    except (
-        OSError,
-        ValueError,
-        requests.RequestException,
-    ) as exc:
-        raise requests.RequestException(f"Binance websocket BTC price fetch failed: {exc}") from exc
-    except Exception as exc:
-        if websocket is not None and isinstance(exc, websocket.WebSocketException):
-            raise requests.RequestException(f"Binance websocket BTC price fetch failed: {exc}") from exc
-        raise
-    finally:
-        if ws is not None:
-            try:
-                ws.close()
-            except Exception:
-                pass
-
-
 def _rtds_ws_loop():
-    global _LATEST_RTDS_PRICE, _LATEST_RTDS_TIME, _RTDS_BOUNDARY_CACHE
+    global _LATEST_RTDS_PRICE, _LATEST_RTDS_TIME, _RTDS_BOUNDARY_CACHE, _LAST_RAW_RTDS_MESSAGE
 
     while True:
         ws = None
         try:
             ws = _create_polymarket_rtds_connection()
+            # Only subscribe to the Chainlink feed; the initial snapshot can still
+            # arrive labeled as crypto_prices.
             subscribe_message = {
                 "action": "subscribe",
                 "subscriptions": [
@@ -242,21 +117,32 @@ def _rtds_ws_loop():
                     }
                 ],
             }
-            ws.send(json.dumps(subscribe_message))
+            ws.send(json.dumps(subscribe_message, separators=(",", ":")))
 
             while True:
-                raw_message = ws.recv()
+                try:
+                    ws.settimeout(_POLYMARKET_RTDS_TIMEOUT_SECONDS)
+                    raw_message = ws.recv()
+                except Exception as exc:
+                    if "time" in str(exc).lower() or "timeout" in str(type(exc)).lower():
+                        continue
+                    raise exc
+
                 if not raw_message or raw_message in ("PING", "PONG"):
                     continue
 
+                _LAST_RAW_RTDS_MESSAGE = raw_message
+
                 message = json.loads(raw_message)
-                if message.get("topic") != "crypto_prices_chainlink":
+                topic = message.get("topic")
+                if topic not in ("crypto_prices", "crypto_prices_chainlink"):
                     continue
 
                 payload = message.get("payload")
                 if not isinstance(payload, dict):
                     continue
 
+                # Handle both snapshot arrays and single-dict live updates.
                 data_items = payload.get("data") if isinstance(payload.get("data"), list) else [payload]
                 for item in data_items:
                     if not isinstance(item, dict):
@@ -270,16 +156,20 @@ def _rtds_ws_loop():
                     if value is None or timestamp_ms is None:
                         continue
 
-                    price = float(value)
-                    timestamp = datetime.fromtimestamp(float(timestamp_ms) / 1000, tz=timezone.utc)
+                    try:
+                        price = float(value)
+                        timestamp = datetime.fromtimestamp(float(timestamp_ms) / 1000, tz=timezone.utc)
+                    except ValueError:
+                        continue
+
                     _LATEST_RTDS_PRICE = price
                     _LATEST_RTDS_TIME = timestamp
-                    _record_price_sample(price, as_of=timestamp)
 
                     if int(timestamp_ms) % 300000 == 0:
                         _RTDS_BOUNDARY_CACHE[int(timestamp_ms)] = price
 
-        except Exception:
+        except Exception as exc:
+            print(f"\n[DEBUG] RTDS Background Thread crashed and is reconnecting: {exc}")
             time.sleep(1.0)
         finally:
             if ws is not None:
@@ -303,27 +193,6 @@ def get_cached_rtds_boundary_price(ts_ms: int, timeout: float = 3.0) -> Optional
             return _RTDS_BOUNDARY_CACHE[ts_ms]
         time.sleep(0.1)
     return None
-
-
-def _fetch_spot_price_from_polymarket_rtds() -> float:
-    _ensure_rtds_thread()
-
-    if _LATEST_RTDS_PRICE is not None and _LATEST_RTDS_TIME is not None:
-        age_seconds = (datetime.now(timezone.utc) - _LATEST_RTDS_TIME).total_seconds()
-        if age_seconds <= 5.0:
-            return _LATEST_RTDS_PRICE
-
-    raise requests.RequestException("RTDS background price not available or is stale")
-
-
-def _get_price_providers():
-    return [
-        ("Polymarket RTDS", _fetch_spot_price_from_polymarket_rtds),
-        ("Poly Hermes", _fetch_btc_price_from_poly_reference),
-        ("Binance WebSocket", _fetch_spot_price_from_binance_websocket),
-        ("Coinbase", _fetch_spot_price_from_coinbase),
-        ("CoinGecko", _fetch_spot_price_from_coingecko),
-    ]
 
 
 def get_latest_cached_price() -> Optional[float]:
@@ -470,42 +339,35 @@ def ensure_price_history_backfilled(now: Optional[datetime] = None) -> None:
 
 
 def fetch_btc_spot_price(allow_cached_fallback: bool = True) -> float:
-    global _LAST_SUCCESSFUL_PROVIDER_INDEX
+    """
+    Fetches the live BTC price EXCLUSIVELY from the Polymarket RTDS websocket feed.
+    If the timestamp in the payload is > 15 seconds old, or the feed drops,
+    the application will throw a fatal error and instantly exit.
+    """
+    _ensure_rtds_thread()
 
-    try:
-        price = _fetch_spot_price_from_polymarket_rtds()
-        _LAST_SUCCESSFUL_PROVIDER_INDEX = 0
-        _record_price_sample(price)
-        return price
-    except requests.RequestException:
-        pass
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline:
+        if _LATEST_RTDS_PRICE is not None and _LATEST_RTDS_TIME is not None:
+            age_seconds = (datetime.now(timezone.utc) - _LATEST_RTDS_TIME).total_seconds()
+            if age_seconds <= 10.0:
+                _record_price_sample(_LATEST_RTDS_PRICE, as_of=_LATEST_RTDS_TIME)
+                return _LATEST_RTDS_PRICE
 
-    providers = _get_price_providers()
-    provider_count = len(providers)
-    last_error = None
+        time.sleep(0.1)
 
-    for offset in range(provider_count):
-        provider_index = (_LAST_SUCCESSFUL_PROVIDER_INDEX + offset) % provider_count
-        _, provider = providers[provider_index]
-        if provider == _fetch_spot_price_from_polymarket_rtds:
-            continue
-        try:
-            price = provider()
-            _LAST_SUCCESSFUL_PROVIDER_INDEX = provider_index
-            _record_price_sample(price)
-            return price
-        except requests.RequestException as exc:
-            last_error = exc
+    age_msg = " No valid matching payload was ever received."
+    if _LATEST_RTDS_TIME is not None:
+        age = (datetime.now(timezone.utc) - _LATEST_RTDS_TIME).total_seconds()
+        age_msg = f" The last payload timestamp received was {age:.2f} seconds ago."
 
-    if allow_cached_fallback:
-        cached_price = get_latest_cached_price()
-        if cached_price is not None:
-            return cached_price
-
-    if last_error is not None:
-        raise last_error
-
-    raise RuntimeError("No BTC price provider returned a price")
+    error_msg = f"FATAL ERROR: Polymarket RTDS price feed is unavailable or stale.{age_msg}"
+    print(f"\n{error_msg}")
+    print("--- DEBUG: Last Raw Message Received ---")
+    print(_LAST_RAW_RTDS_MESSAGE if _LAST_RAW_RTDS_MESSAGE else "None (WebSocket never received data)")
+    print("----------------------------------------")
+    print("Exiting application immediately to prevent bad trades.")
+    sys.exit(1)
 
 
 def _compute_rsi(prices: List[float], period: int = 14) -> Optional[float]:
