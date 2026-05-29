@@ -39,6 +39,92 @@ from custom.btc_agent.executor import (
 
 
 class TestBtcExecutor(unittest.TestCase):
+    def test_get_token_quote_snapshot_uses_fresh_local_clob_l2_quote(self):
+        with patch(
+            "custom.btc_agent.market_lookup.get_live_clob_quote",
+            return_value={
+                "best_bid": 0.67,
+                "best_bid_size": 120.0,
+                "best_ask": 0.68,
+                "best_ask_size": 80.0,
+                "timestamp": 1_000_000_000_000,
+            },
+        ), patch("custom.btc_agent.executor.time.time", return_value=1_000_000_001.0), patch(
+            "custom.btc_agent.executor._get_price_from_clob_single"
+        ) as mock_rest_quote, patch("custom.btc_agent.executor._get_orderbook") as mock_book, patch(
+            "custom.btc_agent.executor.get_trading_config",
+            return_value=types.SimpleNamespace(use_recommended_limit=False),
+        ):
+            snapshot = get_token_quote_snapshot("token-1")
+
+        self.assertEqual(snapshot.buy_quote, 0.68)
+        self.assertEqual(snapshot.best_bid, 0.67)
+        self.assertEqual(snapshot.best_bid_size, 120.0)
+        self.assertEqual(snapshot.best_ask, 0.68)
+        self.assertEqual(snapshot.best_ask_size, 80.0)
+        self.assertAlmostEqual(snapshot.spread, 0.01, places=6)
+        self.assertAlmostEqual(snapshot.top_level_book_imbalance, 120.0 / 200.0, places=6)
+        self.assertTrue(snapshot.ok_to_submit)
+        mock_rest_quote.assert_not_called()
+        mock_book.assert_not_called()
+
+    def test_get_token_quote_snapshot_rejects_crossed_local_clob_l2_quote(self):
+        with patch(
+            "custom.btc_agent.market_lookup.get_live_clob_quote",
+            return_value={
+                "best_bid": 0.69,
+                "best_bid_size": 120.0,
+                "best_ask": 0.68,
+                "best_ask_size": 80.0,
+                "timestamp": 1_000_000_000_000,
+            },
+        ), patch("custom.btc_agent.executor.time.time", return_value=1_000_000_001.0), patch(
+            "custom.btc_agent.executor._get_price_from_clob_single"
+        ) as mock_rest_quote, patch("custom.btc_agent.executor._get_orderbook") as mock_book:
+            snapshot = get_token_quote_snapshot("token-1")
+
+        self.assertFalse(snapshot.ok_to_submit)
+        self.assertLessEqual(snapshot.spread, 0)
+        self.assertIn("crossed or locked", snapshot.submit_reason)
+        mock_rest_quote.assert_not_called()
+        mock_book.assert_not_called()
+
+    def test_get_token_quote_snapshot_falls_back_to_rest_when_local_clob_l2_quote_is_stale(self):
+        with patch(
+            "custom.btc_agent.market_lookup.get_live_clob_quote",
+            return_value={
+                "best_bid": 0.67,
+                "best_bid_size": 120.0,
+                "best_ask": 0.68,
+                "best_ask_size": 80.0,
+                "timestamp": 1_000_000_000_000,
+            },
+        ), patch("custom.btc_agent.executor.time.time", return_value=1_000_004_500.0), patch(
+            "custom.btc_agent.executor._get_price_from_clob_single",
+            side_effect=lambda token_id, side: 0.50 if side == "BUY" else 0.49,
+        ) as mock_rest_quote, patch(
+            "custom.btc_agent.executor._get_midpoint_price",
+            return_value=0.50,
+        ), patch(
+            "custom.btc_agent.executor._get_last_trade_price",
+            return_value=0.50,
+        ), patch(
+            "custom.btc_agent.executor._get_orderbook",
+            return_value={
+                "bids": [{"price": "0.49", "asset_size": "100"}],
+                "asks": [{"price": "0.51", "asset_size": "50"}],
+                "tick_size": "0.01",
+            },
+        ), patch(
+            "custom.btc_agent.executor.get_trading_config",
+            return_value=types.SimpleNamespace(use_recommended_limit=False),
+        ):
+            snapshot = get_token_quote_snapshot("token-1")
+
+        self.assertEqual(snapshot.buy_quote, 0.50)
+        self.assertEqual(snapshot.best_bid, 0.49)
+        mock_rest_quote.assert_called()
+
     def test_get_token_quote_snapshot_populates_book_imbalance_fields(self):
         with patch(
             "custom.btc_agent.executor._get_price_from_clob_single",

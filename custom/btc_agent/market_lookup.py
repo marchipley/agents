@@ -3,6 +3,7 @@
 import json
 import os
 import re
+import threading
 import time
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -43,6 +44,10 @@ _CLOB_MARKET_WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 _CLOB_MARKET_WS_TIMEOUT_SECONDS = 1.0
 _CLOB_RESOLUTION_WS_TIMEOUT_SECONDS = 45.0
 _CLOB_RESOLUTION_WS_CONNECT_TIMEOUT_SECONDS = 30.0
+_CLOB_L2_THREAD = None
+_ACTIVE_WS_ASSETS = set()
+_L2_BOOKS = {}
+_L2_LOCK = threading.Lock()
 
 
 @dataclass
@@ -60,6 +65,164 @@ class BtcUpDownMarket:
     volume: Optional[float] = None
     up_market_probability: Optional[float] = None
     down_market_probability: Optional[float] = None
+
+
+def ensure_clob_l2_ws_assets(up_token: str, down_token: str):
+    """Signals the background thread to track the current slug's tokens."""
+    global _ACTIVE_WS_ASSETS, _CLOB_L2_THREAD
+    target_assets = {str(up_token), str(down_token)}
+
+    with _L2_LOCK:
+        if _ACTIVE_WS_ASSETS != target_assets:
+            _ACTIVE_WS_ASSETS = target_assets
+
+    if _CLOB_L2_THREAD is None or not _CLOB_L2_THREAD.is_alive():
+        _CLOB_L2_THREAD = threading.Thread(target=_clob_l2_ws_loop, daemon=True)
+        _CLOB_L2_THREAD.start()
+
+
+def _clob_l2_ws_loop():
+    """Background WebSocket stream to maintain a live L2 orderbook."""
+    global _ACTIVE_WS_ASSETS, _L2_BOOKS
+    current_subscribed = set()
+    ws = None
+
+    while True:
+        with _L2_LOCK:
+            target_assets = set(_ACTIVE_WS_ASSETS)
+
+        if target_assets != current_subscribed:
+            if ws:
+                try:
+                    ws.close()
+                except Exception:
+                    pass
+
+            with _L2_LOCK:
+                _L2_BOOKS.clear()
+                for asset in target_assets:
+                    _L2_BOOKS[asset] = {"bids": {}, "asks": {}, "timestamp": 0}
+
+            try:
+                ws = websocket.create_connection(_CLOB_MARKET_WS_URL, timeout=5.0)
+                if target_assets:
+                    ws.send(
+                        json.dumps(
+                            {
+                                "assets_ids": list(target_assets),
+                                "type": "market",
+                                "custom_feature_enabled": True,
+                            }
+                        )
+                    )
+                current_subscribed = target_assets
+            except Exception:
+                time.sleep(1.0)
+                continue
+
+        if not ws or not current_subscribed:
+            time.sleep(0.5)
+            continue
+
+        try:
+            ws.settimeout(2.0)
+            raw_message = ws.recv()
+            if not raw_message or raw_message in ("PING", "PONG"):
+                continue
+
+            payload = json.loads(raw_message)
+
+            if isinstance(payload, list):
+                with _L2_LOCK:
+                    for book_event in payload:
+                        if not isinstance(book_event, dict):
+                            continue
+                        if book_event.get("event_type") != "book":
+                            continue
+                        asset = str(book_event.get("asset_id") or "")
+                        ts = int(book_event.get("timestamp", 0) or 0)
+                        if asset in _L2_BOOKS:
+                            _L2_BOOKS[asset]["timestamp"] = ts
+                            _L2_BOOKS[asset]["bids"] = {
+                                str(level["price"]): float(level["size"])
+                                for level in book_event.get("bids", [])
+                                if isinstance(level, dict)
+                                and level.get("price") is not None
+                                and level.get("size") is not None
+                            }
+                            _L2_BOOKS[asset]["asks"] = {
+                                str(level["price"]): float(level["size"])
+                                for level in book_event.get("asks", [])
+                                if isinstance(level, dict)
+                                and level.get("price") is not None
+                                and level.get("size") is not None
+                            }
+
+            elif isinstance(payload, dict) and payload.get("event_type") == "price_change":
+                ts = int(payload.get("timestamp", 0) or 0)
+                with _L2_LOCK:
+                    for change in payload.get("price_changes", []):
+                        if not isinstance(change, dict):
+                            continue
+                        asset = str(change.get("asset_id") or "")
+                        if asset not in _L2_BOOKS:
+                            continue
+                        _L2_BOOKS[asset]["timestamp"] = max(_L2_BOOKS[asset]["timestamp"], ts)
+                        price = str(change.get("price"))
+                        try:
+                            size = float(change.get("size"))
+                        except (TypeError, ValueError):
+                            continue
+                        side = change.get("side")
+                        if side not in ("BUY", "SELL"):
+                            continue
+                        target_book = (
+                            _L2_BOOKS[asset]["bids"]
+                            if side == "BUY"
+                            else _L2_BOOKS[asset]["asks"]
+                        )
+
+                        if size == 0:
+                            target_book.pop(price, None)
+                        else:
+                            target_book[price] = size
+
+        except Exception as exc:
+            if "time" in str(exc).lower() or "timeout" in str(type(exc)).lower():
+                continue
+            current_subscribed = set()
+            time.sleep(1.0)
+
+
+def get_live_clob_quote(token_id: str) -> Optional[dict]:
+    """Returns the top of book sizes and prices from the local mirror."""
+    with _L2_LOCK:
+        book = _L2_BOOKS.get(str(token_id))
+        if not book or book["timestamp"] == 0:
+            return None
+
+        bids = book["bids"]
+        asks = book["asks"]
+
+        best_bid, best_bid_size = (None, 0.0)
+        if bids:
+            best_bid_str = max(bids.keys(), key=lambda price: float(price))
+            best_bid = float(best_bid_str)
+            best_bid_size = bids[best_bid_str]
+
+        best_ask, best_ask_size = (None, 0.0)
+        if asks:
+            best_ask_str = min(asks.keys(), key=lambda price: float(price))
+            best_ask = float(best_ask_str)
+            best_ask_size = asks[best_ask_str]
+
+        return {
+            "best_bid": best_bid,
+            "best_bid_size": best_bid_size,
+            "best_ask": best_ask,
+            "best_ask_size": best_ask_size,
+            "timestamp": book["timestamp"],
+        }
 
 
 def _parse_live_market_probabilities_message(

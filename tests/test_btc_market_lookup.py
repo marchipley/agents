@@ -9,6 +9,7 @@ sys.modules.setdefault("dotenv", types.SimpleNamespace(load_dotenv=lambda *args,
 sys.modules.setdefault("websockets", types.SimpleNamespace(connect=object))
 sys.modules.setdefault("websocket", types.SimpleNamespace(WebSocketApp=object, create_connection=object))
 
+from custom.btc_agent import market_lookup as market_lookup_module
 from custom.btc_agent.market_lookup import (
     BtcUpDownMarket,
     _parse_live_market_probabilities_message,
@@ -42,10 +43,59 @@ from custom.btc_agent.market_lookup import (
     _extract_threshold_from_page_html,
     _parse_threshold_from_text,
     _fetch_event_by_slug,
+    get_live_clob_quote,
 )
 
 
 class TestBtcMarketLookup(unittest.TestCase):
+    def test_clob_l2_ws_loop_updates_local_book_and_removes_depleted_levels(self):
+        fake_socket = Mock()
+        fake_socket.recv.side_effect = [
+            json.dumps(
+                [
+                    {
+                        "event_type": "book",
+                        "asset_id": "up-token",
+                        "timestamp": "1000",
+                        "bids": [{"price": "0.40", "size": "10"}],
+                        "asks": [{"price": "0.41", "size": "12"}],
+                    }
+                ]
+            ),
+            json.dumps(
+                {
+                    "event_type": "price_change",
+                    "timestamp": "2000",
+                    "price_changes": [
+                        {"asset_id": "up-token", "price": "0.41", "size": "0", "side": "SELL"},
+                        {"asset_id": "up-token", "price": "0.42", "size": "9", "side": "SELL"},
+                        {"asset_id": "up-token", "price": "0.39", "size": "7", "side": "BUY"},
+                    ],
+                }
+            ),
+            RuntimeError("stop loop"),
+        ]
+
+        with market_lookup_module._L2_LOCK:
+            market_lookup_module._ACTIVE_WS_ASSETS = {"up-token"}
+            market_lookup_module._L2_BOOKS.clear()
+
+        with patch(
+            "custom.btc_agent.market_lookup.websocket.create_connection",
+            return_value=fake_socket,
+        ), patch("custom.btc_agent.market_lookup.time.sleep", side_effect=RuntimeError("stop test")):
+            with self.assertRaises(RuntimeError):
+                market_lookup_module._clob_l2_ws_loop()
+
+        quote = get_live_clob_quote("up-token")
+        self.assertEqual(quote["timestamp"], 2000)
+        self.assertEqual(quote["best_bid"], 0.40)
+        self.assertEqual(quote["best_bid_size"], 10.0)
+        self.assertEqual(quote["best_ask"], 0.42)
+        self.assertEqual(quote["best_ask_size"], 9.0)
+        fake_socket.send.assert_called_once()
+        self.assertIn('"type": "market"', fake_socket.send.call_args.args[0])
+
     def test_hydrate_missing_threshold_prefers_rtds_before_vatic(self):
         market = BtcUpDownMarket(
             event_id="1",

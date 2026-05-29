@@ -538,6 +538,94 @@ def get_token_quote_snapshot(
     token_id: str,
     decision: Optional[LlmDecision] = None,
 ) -> TokenQuoteSnapshot:
+    from .market_lookup import get_live_clob_quote
+
+    ws_quote = get_live_clob_quote(token_id)
+    if ws_quote and ws_quote["timestamp"] > 0 and (time.time() * 1000 - ws_quote["timestamp"]) < 3000:
+        if ws_quote["best_bid"] is not None and ws_quote["best_ask"] is not None:
+            best_bid = ws_quote["best_bid"]
+            best_bid_size = ws_quote["best_bid_size"]
+            best_ask = ws_quote["best_ask"]
+            best_ask_size = ws_quote["best_ask_size"]
+            buy_quote = best_ask
+            sell_quote = best_bid
+            midpoint = round((best_bid + best_ask) / 2, 3)
+            last_trade_price = None
+            tick_size = 0.01
+            spread = best_ask - best_bid
+            crossed_or_locked_book = spread <= 0
+
+            top_level_book_imbalance = None
+            imbalance_pressure = None
+            total_top_size = float(best_bid_size or 0.0) + float(best_ask_size or 0.0)
+            if total_top_size > 0:
+                top_level_book_imbalance = float(best_bid_size or 0.0) / total_top_size
+                imbalance_pressure = (
+                    (float(best_bid_size or 0.0) - float(best_ask_size or 0.0)) / total_top_size
+                )
+
+            reference_price = compute_reference_price(
+                buy_quote=buy_quote,
+                midpoint=midpoint,
+                last_trade_price=last_trade_price,
+                spread=spread,
+                best_ask=best_ask,
+                tick_size=tick_size,
+                imbalance_pressure=imbalance_pressure,
+            )
+            spread_bps = None
+            if spread is not None and reference_price not in (None, 0):
+                spread_bps = (spread / reference_price) * 10_000
+
+            target_limit_price = compute_target_limit_price(
+                reference_price=reference_price,
+                decision=decision,
+            )
+            recommended_limit_price = compute_recommended_limit_price(
+                reference_price=reference_price,
+                tick_size=tick_size,
+                decision=decision,
+            )
+
+            if crossed_or_locked_book:
+                ok_to_submit = False
+                submit_reason = (
+                    f"Local CLOB book is crossed or locked (best_bid={best_bid:.3f}; "
+                    f"best_ask={best_ask:.3f})"
+                )
+            else:
+                ok_to_submit, submit_reason = evaluate_ok_to_submit(
+                    buy_quote=buy_quote,
+                    reference_price=reference_price,
+                    submission_limit_price=(
+                        recommended_limit_price
+                        if get_trading_config().use_recommended_limit
+                        else target_limit_price
+                    ),
+                    tick_size=tick_size,
+                )
+
+            return TokenQuoteSnapshot(
+                token_id=token_id,
+                buy_quote=buy_quote,
+                midpoint=midpoint,
+                last_trade_price=last_trade_price,
+                reference_price=reference_price,
+                target_limit_price=target_limit_price,
+                recommended_limit_price=recommended_limit_price,
+                ok_to_submit=ok_to_submit,
+                submit_reason=submit_reason,
+                best_bid=best_bid,
+                best_ask=best_ask,
+                tick_size=tick_size,
+                spread=spread,
+                best_bid_size=best_bid_size,
+                best_ask_size=best_ask_size,
+                spread_bps=spread_bps,
+                top_level_book_imbalance=top_level_book_imbalance,
+                imbalance_pressure=imbalance_pressure,
+            )
+
     buy_quote = get_price_for_side(token_id, "BUY")
     sell_quote = get_price_for_side(token_id, "SELL")
     midpoint = _get_midpoint_price(token_id)

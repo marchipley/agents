@@ -2340,6 +2340,9 @@ def _run_once_core() -> None:
         enforce_minimum_wallet_balance(account)
         _FIRST_LOOP = False
 
+    from .market_lookup import ensure_clob_l2_ws_assets
+
+    ensure_clob_l2_ws_assets(market.up_token_id, market.down_token_id)
     market = resolve_price_to_beat_with_retries(market)
     if period_changed:
         final_resolution_btc_price = None
