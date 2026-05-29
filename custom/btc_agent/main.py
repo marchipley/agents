@@ -2507,6 +2507,31 @@ def _run_once_core() -> None:
             print("-" * 80)
         return
 
+    active_orders = get_active_orders()
+    if active_orders:
+        active_order = active_orders[0]
+        try:
+            refresh_live_order_fill_status(active_order)
+        except Exception:
+            pass
+
+        if not getattr(active_order, "filled", False):
+            update_active_order_logs(
+                features.price_usd,
+                observed_at=features.as_of,
+                features=features,
+                up_snapshot=up_snapshot,
+                down_snapshot=down_snapshot,
+            )
+            print_active_orders(features.price_usd)
+            print(
+                f"Active order {getattr(active_order, 'live_order_id', None) or ''} "
+                "is UNFILLED. Waiting for fill or period to end..."
+            )
+            if cfg.debug:
+                print("-" * 80)
+            return
+
     if cfg.max_trades_per_period > 1 and state.trades_executed > 0:
         losing_active_orders = _get_losing_active_orders(features.price_usd)
         if losing_active_orders:

@@ -2033,6 +2033,106 @@ class TestBtcMain(unittest.TestCase):
         mock_decide_trade.assert_not_called()
         mock_execute_trade.assert_not_called()
 
+    def test_run_once_hard_returns_when_existing_active_order_is_unfilled(self):
+        market = SimpleNamespace(
+            slug="btc-updown-5m-1777056000",
+            title="Bitcoin Up or Down",
+            settlement_threshold=77560.75,
+            up_token_id="up-token",
+            down_token_id="down-token",
+            start_ts=1777056000,
+        )
+        state = SimpleNamespace(trades_executed=0, active_orders=[])
+        features = SimpleNamespace(
+            price_usd=77550.0,
+            as_of=datetime.fromtimestamp(1777056100, tz=timezone.utc),
+        )
+        active_order = ActivePaperOrder(
+            market_slug="btc-updown-5m-1777056000",
+            market_title="Bitcoin Up or Down",
+            side="UP",
+            shares=2.0,
+            entry_price=0.45,
+            token_id="up-token",
+            target_btc_price=77560.75,
+            entry_btc_price=77570.0,
+            live_order_id="live-order-1",
+            filled=False,
+            api_order_state="ORDER_STATE_NEW",
+        )
+
+        with ExitStack() as stack:
+            stack.enter_context(patch("custom.btc_agent.main._FIRST_LOOP", False))
+            stack.enter_context(
+                patch(
+                    "custom.btc_agent.main.get_trading_config",
+                    return_value=SimpleNamespace(
+                        debug=False,
+                        debug_price_to_beat=False,
+                        use_recommended_limit=False,
+                        max_trades_per_period=2,
+                        max_losses_per_run=0,
+                        minimum_wallet_balance=0.0,
+                    ),
+                )
+            )
+            stack.enter_context(
+                patch("custom.btc_agent.main.find_current_btc_updown_market", return_value=market)
+            )
+            stack.enter_context(patch("custom.btc_agent.main.sync_period_state", return_value=False))
+            stack.enter_context(patch("custom.btc_agent.main.get_state", return_value=state))
+            stack.enter_context(
+                patch("custom.btc_agent.main.resolve_price_to_beat_with_retries", return_value=market)
+            )
+            stack.enter_context(
+                patch("custom.btc_agent.main.build_btc_features", return_value=features)
+            )
+            stack.enter_context(
+                patch("custom.btc_agent.main.get_feature_readiness", return_value=(True, None))
+            )
+            stack.enter_context(
+                patch(
+                    "custom.btc_agent.main.get_token_quote_snapshot",
+                    return_value=SimpleNamespace(
+                        buy_quote=0.45,
+                        ok_to_submit=True,
+                        submit_reason="ok",
+                    ),
+                )
+            )
+            stack.enter_context(
+                patch("custom.btc_agent.main.get_active_orders", return_value=[active_order])
+            )
+            mock_refresh = stack.enter_context(
+                patch("custom.btc_agent.main.refresh_live_order_fill_status", return_value=False)
+            )
+            stack.enter_context(patch("custom.btc_agent.main.print_market_context"))
+            stack.enter_context(patch("custom.btc_agent.main.print_features"))
+            mock_update_logs = stack.enter_context(
+                patch("custom.btc_agent.main.update_active_order_logs")
+            )
+            mock_print_active = stack.enter_context(
+                patch("custom.btc_agent.main.print_active_orders")
+            )
+            mock_print = stack.enter_context(patch("builtins.print"))
+            mock_decide_trade = stack.enter_context(
+                patch("custom.btc_agent.main.decide_trade")
+            )
+            mock_execute_trade = stack.enter_context(
+                patch("custom.btc_agent.main.maybe_execute_trade")
+            )
+
+            run_once()
+
+        mock_refresh.assert_called_once_with(active_order)
+        mock_update_logs.assert_called_once()
+        mock_print_active.assert_called_once_with(77550.0)
+        self.assertTrue(
+            any("is UNFILLED. Waiting for fill or period to end" in str(call.args[0]) for call in mock_print.call_args_list)
+        )
+        mock_decide_trade.assert_not_called()
+        mock_execute_trade.assert_not_called()
+
     def test_run_once_finalizes_previous_orders_on_new_slug(self):
         previous_order = ActivePaperOrder(
             market_slug="btc-updown-5m-1777513500",
