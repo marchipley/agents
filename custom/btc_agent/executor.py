@@ -1681,6 +1681,7 @@ def _validate_trade_candidate(
     time_remaining_seconds = _get_time_remaining_seconds(market)
     hard_deadline_execution = time_remaining_seconds < 5 and effective_confidence > 0.70
     high_confidence_override = effective_confidence > 0.90
+    decision_confidence = float(getattr(decision, "confidence", 0.0) or 0.0)
     window_delta_master_switch = _is_window_delta_master_switch(features, time_remaining_seconds)
     min_edge_required = 0.0 if high_confidence_override else float(getattr(cfg, "min_execution_edge", 0.02))
     chosen_side_quote = snapshot.buy_quote if snapshot.buy_quote is not None else implied_probability
@@ -1801,6 +1802,7 @@ def _validate_trade_candidate(
     if (
         side_is_itm
         and "weak" in trend_regime.lower()
+        and decision_confidence < 0.80
         and features is not None
         and getattr(features, "volatility_5m", None) not in (None, 0)
         and gap_to_target is not None
@@ -2017,14 +2019,17 @@ def _validate_trade_candidate(
         and volatility_5m not in (None, 0)
         and gap_to_target is not None
     ):
-        required_vol_cushion = float(volatility_5m)
+        vol_multiplier = 1.0
+        if decision_confidence >= 0.75:
+            vol_multiplier *= 0.85
+        required_vol_cushion = float(volatility_5m) * vol_multiplier
         if abs(gap_to_target) < required_vol_cushion:
             return _reject(
                 submission_limit_price,
                 (
                     "Volatility Margin Veto: "
                     f"Tight lead ({abs(gap_to_target):.2f} USD) is less than "
-                    f"1.0x 5m Volatility ({required_vol_cushion:.2f} USD) "
+                    f"{vol_multiplier:.2f}x 5m Volatility ({required_vol_cushion:.2f} USD) "
                     f"with {time_remaining_seconds}s left."
                 ),
             )

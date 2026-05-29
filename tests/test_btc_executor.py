@@ -2032,7 +2032,7 @@ class TestBtcExecutor(unittest.TestCase):
         )
         decision = types.SimpleNamespace(
             side="UP",
-            confidence=0.90,
+            confidence=0.75,
             max_price_to_pay=1.0,
             reason="test",
         )
@@ -2108,7 +2108,7 @@ class TestBtcExecutor(unittest.TestCase):
         )
         decision = types.SimpleNamespace(
             side="UP",
-            confidence=0.90,
+            confidence=0.70,
             max_price_to_pay=1.0,
             reason="test",
         )
@@ -2411,7 +2411,7 @@ class TestBtcExecutor(unittest.TestCase):
         )
         decision = types.SimpleNamespace(
             side="UP",
-            confidence=0.90,
+            confidence=0.70,
             max_price_to_pay=1.0,
             reason="test",
         )
@@ -2451,6 +2451,56 @@ class TestBtcExecutor(unittest.TestCase):
         self.assertIsNone(validated_snapshot)
         self.assertIsNotNone(rejection)
         self.assertIn("Volatility Margin Veto", rejection.reason)
+
+    def test_validate_trade_candidate_discounts_volatility_margin_for_high_confidence(self):
+        market = types.SimpleNamespace(
+            up_token_id="up-token",
+            down_token_id="down-token",
+            settlement_threshold=100.0,
+            end_ts=1_000_000_138,
+            volume=5000.0,
+        )
+        decision = types.SimpleNamespace(
+            side="UP",
+            confidence=0.75,
+            max_price_to_pay=1.0,
+            reason="test",
+        )
+        features = types.SimpleNamespace(
+            price_usd=112.42,
+            volatility_5m=13.88,
+            atr_14=20.0,
+            delta_prev_tick=1.0,
+            rsi_9=50.0,
+        )
+        snapshot = TokenQuoteSnapshot(
+            token_id="up-token",
+            buy_quote=0.50,
+            midpoint=0.50,
+            last_trade_price=0.50,
+            reference_price=0.50,
+            target_limit_price=0.50,
+            recommended_limit_price=0.50,
+            ok_to_submit=True,
+            submit_reason="ok",
+            best_bid=0.49,
+            best_ask=0.50,
+            tick_size=0.01,
+            spread=0.01,
+        )
+
+        fake_now = datetime.fromtimestamp(1_000_000_000, tz=timezone.utc)
+        with patch("custom.btc_agent.executor.datetime") as mock_datetime:
+            mock_datetime.now.return_value = fake_now
+            validated_snapshot, rejection = _validate_trade_candidate(
+                market,
+                decision,
+                features=features,
+                snapshot=snapshot,
+            )
+
+        self.assertIs(validated_snapshot, snapshot)
+        self.assertIsNone(rejection)
 
     def test_validate_trade_candidate_allows_early_lead_above_volatility(self):
         market = types.SimpleNamespace(
@@ -2497,6 +2547,109 @@ class TestBtcExecutor(unittest.TestCase):
                 decision,
                 features=features,
                 snapshot=snapshot,
+            )
+
+        self.assertIs(validated_snapshot, snapshot)
+        self.assertIsNone(rejection)
+
+    def test_validate_trade_candidate_rejects_weak_regime_thin_buffer_below_override_confidence(self):
+        market = types.SimpleNamespace(
+            up_token_id="up-token",
+            down_token_id="down-token",
+            settlement_threshold=100.0,
+            end_ts=1_000_000_050,
+            volume=5000.0,
+        )
+        decision = types.SimpleNamespace(
+            side="UP",
+            confidence=0.79,
+            max_price_to_pay=1.0,
+            reason="test",
+        )
+        features = types.SimpleNamespace(
+            price_usd=105.00,
+            volatility_5m=10.0,
+            atr_14=20.0,
+            delta_prev_tick=1.0,
+            rsi_9=50.0,
+        )
+        snapshot = TokenQuoteSnapshot(
+            token_id="up-token",
+            buy_quote=0.50,
+            midpoint=0.50,
+            last_trade_price=0.50,
+            reference_price=0.50,
+            target_limit_price=0.50,
+            recommended_limit_price=0.50,
+            ok_to_submit=True,
+            submit_reason="ok",
+            best_bid=0.49,
+            best_ask=0.50,
+            tick_size=0.01,
+            spread=0.01,
+        )
+
+        fake_now = datetime.fromtimestamp(1_000_000_000, tz=timezone.utc)
+        with patch("custom.btc_agent.executor.datetime") as mock_datetime:
+            mock_datetime.now.return_value = fake_now
+            validated_snapshot, rejection = _validate_trade_candidate(
+                market,
+                decision,
+                features=features,
+                snapshot=snapshot,
+                regime_fingerprint={"trend_regime": "weak_up"},
+            )
+
+        self.assertIsNone(validated_snapshot)
+        self.assertIsNotNone(rejection)
+        self.assertIn("Weak Regime Buffer Veto", rejection.reason)
+
+    def test_validate_trade_candidate_bypasses_weak_regime_buffer_at_high_confidence(self):
+        market = types.SimpleNamespace(
+            up_token_id="up-token",
+            down_token_id="down-token",
+            settlement_threshold=100.0,
+            end_ts=1_000_000_050,
+            volume=5000.0,
+        )
+        decision = types.SimpleNamespace(
+            side="UP",
+            confidence=0.80,
+            max_price_to_pay=1.0,
+            reason="test",
+        )
+        features = types.SimpleNamespace(
+            price_usd=105.00,
+            volatility_5m=10.0,
+            atr_14=20.0,
+            delta_prev_tick=1.0,
+            rsi_9=50.0,
+        )
+        snapshot = TokenQuoteSnapshot(
+            token_id="up-token",
+            buy_quote=0.50,
+            midpoint=0.50,
+            last_trade_price=0.50,
+            reference_price=0.50,
+            target_limit_price=0.50,
+            recommended_limit_price=0.50,
+            ok_to_submit=True,
+            submit_reason="ok",
+            best_bid=0.49,
+            best_ask=0.50,
+            tick_size=0.01,
+            spread=0.01,
+        )
+
+        fake_now = datetime.fromtimestamp(1_000_000_000, tz=timezone.utc)
+        with patch("custom.btc_agent.executor.datetime") as mock_datetime:
+            mock_datetime.now.return_value = fake_now
+            validated_snapshot, rejection = _validate_trade_candidate(
+                market,
+                decision,
+                features=features,
+                snapshot=snapshot,
+                regime_fingerprint={"trend_regime": "weak_up"},
             )
 
         self.assertIs(validated_snapshot, snapshot)
