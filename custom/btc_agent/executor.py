@@ -587,13 +587,16 @@ def get_token_quote_snapshot(
                 decision=decision,
             )
 
-            if crossed_or_locked_book:
+            decision_confidence = float(getattr(decision, "confidence", 0.0) or 0.0)
+            if crossed_or_locked_book and decision_confidence < 0.70:
                 ok_to_submit = False
                 submit_reason = (
                     f"Local CLOB book is crossed or locked (best_bid={best_bid:.3f}; "
                     f"best_ask={best_ask:.3f})"
                 )
             else:
+                if crossed_or_locked_book:
+                    print("Bypassing crossed book veto due to high conviction (>=0.70)")
                 ok_to_submit, submit_reason = evaluate_ok_to_submit(
                     buy_quote=buy_quote,
                     reference_price=reference_price,
@@ -1596,6 +1599,43 @@ def _get_market_implied_probability(
     return _get_implied_probability(snapshot)
 
 
+def calculate_time_decay_vetoes(features: dict) -> List[str]:
+    """
+    Applies a continuous, exponential time-decay volatility curve.
+    Enforces a minimum effective volatility to prevent micro-cushion traps.
+    """
+    vetoes: List[str] = []
+
+    try:
+        time_left = float(features.get("time_remaining_seconds", 0))
+        vol_5m = float(features.get("volatility_5m", 0))
+        cushion_usd = abs(float(features.get("threshold_gap_usd", 0)))
+        adx_14 = float(features.get("adx_14", 0))
+        momentum_alignment = bool(features.get("momentum_alignment", False))
+        ema_alignment = bool(features.get("ema_alignment", False))
+
+        time_factor = max(min(time_left / 300.0, 1.0), 0.0)
+        multiplier = 0.2 + (time_factor ** 1.5) * 1.8
+        if momentum_alignment and ema_alignment:
+            multiplier *= 0.60
+        multiplier = max(multiplier, 1.0)
+
+        effective_vol = max(vol_5m, 25.0)
+        req_cushion = effective_vol * multiplier
+
+        if cushion_usd < req_cushion:
+            vetoes.append(
+                f"dynamic_vol_veto_req_{req_cushion:.2f}_act_{cushion_usd:.2f}_mult_{multiplier:.2f}"
+            )
+
+        if adx_14 > 75.0 and time_left > 60:
+            vetoes.append(f"adx_exhaustion_early_veto_adx_{adx_14:.1f}")
+    except Exception as exc:
+        vetoes.append(f"dynamic_veto_calc_error_{str(exc)}")
+
+    return vetoes
+
+
 def _get_strike_delta_pct(features: Optional[BtcFeatures], market: BtcUpDownMarket) -> Optional[float]:
     if (
         features is None
@@ -1814,11 +1854,22 @@ def _validate_trade_candidate(
         else abs(float(effective_confidence) - float(market_implied_probability))
     )
 
-    max_adx_for_new_entry = float(getattr(cfg, "max_adx_for_new_entry", 75.0))
-    if adx_14 is not None and adx_14 > max_adx_for_new_entry and not strong_trend_itm:
+    dynamic_veto_context = {
+        "time_remaining_seconds": time_remaining_seconds,
+        "volatility_5m": 0.0 if volatility_5m is None else float(volatility_5m),
+        "threshold_gap_usd": 0.0 if gap_to_target is None else float(gap_to_target),
+        "adx_14": 0.0 if adx_14 is None else float(adx_14),
+        "momentum_alignment": _momentum_alignment(features) is True,
+        "ema_alignment": bool(getattr(features, "ema_alignment", False)),
+    }
+    dynamic_adx_vetoes = [
+        veto for veto in calculate_time_decay_vetoes(dynamic_veto_context)
+        if veto.startswith("adx_exhaustion_early_veto")
+    ]
+    if dynamic_adx_vetoes:
         return _reject(
             submission_limit_price,
-            f"ADX Exhaustion Veto: ADX {adx_14:.1f} > {max_adx_for_new_entry:.1f}",
+            f"Dynamic time-decay veto blocked trade ({dynamic_adx_vetoes[0]})",
         )
 
     if atr_14 and delta_prev:
@@ -2044,48 +2095,15 @@ def _validate_trade_candidate(
             ),
         )
 
-    if (
-        consensus_gap is not None
-        and consensus_gap > 0.50
-    ):
+    max_allowed_gap = 0.25 if time_remaining_seconds <= 150 else 0.40
+    if consensus_gap is not None and consensus_gap > max_allowed_gap:
         return _reject(
             submission_limit_price,
             (
                 "Consensus-gap veto blocked hallucinated edge "
-                f"(confidence={decision.confidence:.3f}; "
                 f"effective_confidence={effective_confidence:.3f}; "
                 f"market_probability={market_implied_probability:.3f}; "
-                f"consensus_gap={consensus_gap:.3f})"
-            ),
-        )
-
-    time_factor = max(min(time_remaining_seconds / 300.0, 1.0), 0.0)
-    dynamic_buffer_multiplier = float(getattr(cfg, "dynamic_strike_buffer_multiplier", 0.4))
-    if time_remaining_seconds <= 180:
-        dynamic_buffer_multiplier = (
-            float(getattr(cfg, "late_window_buffer_multiplier", 0.15))
-            + time_factor
-            * (
-                float(getattr(cfg, "early_window_buffer_multiplier", 0.50))
-                - float(getattr(cfg, "late_window_buffer_multiplier", 0.15))
-            )
-        )
-    strike_buffer = (
-        None
-        if volatility_5m in (None, 0)
-        else float(volatility_5m) * dynamic_buffer_multiplier
-    )
-    if (
-        gap_to_target is not None
-        and strike_buffer is not None
-        and abs(gap_to_target) < strike_buffer
-    ):
-        return _reject(
-            submission_limit_price,
-            (
-                "Too close to call: gap is inside the dynamic safety buffer "
-                f"(gap={gap_to_target:.3f}; buffer={strike_buffer:.3f}; "
-                f"time_rem={time_remaining_seconds}s)"
+                f"consensus_gap={consensus_gap:.3f}; max_allowed={max_allowed_gap:.2f})"
             ),
         )
 
@@ -2102,25 +2120,17 @@ def _validate_trade_candidate(
             ),
         )
 
-    if (
-        time_remaining_seconds > 90
-        and volatility_5m not in (None, 0)
-        and gap_to_target is not None
-    ):
-        vol_multiplier = 1.0
-        if decision_confidence >= 0.75:
-            vol_multiplier *= 0.85
-        required_vol_cushion = float(volatility_5m) * vol_multiplier
-        if abs(gap_to_target) < required_vol_cushion:
-            return _reject(
-                submission_limit_price,
-                (
-                    "Volatility Margin Veto: "
-                    f"Tight lead ({abs(gap_to_target):.2f} USD) is less than "
-                    f"{vol_multiplier:.2f}x 5m Volatility ({required_vol_cushion:.2f} USD) "
-                    f"with {time_remaining_seconds}s left."
-                ),
-            )
+    dynamic_vol_vetoes: List[str] = []
+    if volatility_5m is not None and gap_to_target is not None:
+        dynamic_vol_vetoes = [
+            veto for veto in calculate_time_decay_vetoes(dynamic_veto_context)
+            if veto.startswith("dynamic_vol_veto") or veto.startswith("dynamic_veto_calc_error")
+        ]
+    if dynamic_vol_vetoes:
+        return _reject(
+            submission_limit_price,
+            f"Dynamic time-decay veto blocked trade ({dynamic_vol_vetoes[0]})",
+        )
 
     if (
         snapshot.spread is not None
@@ -2628,37 +2638,6 @@ def maybe_execute_trade(
         return rejection
 
     assert validated_snapshot is not None
-
-    if features and decision.side in ("UP", "DOWN"):
-        feature_time_remaining = getattr(features, "time_remaining_seconds", None)
-        time_remaining = (
-            int(feature_time_remaining)
-            if feature_time_remaining is not None
-            else _get_time_remaining_seconds(market)
-        )
-        settlement_threshold = getattr(market, "settlement_threshold", None)
-
-        if settlement_threshold is not None and time_remaining > 240:
-            if decision.side == "UP":
-                distance_usd = float(features.price_usd) - float(settlement_threshold)
-            else:
-                distance_usd = float(settlement_threshold) - float(features.price_usd)
-
-            if distance_usd < 50.0:
-                return TradeExecutionResult(
-                    executed=False,
-                    side=decision.side,
-                    size=0.0,
-                    price=validated_snapshot.buy_quote,
-                    token_id=validated_snapshot.token_id,
-                    reason=(
-                        f"Early-window veto: Cushion (${distance_usd:.2f}) is too thin "
-                        f"to survive {time_remaining}s of volatility. Minimum $50 required early."
-                    ),
-                    execution_snapshot=validated_snapshot,
-                    quoted_price_at_entry=validated_snapshot.buy_quote,
-                    veto_flags=["early_window_micro_cushion_veto"],
-                )
 
     if features and decision.side in ("UP", "DOWN"):
         from .indicators import fetch_btc_spot_price

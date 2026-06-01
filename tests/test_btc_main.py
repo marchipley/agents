@@ -42,6 +42,7 @@ from custom.btc_agent.main import (
     clear_price_to_beat_debug_files,
     write_price_to_beat_debug_file,
     print_active_orders,
+    print_market_context,
     maintain_unfilled_live_orders,
 )
 from custom.btc_agent.paper_state import ActivePaperOrder
@@ -85,12 +86,14 @@ class TestBtcMain(unittest.TestCase):
             api_state="ORDER_STATE_OPEN",
         )
 
+        observed_at = datetime.fromtimestamp(1_770_000_010, tz=timezone.utc)
         with patch("custom.btc_agent.main.get_active_orders", return_value=[order]), patch(
             "sys.stdout", new_callable=io.StringIO
         ) as stdout:
-            print_active_orders(80020.0)
+            print_active_orders(80020.0, observed_at=observed_at)
 
         output = stdout.getvalue()
+        self.assertIn("observed_at            = 2026-02-02T02:40:10+00:00", output)
         self.assertIn("order_1_polymarket_api_state = ORDER_STATE_OPEN", output)
         self.assertIn("order_1_internal_filled_flag = False", output)
         self.assertIn(
@@ -123,6 +126,26 @@ class TestBtcMain(unittest.TestCase):
             "order_1_position_state = UNFILLED (Polymarket State: ORDER_STATE_PARTIALLY_FILLED)",
             stdout.getvalue(),
         )
+
+    def test_print_market_context_shows_observed_at_without_debug(self):
+        market = SimpleNamespace(
+            slug="btc-updown-5m-1770000000",
+            settlement_threshold=80000.0,
+            up_market_probability=0.61,
+            down_market_probability=0.39,
+        )
+        observed_at = datetime.fromtimestamp(1_770_000_010, tz=timezone.utc)
+
+        with patch(
+            "custom.btc_agent.main.get_realized_pnl_snapshot",
+            return_value=(0.0, 0.0),
+        ), patch("sys.stdout", new_callable=io.StringIO) as stdout:
+            print_market_context(market, debug=False, observed_at=observed_at)
+
+        output = stdout.getvalue()
+        self.assertIn("Market:", output)
+        self.assertIn("observed_at            = 2026-02-02T02:40:10+00:00", output)
+        self.assertIn("slug                  = btc-updown-5m-1770000000", output)
 
     def test_maintain_unfilled_live_orders_returns_naturally_filled_orders(self):
         order = ActivePaperOrder(
@@ -2028,7 +2051,7 @@ class TestBtcMain(unittest.TestCase):
             run_once()
 
         mock_update_logs.assert_called_once()
-        mock_print_active.assert_called_once_with(77550.0)
+        mock_print_active.assert_called_once_with(77550.0, observed_at=None)
         mock_print_skip.assert_called_once()
         mock_decide_trade.assert_not_called()
         mock_execute_trade.assert_not_called()
@@ -2126,7 +2149,7 @@ class TestBtcMain(unittest.TestCase):
 
         mock_refresh.assert_called_once_with(active_order)
         mock_update_logs.assert_called_once()
-        mock_print_active.assert_called_once_with(77550.0)
+        mock_print_active.assert_called_once_with(77550.0, observed_at=features.as_of)
         self.assertTrue(
             any("is UNFILLED. Waiting for fill or period to end" in str(call.args[0]) for call in mock_print.call_args_list)
         )

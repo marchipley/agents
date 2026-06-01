@@ -2144,13 +2144,23 @@ def enforce_minimum_wallet_balance(account: AccountBalanceSnapshot) -> None:
         sys.exit(1)
 
 
-def print_active_orders(current_btc_price: float) -> None:
+def _terminal_observed_at_iso(observed_at: Optional[datetime] = None) -> str:
+    if observed_at is None or not hasattr(observed_at, "isoformat"):
+        observed_at = datetime.now(timezone.utc)
+    return observed_at.isoformat()
+
+
+def print_active_orders(current_btc_price: float, observed_at: Optional[datetime] = None) -> None:
     active_orders = get_active_orders()
+    observed_at_iso = _terminal_observed_at_iso(observed_at)
     if not active_orders:
-        print("Active orders: None")
+        print("Active orders:")
+        print(f"  observed_at            = {observed_at_iso}")
+        print("  status                 = None")
         return
 
     print("Active orders:")
+    print(f"  observed_at            = {observed_at_iso}")
     for idx, order in enumerate(active_orders, start=1):
         filled_status = bool(getattr(order, "filled", False))
         api_state_label = getattr(order, "api_order_state", None) or getattr(order, "api_state", None) or "UNKNOWN"
@@ -2218,8 +2228,10 @@ def print_market_context(
     debug: bool,
     up_snapshot: Optional[TokenQuoteSnapshot] = None,
     down_snapshot: Optional[TokenQuoteSnapshot] = None,
+    observed_at: Optional[datetime] = None,
 ) -> None:
     print("Market:")
+    print(f"  observed_at            = {_terminal_observed_at_iso(observed_at)}")
     print(f"  slug                  = {market.slug}")
     print(f"  period_open_price_to_beat = {_fmt(market.settlement_threshold)}")
     print(f"  up_market_probability = {_fmt(getattr(market, 'up_market_probability', None))}")
@@ -2410,7 +2422,7 @@ def _run_once_core() -> None:
             )
         else:
             current_btc_price = fetch_btc_spot_price()
-        print_active_orders(current_btc_price)
+        print_active_orders(current_btc_price, observed_at=observed_at if active_orders else None)
         if cfg.debug:
             print("-" * 80)
         return
@@ -2448,7 +2460,7 @@ def _run_once_core() -> None:
                     up_snapshot=up_snapshot,
                     down_snapshot=down_snapshot,
                 )
-                print_active_orders(current_btc_price)
+                print_active_orders(current_btc_price, observed_at=observed_at)
 
             consume_trade_cooldown_loop()
             print_llm_skip_reason(
@@ -2526,7 +2538,7 @@ def _run_once_core() -> None:
                 up_snapshot=up_snapshot,
                 down_snapshot=down_snapshot,
             )
-            print_active_orders(features.price_usd)
+            print_active_orders(features.price_usd, observed_at=features.as_of)
             print(
                 f"Active order {getattr(active_order, 'live_order_id', None) or ''} "
                 "is UNFILLED. Waiting for fill or period to end..."
@@ -2557,7 +2569,7 @@ def _run_once_core() -> None:
                 up_snapshot=up_snapshot,
                 down_snapshot=down_snapshot,
             )
-            print_active_orders(features.price_usd)
+            print_active_orders(features.price_usd, observed_at=features.as_of)
             print_llm_skip_reason(skip_reason)
             if cfg.debug:
                 print("-" * 80)
@@ -2750,7 +2762,7 @@ def _run_once_core() -> None:
         down_snapshot=down_snapshot,
     )
     if cfg.debug and get_active_orders():
-        print_active_orders(active_btc_price)
+        print_active_orders(active_btc_price, observed_at=features.as_of)
     if cfg.debug:
         print("-" * 80)
 

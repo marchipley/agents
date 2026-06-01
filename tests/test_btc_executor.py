@@ -34,6 +34,7 @@ from custom.btc_agent.executor import (
     get_submission_limit_label,
     maybe_execute_trade,
     retry_unfilled_live_order,
+    calculate_time_decay_vetoes,
     TokenQuoteSnapshot,
 )
 
@@ -86,6 +87,31 @@ class TestBtcExecutor(unittest.TestCase):
         self.assertFalse(snapshot.ok_to_submit)
         self.assertLessEqual(snapshot.spread, 0)
         self.assertIn("crossed or locked", snapshot.submit_reason)
+        mock_rest_quote.assert_not_called()
+        mock_book.assert_not_called()
+
+    def test_get_token_quote_snapshot_allows_crossed_book_for_urgent_high_confidence_trade(self):
+        decision = types.SimpleNamespace(side="UP", confidence=0.70)
+        with patch(
+            "custom.btc_agent.market_lookup.get_live_clob_quote",
+            return_value={
+                "best_bid": 0.69,
+                "best_bid_size": 120.0,
+                "best_ask": 0.68,
+                "best_ask_size": 80.0,
+                "timestamp": 1_000_000_000_000,
+            },
+        ), patch("custom.btc_agent.executor.time.time", return_value=1_000_000_001.0), patch(
+            "custom.btc_agent.executor._get_price_from_clob_single"
+        ) as mock_rest_quote, patch("custom.btc_agent.executor._get_orderbook") as mock_book, patch(
+            "builtins.print"
+        ) as mock_print:
+            snapshot = get_token_quote_snapshot("token-1", decision=decision)
+
+        self.assertTrue(snapshot.ok_to_submit)
+        self.assertLessEqual(snapshot.spread, 0)
+        self.assertNotIn("crossed or locked", snapshot.submit_reason)
+        mock_print.assert_called_once_with("Bypassing crossed book veto due to high conviction (>=0.70)")
         mock_rest_quote.assert_not_called()
         mock_book.assert_not_called()
 
@@ -343,65 +369,55 @@ class TestBtcExecutor(unittest.TestCase):
         self.assertEqual(result.veto_flags, ["last_second_adverse_slip_down"])
         self.assertIn("BTC spiked 10.50 USD", result.reason)
 
-    def test_maybe_execute_trade_blocks_early_up_with_thin_cushion(self):
-        decision = types.SimpleNamespace(side="UP", confidence=0.8)
-        features = types.SimpleNamespace(price_usd=80025.0, time_remaining_seconds=250)
-        market = types.SimpleNamespace(settlement_threshold=80000.0)
-        snapshot = TokenQuoteSnapshot(
-            token_id="up-token",
-            buy_quote=0.62,
-            midpoint=0.62,
-            last_trade_price=0.62,
-            reference_price=0.62,
-            target_limit_price=0.62,
-            recommended_limit_price=0.62,
-            ok_to_submit=True,
-            submit_reason="ok",
-            best_bid=0.61,
-            best_ask=0.62,
-            tick_size=0.01,
-            spread=0.01,
+    def test_calculate_time_decay_vetoes_requires_large_early_cushion(self):
+        vetoes = calculate_time_decay_vetoes(
+            {
+                "time_remaining_seconds": 250,
+                "volatility_5m": 40.0,
+                "threshold_gap_usd": 50.0,
+                "adx_14": 30.0,
+            }
         )
 
-        with patch(
-            "custom.btc_agent.executor._validate_trade_candidate",
-            return_value=(snapshot, None),
-        ):
-            result = maybe_execute_trade(market, decision, features=features, snapshot=snapshot)
+        self.assertEqual(vetoes, ["dynamic_vol_veto_req_62.77_act_50.00_mult_1.57"])
 
-        self.assertFalse(result.executed)
-        self.assertEqual(result.veto_flags, ["early_window_micro_cushion_veto"])
-        self.assertIn("Minimum $50 required early", result.reason)
-
-    def test_maybe_execute_trade_blocks_early_down_with_thin_cushion(self):
-        decision = types.SimpleNamespace(side="DOWN", confidence=0.8)
-        features = types.SimpleNamespace(price_usd=79975.0, time_remaining_seconds=250)
-        market = types.SimpleNamespace(settlement_threshold=80000.0)
-        snapshot = TokenQuoteSnapshot(
-            token_id="down-token",
-            buy_quote=0.62,
-            midpoint=0.62,
-            last_trade_price=0.62,
-            reference_price=0.62,
-            target_limit_price=0.62,
-            recommended_limit_price=0.62,
-            ok_to_submit=True,
-            submit_reason="ok",
-            best_bid=0.61,
-            best_ask=0.62,
-            tick_size=0.01,
-            spread=0.01,
+    def test_calculate_time_decay_vetoes_applies_minimum_volatility_floor(self):
+        vetoes = calculate_time_decay_vetoes(
+            {
+                "time_remaining_seconds": 250,
+                "volatility_5m": 5.0,
+                "threshold_gap_usd": 35.0,
+                "adx_14": 30.0,
+            }
         )
 
-        with patch(
-            "custom.btc_agent.executor._validate_trade_candidate",
-            return_value=(snapshot, None),
-        ):
-            result = maybe_execute_trade(market, decision, features=features, snapshot=snapshot)
+        self.assertEqual(vetoes, ["dynamic_vol_veto_req_39.23_act_35.00_mult_1.57"])
 
-        self.assertFalse(result.executed)
-        self.assertEqual(result.veto_flags, ["early_window_micro_cushion_veto"])
-        self.assertIn("Minimum $50 required early", result.reason)
+    def test_calculate_time_decay_vetoes_relaxes_late_cushion(self):
+        vetoes = calculate_time_decay_vetoes(
+            {
+                "time_remaining_seconds": 70,
+                "volatility_5m": 40.0,
+                "threshold_gap_usd": 18.0,
+                "adx_14": 70.0,
+            }
+        )
+
+        self.assertEqual(vetoes, ["dynamic_vol_veto_req_40.00_act_18.00_mult_1.00"])
+
+    def test_calculate_time_decay_vetoes_discounts_aligned_macro_trend(self):
+        vetoes = calculate_time_decay_vetoes(
+            {
+                "time_remaining_seconds": 300,
+                "volatility_5m": 25.0,
+                "threshold_gap_usd": 35.0,
+                "adx_14": 30.0,
+                "momentum_alignment": True,
+                "ema_alignment": True,
+            }
+        )
+
+        self.assertEqual(vetoes, [])
 
     def test_resolve_confirmed_live_fill_requires_positive_filled_size(self):
         with patch(
@@ -1128,7 +1144,7 @@ class TestBtcExecutor(unittest.TestCase):
             up_token_id="up-token",
             down_token_id="down-token",
             settlement_threshold=100.0,
-            end_ts=1_000_000_180,
+            end_ts=1_000_000_080,
             volume=5000.0,
             up_market_probability=0.45,
             down_market_probability=0.55,
@@ -1240,7 +1256,7 @@ class TestBtcExecutor(unittest.TestCase):
             reason="test",
         )
         features = types.SimpleNamespace(
-            price_usd=105.0,
+            price_usd=130.0,
             volatility_5m=4.0,
             rsi_9=72.0,
             delta_pct_from_window_open=0.001,
@@ -1288,7 +1304,7 @@ class TestBtcExecutor(unittest.TestCase):
             reason="test",
         )
         features = types.SimpleNamespace(
-            price_usd=105.0,
+            price_usd=130.0,
             volatility_5m=10.0,
             rsi_9=82.0,
             adx_14=55.0,
@@ -1345,16 +1361,16 @@ class TestBtcExecutor(unittest.TestCase):
         )
         snapshot = TokenQuoteSnapshot(
             token_id="up-token",
-            buy_quote=0.90,
-            midpoint=0.90,
-            last_trade_price=0.90,
-            reference_price=0.90,
-            target_limit_price=0.90,
-            recommended_limit_price=0.90,
+            buy_quote=0.80,
+            midpoint=0.80,
+            last_trade_price=0.80,
+            reference_price=0.80,
+            target_limit_price=0.80,
+            recommended_limit_price=0.80,
             ok_to_submit=True,
             submit_reason="ok",
-            best_bid=0.89,
-            best_ask=0.90,
+            best_bid=0.79,
+            best_ask=0.80,
             tick_size=0.01,
             spread=0.01,
         )
@@ -1370,10 +1386,10 @@ class TestBtcExecutor(unittest.TestCase):
             )
 
         self.assertIsNone(validated_snapshot)
-        self.assertIn("ADX Exhaustion Veto", rejection.reason)
-        self.assertIn("76.0 > 75.0", rejection.reason)
+        self.assertIn("Dynamic time-decay veto", rejection.reason)
+        self.assertIn("adx_exhaustion_early_veto_adx_76.0", rejection.reason)
 
-    def test_validate_trade_candidate_allows_itm_strong_trend_despite_adx_ceiling(self):
+    def test_validate_trade_candidate_rejects_itm_strong_trend_on_dynamic_adx_exhaustion(self):
         market = types.SimpleNamespace(
             up_token_id="up-token",
             down_token_id="down-token",
@@ -1398,16 +1414,16 @@ class TestBtcExecutor(unittest.TestCase):
         )
         snapshot = TokenQuoteSnapshot(
             token_id="up-token",
-            buy_quote=0.90,
-            midpoint=0.90,
-            last_trade_price=0.90,
-            reference_price=0.90,
-            target_limit_price=0.90,
-            recommended_limit_price=0.90,
+            buy_quote=0.80,
+            midpoint=0.80,
+            last_trade_price=0.80,
+            reference_price=0.80,
+            target_limit_price=0.80,
+            recommended_limit_price=0.80,
             ok_to_submit=True,
             submit_reason="ok",
-            best_bid=0.89,
-            best_ask=0.90,
+            best_bid=0.79,
+            best_ask=0.80,
             tick_size=0.01,
             spread=0.01,
         )
@@ -1449,15 +1465,16 @@ class TestBtcExecutor(unittest.TestCase):
                 regime_fingerprint={"trend_regime": "strong_up"},
             )
 
-        self.assertIs(validated_snapshot, snapshot)
-        self.assertIsNone(rejection)
+        self.assertIsNone(validated_snapshot)
+        self.assertIsNotNone(rejection)
+        self.assertIn("adx_exhaustion_early_veto_adx_80.0", rejection.reason)
 
     def test_validate_trade_candidate_rejects_up_on_absolute_rsi_cap(self):
         market = types.SimpleNamespace(
             up_token_id="up-token",
             down_token_id="down-token",
             settlement_threshold=100.0,
-            end_ts=1_000_000_180,
+            end_ts=1_000_000_080,
             volume=5000.0,
             up_market_probability=0.80,
             down_market_probability=0.20,
@@ -1469,7 +1486,7 @@ class TestBtcExecutor(unittest.TestCase):
             reason="test",
         )
         features = types.SimpleNamespace(
-            price_usd=105.0,
+            price_usd=130.0,
             volatility_5m=10.0,
             rsi_9=86.0,
             adx_14=30.0,
@@ -1522,7 +1539,7 @@ class TestBtcExecutor(unittest.TestCase):
             reason="test",
         )
         features = types.SimpleNamespace(
-            price_usd=105.0,
+            price_usd=130.0,
             volatility_5m=2.0,
             rsi_9=90.0,
             adx_14=40.0,
@@ -1530,16 +1547,16 @@ class TestBtcExecutor(unittest.TestCase):
         )
         snapshot = TokenQuoteSnapshot(
             token_id="up-token",
-            buy_quote=0.90,
-            midpoint=0.90,
-            last_trade_price=0.90,
-            reference_price=0.90,
-            target_limit_price=0.90,
-            recommended_limit_price=0.90,
+            buy_quote=0.80,
+            midpoint=0.80,
+            last_trade_price=0.80,
+            reference_price=0.80,
+            target_limit_price=0.80,
+            recommended_limit_price=0.80,
             ok_to_submit=True,
             submit_reason="ok",
-            best_bid=0.89,
-            best_ask=0.90,
+            best_bid=0.79,
+            best_ask=0.80,
             tick_size=0.01,
             spread=0.01,
         )
@@ -1639,7 +1656,7 @@ class TestBtcExecutor(unittest.TestCase):
             up_token_id="up-token",
             down_token_id="down-token",
             settlement_threshold=100.0,
-            end_ts=1_000_000_180,
+            end_ts=1_000_000_080,
             volume=5000.0,
             up_market_probability=0.80,
             down_market_probability=0.20,
@@ -1651,7 +1668,7 @@ class TestBtcExecutor(unittest.TestCase):
             reason="test",
         )
         features = types.SimpleNamespace(
-            price_usd=105.0,
+            price_usd=130.0,
             volatility_5m=4.0,
             rsi_9=84.0,
             rsi_speed_divergence=6.0,
@@ -1903,7 +1920,8 @@ class TestBtcExecutor(unittest.TestCase):
             )
 
         self.assertIsNone(validated_snapshot)
-        self.assertIn("Too close to call", rejection.reason)
+        self.assertIn("Dynamic time-decay veto", rejection.reason)
+        self.assertIn("dynamic_vol_veto", rejection.reason)
 
     def test_validate_trade_candidate_rejects_up_quote_price_divergence(self):
         market = types.SimpleNamespace(
@@ -1912,6 +1930,8 @@ class TestBtcExecutor(unittest.TestCase):
             settlement_threshold=100.0,
             end_ts=1_000_000_180,
             volume=5000.0,
+            up_market_probability=0.50,
+            down_market_probability=0.50,
         )
         decision = types.SimpleNamespace(
             side="UP",
@@ -2299,7 +2319,7 @@ class TestBtcExecutor(unittest.TestCase):
             reason="test",
         )
         features = types.SimpleNamespace(
-            price_usd=118.0,
+            price_usd=130.0,
             volatility_5m=10.0,
             atr_14=40.0,
             rsi_9=61.0,
@@ -2494,6 +2514,8 @@ class TestBtcExecutor(unittest.TestCase):
             settlement_threshold=100.0,
             end_ts=1_000_000_138,
             volume=5000.0,
+            up_market_probability=0.65,
+            down_market_probability=0.35,
         )
         decision = types.SimpleNamespace(
             side="UP",
@@ -2502,7 +2524,7 @@ class TestBtcExecutor(unittest.TestCase):
             reason="test",
         )
         features = types.SimpleNamespace(
-            price_usd=112.42,
+            price_usd=110.0,
             volatility_5m=13.88,
             atr_14=20.0,
             delta_prev_tick=1.0,
@@ -2536,7 +2558,8 @@ class TestBtcExecutor(unittest.TestCase):
 
         self.assertIsNone(validated_snapshot)
         self.assertIsNotNone(rejection)
-        self.assertIn("Volatility Margin Veto", rejection.reason)
+        self.assertIn("Dynamic time-decay veto", rejection.reason)
+        self.assertIn("dynamic_vol_veto", rejection.reason)
 
     def test_validate_trade_candidate_discounts_volatility_margin_for_high_confidence(self):
         market = types.SimpleNamespace(
@@ -2545,6 +2568,8 @@ class TestBtcExecutor(unittest.TestCase):
             settlement_threshold=100.0,
             end_ts=1_000_000_138,
             volume=5000.0,
+            up_market_probability=0.75,
+            down_market_probability=0.25,
         )
         decision = types.SimpleNamespace(
             side="UP",
@@ -2553,7 +2578,7 @@ class TestBtcExecutor(unittest.TestCase):
             reason="test",
         )
         features = types.SimpleNamespace(
-            price_usd=112.42,
+            price_usd=125.0,
             volatility_5m=13.88,
             atr_14=20.0,
             delta_prev_tick=1.0,
@@ -2595,6 +2620,8 @@ class TestBtcExecutor(unittest.TestCase):
             settlement_threshold=100.0,
             end_ts=1_000_000_138,
             volume=5000.0,
+            up_market_probability=0.75,
+            down_market_probability=0.25,
         )
         decision = types.SimpleNamespace(
             side="UP",
@@ -2645,6 +2672,8 @@ class TestBtcExecutor(unittest.TestCase):
             settlement_threshold=100.0,
             end_ts=1_000_000_050,
             volume=5000.0,
+            up_market_probability=0.60,
+            down_market_probability=0.40,
         )
         decision = types.SimpleNamespace(
             side="UP",
@@ -2653,8 +2682,8 @@ class TestBtcExecutor(unittest.TestCase):
             reason="test",
         )
         features = types.SimpleNamespace(
-            price_usd=105.00,
-            volatility_5m=10.0,
+            price_usd=102.00,
+            volatility_5m=5.0,
             atr_14=20.0,
             delta_prev_tick=1.0,
             rsi_9=50.0,
@@ -2697,6 +2726,8 @@ class TestBtcExecutor(unittest.TestCase):
             settlement_threshold=100.0,
             end_ts=1_000_000_050,
             volume=5000.0,
+            up_market_probability=0.65,
+            down_market_probability=0.35,
         )
         decision = types.SimpleNamespace(
             side="UP",
@@ -2705,8 +2736,8 @@ class TestBtcExecutor(unittest.TestCase):
             reason="test",
         )
         features = types.SimpleNamespace(
-            price_usd=105.00,
-            volatility_5m=10.0,
+            price_usd=130.00,
+            volatility_5m=5.0,
             atr_14=20.0,
             delta_prev_tick=1.0,
             rsi_9=50.0,
@@ -2809,8 +2840,8 @@ class TestBtcExecutor(unittest.TestCase):
             reason="test",
         )
         features = types.SimpleNamespace(
-            price_usd=88.0,
-            volatility_5m=10.0,
+            price_usd=70.0,
+            volatility_5m=5.0,
             atr_14=40.0,
             rsi_9=40.0,
             momentum_acceleration=2.0,
