@@ -54,6 +54,7 @@ from .paper_state import (
     get_state,
     record_executed_trade,
     record_realized_pnl_for_order,
+    revert_executed_trade,
     set_trade_cooldown,
     sync_period_state,
 )
@@ -1540,6 +1541,16 @@ def maintain_unfilled_live_orders(active_orders, market):
 
                         canceled = cancel_live_order(order_id)
                         if canceled:
+                            # Allow Polymarket REST state to catch up with an in-flight match
+                            # before releasing the local trade slot.
+                            time.sleep(1.5)
+                            try:
+                                if refresh_live_order_fill_status(order):
+                                    newly_filled_orders.append(order)
+                                    continue
+                            except Exception:
+                                pass
+
                             msg = (
                                 f"Unfilled order {order_id} was placed but cancelled because it was "
                                 f"not filled within {cancel_timeout} seconds."
@@ -1559,6 +1570,45 @@ def maintain_unfilled_live_orders(active_orders, market):
                                 log_file.write(f"\nobserved_at={datetime.now(timezone.utc).isoformat()}\n")
                                 log_file.write("phase=LIVE_ORDER_CANCELED_TIMEOUT\n")
                                 log_file.write(f"reason={msg}\n\n")
+
+                            final_path = _completed_order_final_log_path(
+                                order.market_slug,
+                                "unfilled",
+                                side=order.side,
+                                not_filled=True,
+                                trade_number_in_period=getattr(order, "trade_number_in_period", None),
+                            )
+                            try:
+                                os.replace(log_path, final_path)
+                            except OSError:
+                                pass
+
+                            try:
+                                append_period_analysis_sample(
+                                    type(
+                                        "CompletedOrderMarket",
+                                        (),
+                                        {
+                                            "slug": order.market_slug,
+                                            "title": order.market_title,
+                                            "settlement_threshold": order.target_btc_price,
+                                            "up_market_probability": None,
+                                            "down_market_probability": None,
+                                            "up_token_id": None,
+                                            "down_token_id": None,
+                                        },
+                                    )(),
+                                    phase="LIVE_ORDER_CANCELED_TIMEOUT",
+                                    order=order,
+                                    outcome_label="unfilled",
+                                    outcome_reason=msg,
+                                    observed_at=datetime.now(timezone.utc),
+                                    force=True,
+                                )
+                            except Exception:
+                                pass
+
+                            revert_executed_trade(order)
 
         except Exception:
             continue

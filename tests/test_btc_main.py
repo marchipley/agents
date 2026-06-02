@@ -187,7 +187,7 @@ class TestBtcMain(unittest.TestCase):
             filled=False,
             actual_fill_price=None,
         )
-        log_path = "/tmp/completed_orders/completed_order_1779999901.txt"
+        log_path = "/tmp/completed_orders/completed_order_unfilled_down_1779999901.txt"
 
         with patch.dict(os.environ, {"CANCEL_UNFILLED_TIMER": "10"}), patch(
             "custom.btc_agent.main.refresh_live_order_fill_status",
@@ -198,6 +198,15 @@ class TestBtcMain(unittest.TestCase):
         ) as cancel_order, patch(
             "custom.btc_agent.main.os.getcwd",
             return_value="/tmp",
+        ), patch(
+            "custom.btc_agent.main.append_period_analysis_sample"
+        ) as append_analysis, patch(
+            "custom.btc_agent.main.revert_executed_trade"
+        ) as revert_trade, patch(
+            "custom.btc_agent.main.os.replace",
+            wraps=os.replace,
+        ), patch(
+            "custom.btc_agent.main.time.sleep"
         ), patch("sys.stdout", new_callable=io.StringIO) as stdout:
             result = maintain_unfilled_live_orders([order], SimpleNamespace())
 
@@ -207,6 +216,10 @@ class TestBtcMain(unittest.TestCase):
         self.assertEqual(order.api_order_state, "CANCELED")
         self.assertEqual(order.api_state, "CANCELED")
         self.assertIn("CANCELED: Unfilled order order-timeout", stdout.getvalue())
+        append_analysis.assert_called_once()
+        self.assertEqual(append_analysis.call_args.kwargs["phase"], "LIVE_ORDER_CANCELED_TIMEOUT")
+        self.assertEqual(append_analysis.call_args.kwargs["outcome_label"], "unfilled")
+        revert_trade.assert_called_once_with(order)
 
         with open(log_path, encoding="utf-8") as order_log:
             content = order_log.read()
@@ -216,6 +229,41 @@ class TestBtcMain(unittest.TestCase):
             "reason=Unfilled order order-timeout was placed but cancelled because it was not filled within 10.0 seconds.",
             content,
         )
+
+    def test_maintain_unfilled_live_orders_preserves_post_cancel_ghost_fill(self):
+        order = ActivePaperOrder(
+            market_slug="btc-updown-5m-1779999905",
+            market_title="Bitcoin Up or Down",
+            side="UP",
+            shares=5.0,
+            entry_price=0.67,
+            token_id="up-token",
+            target_btc_price=80000.0,
+            entry_btc_price=80010.0,
+            live_order_id="order-ghost-fill",
+            placed_at=datetime.now(timezone.utc) - timedelta(seconds=30),
+            filled=False,
+            actual_fill_price=None,
+        )
+
+        with patch.dict(os.environ, {"CANCEL_UNFILLED_TIMER": "10"}), patch(
+            "custom.btc_agent.main.refresh_live_order_fill_status",
+            side_effect=[False, False, True],
+        ) as refresh_status, patch(
+            "custom.btc_agent.executor.cancel_live_order",
+            return_value=True,
+        ) as cancel_order, patch(
+            "custom.btc_agent.main.revert_executed_trade"
+        ) as revert_trade, patch(
+            "custom.btc_agent.main.time.sleep"
+        ) as sleep:
+            result = maintain_unfilled_live_orders([order], SimpleNamespace())
+
+        self.assertEqual(result, [order])
+        self.assertEqual(refresh_status.call_count, 3)
+        cancel_order.assert_called_once_with("order-ghost-fill")
+        sleep.assert_called_once_with(1.5)
+        revert_trade.assert_not_called()
 
     def test_maintain_unfilled_live_orders_final_status_check_blocks_cancel(self):
         order = ActivePaperOrder(

@@ -10,6 +10,8 @@ from custom.btc_agent.paper_state import (
     get_state,
     record_executed_trade,
     record_realized_pnl_for_order,
+    reset_period_state,
+    revert_executed_trade,
     set_trade_cooldown,
     sync_period_state,
 )
@@ -17,7 +19,7 @@ from custom.btc_agent.paper_state import (
 
 class TestBtcPaperState(unittest.TestCase):
     def setUp(self):
-        sync_period_state("btc-updown-5m-1", "Period 1")
+        reset_period_state("btc-updown-5m-1", "Period 1")
 
     def test_record_trade_updates_period_state(self):
         order = ActivePaperOrder(
@@ -37,6 +39,25 @@ class TestBtcPaperState(unittest.TestCase):
         self.assertEqual(state.trades_executed, 1)
         self.assertEqual(len(state.active_orders), 1)
         self.assertEqual(state.active_orders[0].token_id, "token-1")
+
+    def test_revert_executed_trade_removes_order_and_frees_trade_slot(self):
+        order = ActivePaperOrder(
+            market_slug="btc-updown-5m-1",
+            market_title="Period 1",
+            side="UP",
+            shares=5.0,
+            entry_price=0.55,
+            token_id="token-1",
+            target_btc_price=75000.0,
+            entry_btc_price=75010.0,
+        )
+        record_executed_trade(order)
+
+        revert_executed_trade(order)
+        state = get_state()
+
+        self.assertEqual(state.trades_executed, 0)
+        self.assertEqual(state.active_orders, [])
 
     def test_sync_period_state_resets_trade_count_and_orders(self):
         record_executed_trade(

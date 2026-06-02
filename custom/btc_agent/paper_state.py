@@ -104,6 +104,16 @@ def record_realized_pnl_for_order(order: ActivePaperOrder, outcome_label: str) -
     return record_realized_pnl(pnl)
 
 
+def revert_executed_trade(order: ActivePaperOrder) -> None:
+    """
+    Removes a canceled order from the active queue and frees up the trade slot
+    so the bot can attempt another entry in the same period.
+    """
+    if order in _STATE.active_orders:
+        _STATE.active_orders.remove(order)
+        _STATE.trades_executed = max(0, _STATE.trades_executed - 1)
+
+
 def set_trade_cooldown(loop_count: int) -> None:
     _STATE.trade_cooldown_loops_remaining = max(int(loop_count), 0)
 
