@@ -305,7 +305,8 @@ class TestBtcExecutor(unittest.TestCase):
 
     def test_maybe_execute_trade_blocks_up_on_last_second_drop(self):
         decision = types.SimpleNamespace(side="UP", confidence=0.8)
-        features = types.SimpleNamespace(price_usd=80000.0)
+        features_as_of = datetime.now(timezone.utc)
+        features = types.SimpleNamespace(price_usd=80000.0, as_of=features_as_of)
         market = types.SimpleNamespace()
         snapshot = TokenQuoteSnapshot(
             token_id="up-token",
@@ -329,16 +330,18 @@ class TestBtcExecutor(unittest.TestCase):
         ), patch(
             "custom.btc_agent.indicators.fetch_btc_spot_price",
             return_value=79989.5,
-        ):
+        ) as fetch_price:
             result = maybe_execute_trade(market, decision, features=features, snapshot=snapshot)
 
         self.assertFalse(result.executed)
         self.assertEqual(result.veto_flags, ["last_second_adverse_slip_up"])
         self.assertIn("BTC dropped 10.50 USD", result.reason)
+        fetch_price.assert_called_once_with(min_time=features_as_of)
 
     def test_maybe_execute_trade_blocks_down_on_last_second_spike(self):
         decision = types.SimpleNamespace(side="DOWN", confidence=0.8)
-        features = types.SimpleNamespace(price_usd=80000.0)
+        features_as_of = datetime.now(timezone.utc)
+        features = types.SimpleNamespace(price_usd=80000.0, as_of=features_as_of)
         market = types.SimpleNamespace()
         snapshot = TokenQuoteSnapshot(
             token_id="down-token",
@@ -362,12 +365,13 @@ class TestBtcExecutor(unittest.TestCase):
         ), patch(
             "custom.btc_agent.indicators.fetch_btc_spot_price",
             return_value=80010.5,
-        ):
+        ) as fetch_price:
             result = maybe_execute_trade(market, decision, features=features, snapshot=snapshot)
 
         self.assertFalse(result.executed)
         self.assertEqual(result.veto_flags, ["last_second_adverse_slip_down"])
         self.assertIn("BTC spiked 10.50 USD", result.reason)
+        fetch_price.assert_called_once_with(min_time=features_as_of)
 
     def test_calculate_time_decay_vetoes_requires_large_early_cushion(self):
         vetoes = calculate_time_decay_vetoes(

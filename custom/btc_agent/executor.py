@@ -2643,7 +2643,7 @@ def maybe_execute_trade(
         from .indicators import fetch_btc_spot_price
 
         try:
-            latest_btc_price = fetch_btc_spot_price()
+            latest_btc_price = fetch_btc_spot_price(min_time=features.as_of)
             price_slip_usd = latest_btc_price - features.price_usd
             max_adverse_slip_usd = 10.0
 

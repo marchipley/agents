@@ -67,6 +67,32 @@ class TestBtcIndicators(unittest.TestCase):
 
         self.assertEqual(price, 80444.25)
 
+    def test_fetch_btc_spot_price_waits_for_tick_after_min_time(self):
+        indicators._LATEST_RTDS_PRICE = 80382.0
+        indicators._LATEST_RTDS_TIME = datetime.fromtimestamp(1_777_000_001, tz=timezone.utc)
+        min_time = datetime.fromtimestamp(1_777_000_002, tz=timezone.utc)
+
+        def sleep_side_effect(_seconds):
+            indicators._LATEST_RTDS_PRICE = 80390.0
+            indicators._LATEST_RTDS_TIME = datetime.fromtimestamp(1_777_000_003, tz=timezone.utc)
+
+        with patch("custom.btc_agent.indicators._ensure_rtds_thread"), patch(
+            "custom.btc_agent.indicators.time.monotonic",
+            side_effect=[100.0, 100.1, 100.2],
+        ), patch(
+            "custom.btc_agent.indicators.time.sleep",
+            side_effect=sleep_side_effect,
+        ), patch(
+            "custom.btc_agent.indicators.datetime",
+        ) as mock_datetime:
+            mock_datetime.now.return_value = datetime.fromtimestamp(1_777_000_004, tz=timezone.utc)
+            mock_datetime.fromtimestamp.side_effect = datetime.fromtimestamp
+            mock_datetime.timezone = timezone
+            price = indicators.fetch_btc_spot_price(min_time=min_time)
+
+        self.assertEqual(price, 80390.0)
+        self.assertAlmostEqual(indicators.get_latest_cached_price(), 80390.0, places=5)
+
     def test_fetch_btc_spot_price_exits_when_rtds_stale(self):
         indicators._LATEST_RTDS_PRICE = 75927.0
         indicators._LATEST_RTDS_TIME = datetime.fromtimestamp(1_777_000_001, tz=timezone.utc)

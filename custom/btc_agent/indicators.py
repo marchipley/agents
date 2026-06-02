@@ -338,10 +338,14 @@ def ensure_price_history_backfilled(now: Optional[datetime] = None) -> None:
         pass
 
 
-def fetch_btc_spot_price(allow_cached_fallback: bool = True) -> float:
+def fetch_btc_spot_price(
+    allow_cached_fallback: bool = True,
+    min_time: Optional[datetime] = None,
+) -> float:
     """
     Fetches the live BTC price EXCLUSIVELY from the Polymarket RTDS websocket feed.
-    If the timestamp in the payload is > 15 seconds old, or the feed drops,
+    If min_time is provided, waits for an RTDS tick newer than that timestamp.
+    If the timestamp in the payload is > 10 seconds old, or the feed drops,
     the application will throw a fatal error and instantly exit.
     """
     _ensure_rtds_thread()
@@ -349,10 +353,13 @@ def fetch_btc_spot_price(allow_cached_fallback: bool = True) -> float:
     deadline = time.monotonic() + 10.0
     while time.monotonic() < deadline:
         if _LATEST_RTDS_PRICE is not None and _LATEST_RTDS_TIME is not None:
-            age_seconds = (datetime.now(timezone.utc) - _LATEST_RTDS_TIME).total_seconds()
-            if age_seconds <= 10.0:
-                _record_price_sample(_LATEST_RTDS_PRICE, as_of=_LATEST_RTDS_TIME)
-                return _LATEST_RTDS_PRICE
+            if min_time is not None and _LATEST_RTDS_TIME <= min_time:
+                pass
+            else:
+                age_seconds = (datetime.now(timezone.utc) - _LATEST_RTDS_TIME).total_seconds()
+                if age_seconds <= 10.0:
+                    _record_price_sample(_LATEST_RTDS_PRICE, as_of=_LATEST_RTDS_TIME)
+                    return _LATEST_RTDS_PRICE
 
         time.sleep(0.1)
 
