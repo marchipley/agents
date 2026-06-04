@@ -1893,9 +1893,11 @@ class TestBtcMain(unittest.TestCase):
 
         self.assertEqual(mock_get_token_quote_snapshot.call_count, 3)
         self.assertEqual(mock_get_token_quote_snapshot.call_args_list[0].args, ("up-token",))
+        self.assertEqual(mock_get_token_quote_snapshot.call_args_list[0].kwargs, {"market": market})
         self.assertEqual(mock_get_token_quote_snapshot.call_args_list[1].args, ("down-token",))
+        self.assertEqual(mock_get_token_quote_snapshot.call_args_list[1].kwargs, {"market": market})
         self.assertEqual(mock_get_token_quote_snapshot.call_args_list[2].args, ("up-token",))
-        self.assertEqual(mock_get_token_quote_snapshot.call_args_list[2].kwargs, {"decision": decision})
+        self.assertEqual(mock_get_token_quote_snapshot.call_args_list[2].kwargs, {"decision": decision, "market": market})
         mock_print_quote_snapshot.assert_not_called()
 
     def test_run_once_skips_new_trade_during_post_execution_cooldown(self):

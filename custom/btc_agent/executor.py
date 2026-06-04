@@ -537,8 +537,22 @@ def evaluate_ok_to_submit(
 def get_token_quote_snapshot(
     token_id: str,
     decision: Optional[LlmDecision] = None,
+    market: Optional[BtcUpDownMarket] = None,
 ) -> TokenQuoteSnapshot:
     from .market_lookup import get_live_clob_quote
+
+    def _market_probability_for_token() -> Optional[float]:
+        if market is None:
+            return None
+        if decision and getattr(decision, "side", None) == "UP":
+            return getattr(market, "up_market_probability", None)
+        if decision and getattr(decision, "side", None) == "DOWN":
+            return getattr(market, "down_market_probability", None)
+        if token_id == getattr(market, "up_token_id", None):
+            return getattr(market, "up_market_probability", None)
+        if token_id == getattr(market, "down_token_id", None):
+            return getattr(market, "down_market_probability", None)
+        return None
 
     ws_quote = get_live_clob_quote(token_id)
     if ws_quote and ws_quote["timestamp"] > 0 and (time.time() * 1000 - ws_quote["timestamp"]) < 3000:
@@ -573,6 +587,9 @@ def get_token_quote_snapshot(
                 tick_size=tick_size,
                 imbalance_pressure=imbalance_pressure,
             )
+            market_prob = _market_probability_for_token()
+            if spread is not None and spread <= 0 and market_prob is not None:
+                reference_price = float(market_prob)
             spread_bps = None
             if spread is not None and reference_price not in (None, 0):
                 spread_bps = (spread / reference_price) * 10_000
@@ -686,6 +703,9 @@ def get_token_quote_snapshot(
         tick_size=tick_size,
         imbalance_pressure=imbalance_pressure,
     )
+    market_prob = _market_probability_for_token()
+    if spread is not None and spread <= 0 and market_prob is not None:
+        reference_price = float(market_prob)
     spread_bps = None
     if spread is not None and reference_price not in (None, 0):
         spread_bps = (spread / reference_price) * 10_000
@@ -1325,7 +1345,7 @@ def retry_unfilled_live_order(order, market: BtcUpDownMarket) -> Optional[TradeE
             live_order_id=order_id,
         )
 
-    snapshot = get_token_quote_snapshot(getattr(order, "token_id", None))
+    snapshot = get_token_quote_snapshot(getattr(order, "token_id", None), market=market)
     submission_limit_price = get_submission_limit_price(snapshot)
     if submission_limit_price is None or snapshot.reference_price is None:
         return TradeExecutionResult(
@@ -1740,7 +1760,7 @@ def _validate_trade_candidate(
 
     token_id = market.up_token_id if decision.side == "UP" else market.down_token_id
     if snapshot is None:
-        snapshot = get_token_quote_snapshot(token_id, decision=decision)
+        snapshot = get_token_quote_snapshot(token_id, decision=decision, market=market)
 
     live_price = snapshot.reference_price
     submission_limit_price = get_submission_limit_price(snapshot)

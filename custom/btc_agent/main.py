@@ -2453,8 +2453,8 @@ def _run_once_core() -> None:
                 _apply_slippage_cooldown_if_needed(filled_order)
             up_snapshot = None
             down_snapshot = None
-            up_snapshot = get_token_quote_snapshot(market.up_token_id)
-            down_snapshot = get_token_quote_snapshot(market.down_token_id)
+            up_snapshot = get_token_quote_snapshot(market.up_token_id, market=market)
+            down_snapshot = get_token_quote_snapshot(market.down_token_id, market=market)
             try:
                 features = build_btc_features(window_start_ts=market.start_ts)
                 current_btc_price = features.price_usd
@@ -2499,8 +2499,8 @@ def _run_once_core() -> None:
                     _apply_slippage_cooldown_if_needed(filled_order)
                 for filled_order in maintain_unfilled_live_orders(active_orders, market):
                     _apply_slippage_cooldown_if_needed(filled_order)
-                up_snapshot = get_token_quote_snapshot(market.up_token_id)
-                down_snapshot = get_token_quote_snapshot(market.down_token_id)
+                up_snapshot = get_token_quote_snapshot(market.up_token_id, market=market)
+                down_snapshot = get_token_quote_snapshot(market.down_token_id, market=market)
 
             if active_orders:
                 update_active_order_logs(
@@ -2523,8 +2523,8 @@ def _run_once_core() -> None:
 
     up_snapshot = None
     down_snapshot = None
-    up_snapshot = get_token_quote_snapshot(market.up_token_id)
-    down_snapshot = get_token_quote_snapshot(market.down_token_id)
+    up_snapshot = get_token_quote_snapshot(market.up_token_id, market=market)
+    down_snapshot = get_token_quote_snapshot(market.down_token_id, market=market)
 
     print_market_context(
         market,
@@ -2659,7 +2659,7 @@ def _run_once_core() -> None:
             if cfg.debug:
                 print_quote_snapshot_from_snapshot("UP (with decision)", decision_snapshot, debug=True)
         else:
-            decision_snapshot = get_token_quote_snapshot(market.up_token_id, decision=decision)
+            decision_snapshot = get_token_quote_snapshot(market.up_token_id, decision=decision, market=market)
     elif decision.side == "DOWN":
         if use_recommended_limit:
             decision_snapshot = get_decision_quote_snapshot(
@@ -2672,7 +2672,7 @@ def _run_once_core() -> None:
             if cfg.debug:
                 print_quote_snapshot_from_snapshot("DOWN (with decision)", decision_snapshot, debug=True)
         else:
-            decision_snapshot = get_token_quote_snapshot(market.down_token_id, decision=decision)
+            decision_snapshot = get_token_quote_snapshot(market.down_token_id, decision=decision, market=market)
 
     try:
         result = maybe_execute_trade(

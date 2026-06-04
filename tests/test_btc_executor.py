@@ -115,6 +115,38 @@ class TestBtcExecutor(unittest.TestCase):
         mock_rest_quote.assert_not_called()
         mock_book.assert_not_called()
 
+    def test_get_token_quote_snapshot_uses_market_probability_for_crossed_local_book_reference(self):
+        decision = types.SimpleNamespace(side="UP", confidence=0.70)
+        market = types.SimpleNamespace(
+            up_token_id="up-token",
+            down_token_id="down-token",
+            up_market_probability=0.84,
+            down_market_probability=0.16,
+        )
+        with patch(
+            "custom.btc_agent.market_lookup.get_live_clob_quote",
+            return_value={
+                "best_bid": 0.69,
+                "best_bid_size": 120.0,
+                "best_ask": 0.68,
+                "best_ask_size": 80.0,
+                "timestamp": 1_000_000_000_000,
+            },
+        ), patch("custom.btc_agent.executor.time.time", return_value=1_000_000_001.0), patch(
+            "custom.btc_agent.executor._get_price_from_clob_single"
+        ) as mock_rest_quote, patch("custom.btc_agent.executor._get_orderbook") as mock_book, patch(
+            "builtins.print"
+        ):
+            snapshot = get_token_quote_snapshot("up-token", decision=decision, market=market)
+
+        self.assertTrue(snapshot.ok_to_submit)
+        self.assertLessEqual(snapshot.spread, 0)
+        self.assertEqual(snapshot.reference_price, 0.84)
+        self.assertEqual(snapshot.target_limit_price, 0.84)
+        self.assertEqual(snapshot.recommended_limit_price, 0.84)
+        mock_rest_quote.assert_not_called()
+        mock_book.assert_not_called()
+
     def test_get_token_quote_snapshot_falls_back_to_rest_when_local_clob_l2_quote_is_stale(self):
         with patch(
             "custom.btc_agent.market_lookup.get_live_clob_quote",
@@ -150,6 +182,44 @@ class TestBtcExecutor(unittest.TestCase):
         self.assertEqual(snapshot.buy_quote, 0.50)
         self.assertEqual(snapshot.best_bid, 0.49)
         mock_rest_quote.assert_called()
+
+    def test_get_token_quote_snapshot_uses_market_probability_for_crossed_rest_book_reference(self):
+        decision = types.SimpleNamespace(side="DOWN", confidence=0.70)
+        market = types.SimpleNamespace(
+            up_token_id="up-token",
+            down_token_id="down-token",
+            up_market_probability=0.16,
+            down_market_probability=0.84,
+        )
+        with patch(
+            "custom.btc_agent.market_lookup.get_live_clob_quote",
+            return_value=None,
+        ), patch(
+            "custom.btc_agent.executor._get_price_from_clob_single",
+            side_effect=lambda token_id, side: 0.53 if side == "BUY" else 0.84,
+        ), patch(
+            "custom.btc_agent.executor._get_midpoint_price",
+            return_value=0.53,
+        ), patch(
+            "custom.btc_agent.executor._get_last_trade_price",
+            return_value=0.53,
+        ), patch(
+            "custom.btc_agent.executor._get_orderbook",
+            return_value={
+                "bids": [{"price": "0.84", "asset_size": "100"}],
+                "asks": [{"price": "0.53", "asset_size": "50"}],
+                "tick_size": "0.01",
+            },
+        ), patch(
+            "custom.btc_agent.executor.get_trading_config",
+            return_value=types.SimpleNamespace(use_recommended_limit=False),
+        ):
+            snapshot = get_token_quote_snapshot("down-token", decision=decision, market=market)
+
+        self.assertLessEqual(snapshot.spread, 0)
+        self.assertEqual(snapshot.reference_price, 0.84)
+        self.assertEqual(snapshot.target_limit_price, 0.84)
+        self.assertEqual(snapshot.recommended_limit_price, 0.84)
 
     def test_get_token_quote_snapshot_populates_book_imbalance_fields(self):
         with patch(
