@@ -4,7 +4,7 @@ import math
 import requests
 import re
 import time
-from decimal import Decimal, ROUND_DOWN
+from decimal import Decimal, ROUND_CEILING, ROUND_DOWN
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional, Any, Dict, List, Tuple
@@ -1862,6 +1862,16 @@ def _validate_trade_candidate(
     rsi_9 = None if features is None else getattr(features, "rsi_9", None)
     rsi_speed_divergence = None if features is None else getattr(features, "rsi_speed_divergence", None)
     adx_14 = None if features is None else getattr(features, "adx_14", None)
+    momentum_acceleration = None if features is None else getattr(features, "momentum_acceleration", None)
+    momentum_alignment_confirmed = (
+        getattr(features, "momentum_alignment", None) is True
+        or _momentum_alignment(features) is True
+    )
+    is_strong_aligned_trend = (
+        adx_14 is not None
+        and adx_14 > 25.0
+        and momentum_alignment_confirmed
+    )
     market_implied_probability = _get_market_implied_probability(market, decision, snapshot)
     chosen_side_market_win_chance = (
         float(market_implied_probability)
@@ -1921,6 +1931,17 @@ def _validate_trade_candidate(
                     f"Downward velocity {abs(delta_prev):.2f} exceeds UP cushion {abs(gap_to_target):.2f}"
                 ),
             )
+
+    if decision.side == "DOWN" and momentum_acceleration is not None and momentum_acceleration > 15.0:
+        return _reject(
+            submission_limit_price,
+            f"Exhaustion veto blocked DOWN trade: positive acceleration {momentum_acceleration:.2f}",
+        )
+    if decision.side == "UP" and momentum_acceleration is not None and momentum_acceleration < -15.0:
+        return _reject(
+            submission_limit_price,
+            f"Exhaustion veto blocked UP trade: negative acceleration {momentum_acceleration:.2f}",
+        )
 
     if decision.side == "UP" and rsi_9 is not None and rsi_9 > 85.0 and not parabolic_up_regime:
         return _reject(
@@ -1997,6 +2018,7 @@ def _validate_trade_candidate(
         and rsi_9 is not None
         and rsi_9 < float(getattr(cfg, "down_rsi_veto_threshold", 30.0))
         and not parabolic_down_regime
+        and not is_strong_aligned_trend
     ):
         down_rsi_threshold = float(getattr(cfg, "down_rsi_veto_threshold", 30.0))
         return _reject(
@@ -2054,6 +2076,7 @@ def _validate_trade_candidate(
             and adx_14 > float(getattr(cfg, "parabolic_rsi_suspend_adx_threshold", 35.0))
         )
         and not parabolic_up_regime
+        and not is_strong_aligned_trend
         and rsi_9 > up_rsi_threshold
     ):
         return _reject(
@@ -2291,7 +2314,7 @@ def _quantize_live_buy_size_for_amount_precision(price: float, size: float) -> f
     Polymarket BUY orders require quote-side (maker) amount precision of 2 decimals
     and token-side (taker) amount precision of 4 decimals.
 
-    To satisfy both constraints, round size down to the nearest 4-decimal quantum
+    To satisfy both constraints, round size up to the nearest 4-decimal quantum
     that makes price * size representable to cents.
     """
     if price <= 0 or size <= 0:
@@ -2311,7 +2334,7 @@ def _quantize_live_buy_size_for_amount_precision(price: float, size: float) -> f
     if quantum <= 0:
         return float(size_dec)
 
-    units = (size_dec / quantum).to_integral_value(rounding=ROUND_DOWN)
+    units = (size_dec / quantum).to_integral_value(rounding=ROUND_CEILING)
     if units <= 0 and size_dec > 0:
         units = Decimal(1)
     quantized_size = units * quantum
@@ -2424,7 +2447,7 @@ def _execute_live_trade(
     if submission_limit_price is None or live_price is None:
         raise RuntimeError("Live trade execution called without a valid priced snapshot.")
 
-    size = _get_order_size_for_decision(cfg)
+    size = max(5.0, _get_order_size_for_decision(cfg))
     size = _quantize_live_buy_size_for_amount_precision(submission_limit_price, size)
     quoted_price_at_entry = snapshot.buy_quote
     book_depth_at_fill = _get_book_depth_at_fill(snapshot)

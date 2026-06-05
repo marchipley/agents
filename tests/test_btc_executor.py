@@ -330,9 +330,10 @@ class TestBtcExecutor(unittest.TestCase):
 
         self.assertGreaterEqual(order_notional, 1.01)
 
-    def test_quantize_live_buy_size_for_amount_precision_rounds_down_to_valid_quantum(self):
-        self.assertEqual(_quantize_live_buy_size_for_amount_precision(0.83, 2.4096), 2.0)
-        self.assertEqual(_quantize_live_buy_size_for_amount_precision(0.25, 2.4096), 2.4)
+    def test_quantize_live_buy_size_for_amount_precision_rounds_up_to_valid_quantum(self):
+        self.assertEqual(_quantize_live_buy_size_for_amount_precision(0.83, 2.4096), 3.0)
+        self.assertEqual(_quantize_live_buy_size_for_amount_precision(0.25, 2.4096), 2.44)
+        self.assertEqual(_quantize_live_buy_size_for_amount_precision(0.735, 5.0), 6.0)
 
     def test_quantize_live_buy_size_for_amount_precision_keeps_min_positive_quantum(self):
         self.assertGreater(_quantize_live_buy_size_for_amount_precision(0.999, 0.0001), 0.0)
@@ -1356,6 +1357,110 @@ class TestBtcExecutor(unittest.TestCase):
 
         self.assertIsNone(validated_snapshot)
         self.assertIn("RSI directional veto blocked UP", rejection.reason)
+
+    def test_validate_trade_candidate_allows_up_rsi_directional_veto_in_strong_aligned_trend(self):
+        market = types.SimpleNamespace(
+            up_token_id="up-token",
+            down_token_id="down-token",
+            settlement_threshold=100.0,
+            end_ts=1_000_000_180,
+            volume=5000.0,
+            up_market_probability=0.80,
+            down_market_probability=0.20,
+        )
+        decision = types.SimpleNamespace(
+            side="UP",
+            confidence=0.82,
+            max_price_to_pay=1.0,
+            reason="test",
+        )
+        features = types.SimpleNamespace(
+            price_usd=130.0,
+            volatility_5m=4.0,
+            rsi_9=72.0,
+            adx_14=26.0,
+            velocity_15s=2.0,
+            velocity_30s=3.0,
+            momentum_1m=4.0,
+            delta_pct_from_window_open=0.001,
+        )
+        snapshot = TokenQuoteSnapshot(
+            token_id="up-token",
+            buy_quote=0.60,
+            midpoint=0.60,
+            last_trade_price=0.60,
+            reference_price=0.60,
+            target_limit_price=0.60,
+            recommended_limit_price=0.60,
+            ok_to_submit=True,
+            submit_reason="ok",
+            best_bid=0.59,
+            best_ask=0.60,
+            tick_size=0.01,
+            spread=0.01,
+        )
+
+        fake_now = datetime.fromtimestamp(1_000_000_000, tz=timezone.utc)
+        with patch("custom.btc_agent.executor.datetime") as mock_datetime:
+            mock_datetime.now.return_value = fake_now
+            validated_snapshot, rejection = _validate_trade_candidate(
+                market, decision, features=features, snapshot=snapshot
+            )
+
+        self.assertIs(validated_snapshot, snapshot)
+        self.assertIsNone(rejection)
+
+    def test_validate_trade_candidate_allows_down_rsi_directional_veto_in_strong_aligned_trend(self):
+        market = types.SimpleNamespace(
+            up_token_id="up-token",
+            down_token_id="down-token",
+            settlement_threshold=100.0,
+            end_ts=1_000_000_180,
+            volume=5000.0,
+            up_market_probability=0.20,
+            down_market_probability=0.80,
+        )
+        decision = types.SimpleNamespace(
+            side="DOWN",
+            confidence=0.82,
+            max_price_to_pay=1.0,
+            reason="test",
+        )
+        features = types.SimpleNamespace(
+            price_usd=70.0,
+            volatility_5m=4.0,
+            rsi_9=27.0,
+            adx_14=26.0,
+            velocity_15s=-2.0,
+            velocity_30s=-3.0,
+            momentum_1m=-4.0,
+            delta_pct_from_window_open=-0.001,
+        )
+        snapshot = TokenQuoteSnapshot(
+            token_id="down-token",
+            buy_quote=0.60,
+            midpoint=0.60,
+            last_trade_price=0.60,
+            reference_price=0.60,
+            target_limit_price=0.60,
+            recommended_limit_price=0.60,
+            ok_to_submit=True,
+            submit_reason="ok",
+            best_bid=0.59,
+            best_ask=0.60,
+            tick_size=0.01,
+            spread=0.01,
+        )
+
+        fake_now = datetime.fromtimestamp(1_000_000_000, tz=timezone.utc)
+        with patch("custom.btc_agent.executor.datetime") as mock_datetime:
+            mock_datetime.now.return_value = fake_now
+            validated_snapshot, rejection = _validate_trade_candidate(
+                market, decision, features=features, snapshot=snapshot
+            )
+
+        self.assertIs(validated_snapshot, snapshot)
+        self.assertIsNone(rejection)
 
     def test_validate_trade_candidate_rejects_up_on_hard_exhaustion_cap(self):
         market = types.SimpleNamespace(
@@ -2946,6 +3051,106 @@ class TestBtcExecutor(unittest.TestCase):
         self.assertIs(validated_snapshot, snapshot)
         self.assertIsNone(rejection)
 
+    def test_validate_trade_candidate_rejects_down_on_positive_momentum_acceleration_exhaustion(self):
+        market = types.SimpleNamespace(
+            up_token_id="up-token",
+            down_token_id="down-token",
+            settlement_threshold=100.0,
+            end_ts=1_000_000_180,
+            volume=5000.0,
+            up_market_probability=0.10,
+            down_market_probability=0.90,
+        )
+        decision = types.SimpleNamespace(
+            side="DOWN",
+            confidence=0.90,
+            max_price_to_pay=1.0,
+            reason="test",
+        )
+        features = types.SimpleNamespace(
+            price_usd=70.0,
+            volatility_5m=4.0,
+            rsi_9=40.0,
+            adx_14=20.0,
+            momentum_acceleration=16.0,
+            delta_pct_from_window_open=-0.001,
+        )
+        snapshot = TokenQuoteSnapshot(
+            token_id="down-token",
+            buy_quote=0.60,
+            midpoint=0.60,
+            last_trade_price=0.60,
+            reference_price=0.60,
+            target_limit_price=0.60,
+            recommended_limit_price=0.60,
+            ok_to_submit=True,
+            submit_reason="ok",
+            best_bid=0.59,
+            best_ask=0.60,
+            tick_size=0.01,
+            spread=0.01,
+        )
+
+        fake_now = datetime.fromtimestamp(1_000_000_000, tz=timezone.utc)
+        with patch("custom.btc_agent.executor.datetime") as mock_datetime:
+            mock_datetime.now.return_value = fake_now
+            validated_snapshot, rejection = _validate_trade_candidate(
+                market, decision, features=features, snapshot=snapshot
+            )
+
+        self.assertIsNone(validated_snapshot)
+        self.assertIn("Exhaustion veto blocked DOWN trade: positive acceleration 16.00", rejection.reason)
+
+    def test_validate_trade_candidate_rejects_up_on_negative_momentum_acceleration_exhaustion(self):
+        market = types.SimpleNamespace(
+            up_token_id="up-token",
+            down_token_id="down-token",
+            settlement_threshold=100.0,
+            end_ts=1_000_000_180,
+            volume=5000.0,
+            up_market_probability=0.90,
+            down_market_probability=0.10,
+        )
+        decision = types.SimpleNamespace(
+            side="UP",
+            confidence=0.90,
+            max_price_to_pay=1.0,
+            reason="test",
+        )
+        features = types.SimpleNamespace(
+            price_usd=130.0,
+            volatility_5m=4.0,
+            rsi_9=50.0,
+            adx_14=20.0,
+            momentum_acceleration=-16.0,
+            delta_pct_from_window_open=0.001,
+        )
+        snapshot = TokenQuoteSnapshot(
+            token_id="up-token",
+            buy_quote=0.60,
+            midpoint=0.60,
+            last_trade_price=0.60,
+            reference_price=0.60,
+            target_limit_price=0.60,
+            recommended_limit_price=0.60,
+            ok_to_submit=True,
+            submit_reason="ok",
+            best_bid=0.59,
+            best_ask=0.60,
+            tick_size=0.01,
+            spread=0.01,
+        )
+
+        fake_now = datetime.fromtimestamp(1_000_000_000, tz=timezone.utc)
+        with patch("custom.btc_agent.executor.datetime") as mock_datetime:
+            mock_datetime.now.return_value = fake_now
+            validated_snapshot, rejection = _validate_trade_candidate(
+                market, decision, features=features, snapshot=snapshot
+            )
+
+        self.assertIsNone(validated_snapshot)
+        self.assertIn("Exhaustion veto blocked UP trade: negative acceleration -16.00", rejection.reason)
+
     def test_validate_trade_candidate_allows_high_price_low_liquidity_trade_when_filter_disabled(self):
         market = types.SimpleNamespace(
             up_token_id="up-token",
@@ -3088,7 +3293,7 @@ class TestBtcExecutor(unittest.TestCase):
         self.assertIn("FOK order could not be fully filled", result.reason)
         self.assertEqual(client.execute_order.call_count, 1)
 
-    def test_execute_live_trade_returns_rejection_when_minimum_size_exceeds_shares_per_trade(self):
+    def test_execute_live_trade_applies_five_share_floor_when_configured_size_is_below_minimum(self):
         market = types.SimpleNamespace(end_ts=int(datetime.now(timezone.utc).timestamp()) + 30)
         decision = types.SimpleNamespace(side="UP", confidence=0.8, max_price_to_pay=1.0)
         snapshot = TokenQuoteSnapshot(
@@ -3106,11 +3311,7 @@ class TestBtcExecutor(unittest.TestCase):
             tick_size=0.01,
             spread=0.01,
         )
-        client = types.SimpleNamespace(
-            execute_order=unittest.mock.Mock(
-                side_effect=Exception("order xyz is invalid. Size (2.88) lower than the minimum: 5")
-            )
-        )
+        client = types.SimpleNamespace(execute_order=unittest.mock.Mock(return_value={"ok": True}))
 
         with patch(
             "custom.btc_agent.executor.get_trading_config",
@@ -3131,8 +3332,10 @@ class TestBtcExecutor(unittest.TestCase):
         ):
             result = _execute_live_trade(decision=decision, market=market, snapshot=snapshot)
 
-        self.assertFalse(result.executed)
-        self.assertIn("Exchange minimum size exceeds configured shares_per_trade", result.reason)
+        self.assertTrue(result.executed)
+        self.assertEqual(result.size, 5.0)
+        self.assertEqual(result.shares_requested, 5.0)
+        self.assertEqual(client.execute_order.call_args.kwargs["size"], 5.0)
         self.assertEqual(client.execute_order.call_count, 1)
 
     def test_execute_live_trade_uses_fixed_shares_per_trade(self):
@@ -3266,8 +3469,8 @@ class TestBtcExecutor(unittest.TestCase):
             result = _execute_live_trade(decision=decision, market=market, snapshot=snapshot)
 
         self.assertTrue(result.executed)
-        self.assertEqual(result.size, 2.0)
-        self.assertEqual(client.execute_order.call_args.kwargs["size"], 2.0)
+        self.assertEqual(result.size, 5.0)
+        self.assertEqual(client.execute_order.call_args.kwargs["size"], 5.0)
 
     def test_execute_live_trade_returns_unfilled_submission_when_fill_not_confirmed(self):
         market = types.SimpleNamespace(end_ts=int(datetime.now(timezone.utc).timestamp()) + 30)
