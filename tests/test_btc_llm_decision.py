@@ -287,6 +287,37 @@ class TestBtcLlmDecision(unittest.TestCase):
         self.assertTrue(fake_session.post.call_args.kwargs["stream"])
         self.assertEqual(fake_session.post.call_args.kwargs["json"]["max_tokens"], 100)
 
+    def test_stream_openai_chat_completion_uses_max_completion_tokens_for_gpt5(self):
+        fake_response = Mock()
+        fake_response.raise_for_status = Mock()
+        fake_response.iter_lines.return_value = [
+            'data: {"choices":[{"delta":{"content":"{\\"decision\\":\\"NO_TRADE\\",\\"confidence\\":0,\\"max_price_to_pay\\":0,\\"reason\\":\\"ok\\"}"}}]}',
+            "data: [DONE]",
+        ]
+        fake_response.__enter__ = Mock(return_value=fake_response)
+        fake_response.__exit__ = Mock(return_value=None)
+
+        fake_session = Mock()
+        fake_session.trust_env = True
+        fake_session.post.return_value = fake_response
+        fake_session.close = Mock()
+
+        with patch(
+            "custom.btc_agent.llm_decision.requests.Session",
+            return_value=fake_session,
+        ):
+            _stream_openai_chat_completion(
+                model="gpt-5.4-mini",
+                api_key="test-key",
+                system_prompt="system",
+                user_prompt="user",
+                timeout_seconds=15.0,
+            )
+
+        payload = fake_session.post.call_args.kwargs["json"]
+        self.assertEqual(payload["max_completion_tokens"], 100)
+        self.assertNotIn("max_tokens", payload)
+
     def test_user_prompt_includes_price_to_beat(self):
         up_snapshot = Mock(buy_quote=0.84)
         down_snapshot = Mock(buy_quote=0.17)
@@ -662,6 +693,42 @@ class TestBtcLlmDecision(unittest.TestCase):
         self.assertEqual(kwargs["json"]["response_format"], {"type": "json_object"})
         self.assertEqual(kwargs["json"]["max_tokens"], 100)
         self.assertEqual(kwargs["timeout"], 15.0)
+
+    def test_openai_rest_uses_max_completion_tokens_for_gpt5_models(self):
+        response = Mock(
+            ok=True,
+            json=Mock(
+                return_value={
+                    "choices": [
+                        {
+                            "message": {
+                                "content": '{"decision":"NO_TRADE","confidence":0,"max_price_to_pay":0,"reason":"ok"}'
+                            }
+                        }
+                    ]
+                }
+            ),
+        )
+        session = Mock(post=Mock(return_value=response))
+        session.trust_env = True
+
+        with patch(
+            "custom.btc_agent.llm_decision._get_openai_rest_session",
+            return_value=session,
+        ), patch(
+            "builtins.print",
+        ):
+            _request_openai_once(
+                model="gpt-5.4-mini",
+                api_key="test-key",
+                system_prompt="system",
+                user_prompt="user",
+                timeout_seconds=15.0,
+            )
+
+        payload = session.post.call_args.kwargs["json"]
+        self.assertEqual(payload["max_completion_tokens"], 100)
+        self.assertNotIn("max_tokens", payload)
 
     def test_get_openai_rest_session_reuses_trust_env_false_session(self):
         from custom.btc_agent import llm_decision as llm_module

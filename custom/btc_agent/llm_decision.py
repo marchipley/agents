@@ -240,6 +240,7 @@ def _build_system_prompt() -> str:
         "Final 10 seconds means time_remaining_seconds < 15.\n"
         f"If time_remaining_seconds > 180, you are in the Discovery Phase. If ADX < 12.0, treat the trend as non-existent. If ADX is between 12 and 20, you may trade ONLY if DISTANCE_FROM_STRIKE_USD provides a safety margin of at least 1.0 * vol5m. If ADX > {cfg.trend_priority_adx_threshold:.0f}, prioritize the trend over the time elapsed.\n"
         "EARLY WINDOW CUSHION RULE: If time remaining (t) > 240 seconds, a DISTANCE_FROM_STRIKE_USD of less than $50 is mere market noise, NOT a strong cushion. Do NOT evaluate cushions under $50 as 'strongly ITM' early in the window. If t > 240 and the cushion is < $50, you MUST heavily penalize confidence and default to NO_TRADE unless momentum is violently accelerating in your favor.\n"
+        "MACRO TREND RULE: Use macro_trend and macro_trend_usd to contextualize early window trades. If early in the window (t > 180) and your chosen side opposes the macro_trend, you must heavily penalize confidence or choose NO_TRADE, as mean reversion to the 15-minute macro trend is highly likely.\n"
         "Use DISTANCE_FROM_STRIKE_PCT to determine whether UP or DOWN is currently winning versus the price to beat. A positive value means BTC is above the strike; a negative value means BTC is below the strike.\n"
         "Do not confuse DISTANCE_FROM_STRIKE_USD or DISTANCE_FROM_STRIKE_PCT with MARKET_WIN_CHANCE_UP / MARKET_WIN_CHANCE_DOWN. Distance fields are price gaps; market win chance fields are market-implied probabilities.\n"
         "A MARKET_WIN_CHANCE of 65% is an aggressive signal. DO NOT confuse this with DISTANCE_FROM_STRIKE. A distance of $1.00 USD is sufficient for 95% confidence if time remaining is less than 15 seconds.\n"
@@ -297,6 +298,7 @@ def _build_openai_realtime_system_prompt() -> str:
         "If adx<12.0, treat the trend as non-existent. If adx is between 12 and 20, you may trade ONLY if DISTANCE_FROM_STRIKE_USD provides a safety margin of at least 1.0 * vol5m. "
         f"If time_remaining_seconds>180 and adx<{cfg.discovery_adx_caution_threshold:.0f}, stay cautious; if adx>{cfg.trend_priority_adx_threshold:.0f}, prioritize the trend over elapsed time. "
         "EARLY WINDOW CUSHION RULE: If time remaining (t) > 240 seconds, a DISTANCE_FROM_STRIKE_USD of less than $50 is mere market noise, NOT a strong cushion. Do NOT evaluate cushions under $50 as 'strongly ITM' early in the window. If t > 240 and the cushion is < $50, you MUST heavily penalize confidence and default to NO_TRADE unless momentum is violently accelerating in your favor. "
+        "MACRO TREND RULE: Use macro_trend and macro_trend_usd to contextualize early window trades. If early in the window (t > 180) and your chosen side opposes the macro_trend, you must heavily penalize confidence or choose NO_TRADE, as mean reversion to the 15-minute macro trend is highly likely. "
         "If current side is ITM and time_remaining_seconds<60, enter ONLY if entry quote<0.85; if buy quote>0.85, prefer NO_TRADE regardless of ITM status. "
         "VOLATILITY RATIO RULE: You are strictly prohibited from evaluating any trade with confidence higher than 0.55 if DISTANCE_FROM_STRIKE_USD is less than active volatility_5m when time_remaining_seconds>90. Strong momentum flags can flip into mean reversion when the structural price cushion is narrower than baseline variance. "
         "SCORING CALIBRATION: If a setup meets all safety thresholds (e.g., cushion > 1.0 * vol5m) and momentum is aligned, you MUST assign a baseline confidence of at least 0.65. Reserve scores of 0.50 - 0.60 ONLY for highly conflicted or borderline trades. Do not arbitrarily cap confidence at 0.55 for standard, valid setups. "
@@ -357,6 +359,8 @@ def _build_user_prompt(features: BtcFeatures, market: BtcUpDownMarket, up_snapsh
     trend_regime = _trend_regime(features, market)
     rsi_regime = _rsi_regime(features)
     volatility_regime = _volatility_regime(features.volatility_5m)
+    macro_trend_direction = getattr(features, "macro_trend_direction", "UNKNOWN")
+    macro_trend_15m_usd = float(getattr(features, "macro_trend_15m_usd", 0.0) or 0.0)
     momentum_1m_val = getattr(features, "momentum_1m", 0.0) or 0.0
     mom_dir = "NEUTRAL"
     if momentum_1m_val > 0:
@@ -410,6 +414,8 @@ def _build_user_prompt(features: BtcFeatures, market: BtcUpDownMarket, up_snapsh
         f"- ATR(14): {features.atr_14}\n"
         f"- Oracle gap ratio: {oracle_gap_ratio}\n"
         f"- Trailing 5-minute volatility: {features.volatility_5m}\n"
+        f"- 15-minute macro trend direction: {macro_trend_direction}\n"
+        f"- 15-minute macro trend USD: {macro_trend_15m_usd:.2f}\n"
         f"- trend_regime: {trend_regime}\n"
         f"- rsi_regime: {rsi_regime}\n"
         f"- volatility_regime: {volatility_regime}\n"
@@ -444,6 +450,8 @@ def _build_compact_user_prompt(features: BtcFeatures, market: BtcUpDownMarket, u
     trend_regime = _trend_regime(features, market)
     rsi_regime = _rsi_regime(features)
     volatility_regime = _volatility_regime(features.volatility_5m)
+    macro_trend_direction = getattr(features, "macro_trend_direction", "UNKNOWN")
+    macro_trend_15m_usd = float(getattr(features, "macro_trend_15m_usd", 0.0) or 0.0)
     momentum_1m_val = getattr(features, "momentum_1m", 0.0) or 0.0
     mom_dir = "NEUTRAL"
     if momentum_1m_val > 0:
@@ -488,6 +496,8 @@ def _build_compact_user_prompt(features: BtcFeatures, market: BtcUpDownMarket, u
         f"ATR14: {features.atr_14}\n"
         f"Oracle gap ratio: {oracle_gap_ratio}\n"
         f"Trailing 5-minute volatility: {features.volatility_5m}\n"
+        f"Macro trend direction: {macro_trend_direction}\n"
+        f"Macro trend USD: {macro_trend_15m_usd:.2f}\n"
         f"trend_regime: {trend_regime}\n"
         f"rsi_regime: {rsi_regime}\n"
         f"volatility_regime: {volatility_regime}\n"
@@ -517,6 +527,8 @@ def _build_minimal_user_prompt(features: BtcFeatures, market: BtcUpDownMarket, u
     trend_regime = _trend_regime(features, market)
     rsi_regime = _rsi_regime(features)
     volatility_regime = _volatility_regime(features.volatility_5m)
+    macro_trend_direction = getattr(features, "macro_trend_direction", "UNKNOWN")
+    macro_trend_15m_usd = float(getattr(features, "macro_trend_15m_usd", 0.0) or 0.0)
     momentum_1m_val = getattr(features, "momentum_1m", 0.0) or 0.0
     mom_dir = "NEUTRAL"
     if momentum_1m_val > 0:
@@ -547,6 +559,8 @@ def _build_minimal_user_prompt(features: BtcFeatures, market: BtcUpDownMarket, u
         f"dir_ticks={features.consecutive_directional_ticks}\n"
         f"momentum_direction={mom_dir}\n"
         f"momentum_alignment={_momentum_alignment_text(features)}\n"
+        f"macro_trend={macro_trend_direction}\n"
+        f"macro_trend_usd={macro_trend_15m_usd:.2f}\n"
         f"trend_regime={trend_regime}\n"
         f"rsi_regime={rsi_regime}\n"
         f"volatility_regime={volatility_regime}"
@@ -579,6 +593,8 @@ def _build_openai_realtime_user_prompt(
     trend_regime = _trend_regime(features, market)
     rsi_regime = _rsi_regime(features)
     volatility_regime = _volatility_regime(features.volatility_5m)
+    macro_trend_direction = getattr(features, "macro_trend_direction", "UNKNOWN")
+    macro_trend_15m_usd = float(getattr(features, "macro_trend_15m_usd", 0.0) or 0.0)
     mom_dir = "NEUTRAL"
     momentum_1m = getattr(features, "momentum_1m", None)
     if momentum_1m is not None and momentum_1m > 0:
@@ -608,6 +624,8 @@ def _build_openai_realtime_user_prompt(
         f"dt={features.consecutive_directional_ticks};"
         f"momentum_direction={mom_dir};"
         f"momentum_alignment={_momentum_alignment_text(features)};"
+        f"macro_trend={macro_trend_direction};"
+        f"macro_trend_usd={macro_trend_15m_usd:.2f};"
         f"trend_regime={trend_regime};"
         f"rsi_regime={rsi_regime};"
         f"volatility_regime={volatility_regime}"
@@ -880,6 +898,13 @@ def _get_openai_realtime_client(api_key: str, model: str, timeout_seconds: float
         return _OPENAI_REALTIME_CLIENT
 
 
+def _openai_token_limit_key(model_name: str) -> str:
+    model_lower = str(model_name or "").lower()
+    if "gpt-5" in model_lower or "o1" in model_lower or "o3" in model_lower:
+        return "max_completion_tokens"
+    return "max_tokens"
+
+
 def _stream_openai_chat_completion(
     model: str,
     api_key: str,
@@ -889,6 +914,18 @@ def _stream_openai_chat_completion(
 ) -> str:
     session = requests.Session()
     session.trust_env = False
+    token_key = _openai_token_limit_key(model)
+    request_payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "temperature": 0.2,
+        "response_format": {"type": "json_object"},
+        "stream": True,
+    }
+    request_payload[token_key] = 100
     try:
         with session.post(
             "https://api.openai.com/v1/chat/completions",
@@ -896,17 +933,7 @@ def _stream_openai_chat_completion(
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
             },
-            json={
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                "temperature": 0.2,
-                "max_tokens": 100,
-                "response_format": {"type": "json_object"},
-                "stream": True,
-            },
+            json=request_payload,
             timeout=timeout_seconds,
             stream=True,
         ) as response:
@@ -963,22 +990,24 @@ def _request_openai_once(
     )
 
     session = _get_openai_rest_session()
+    token_key = _openai_token_limit_key(model)
+    request_payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "temperature": 0.2,
+        "response_format": {"type": "json_object"},
+    }
+    request_payload[token_key] = 100
     response = session.post(
         "https://api.openai.com/v1/chat/completions",
         headers={
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         },
-        json={
-            "model": model,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            "temperature": 0.2,
-            "max_tokens": 100,
-            "response_format": {"type": "json_object"},
-        },
+        json=request_payload,
         timeout=timeout_seconds,
     )
 

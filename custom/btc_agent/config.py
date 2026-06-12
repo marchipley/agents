@@ -22,7 +22,7 @@ DISCOVERY_MIN_CONFIDENCE = 0.65
 # Fixed number of shares to submit for each paper/live trade.
 # Example: increasing from 7 to 10 doubles position size and PnL variance;
 # lowering to 3 reduces exposure per order.
-SHARES_PER_TRADE = 6
+SHARES_PER_TRADE = 5
 
 # Maximum spread allowed by configuration for a trade candidate.
 # Example: raising from 0.06 to 0.10 allows participation in wider, more
@@ -179,8 +179,9 @@ SLIPPAGE_COOLDOWN_THRESHOLD_BPS = 500.0
 SLIPPAGE_COOLDOWN_SECONDS = 300
 
 # The total number of completed losing trades allowed in a single run before the
-# bot stops. This is a repo-visible non-secret runtime cap.
-MAX_LOSSES_PER_RUN = 3
+# bot stops. This is a repo-visible non-secret runtime cap. Changed to NET_LOSSES
+# to maxamize profits (win cancels from loss count)
+MAX_NET_LOSSES_PER_RUN = 3
 
 # Number of times to poll Polymarket order status right after live submission
 # before deciding the order is still unfilled.
@@ -221,6 +222,12 @@ BTC_AGENT_LOOP_INTERVAL=5
 USE_PAPER_TRADES=False
 BTC_AGENT_MAX_PRICE=2
 CANCEL_UNFILLED_TIMER=10
+MAX_ALLOWABLE_PRICE = 0.75
+
+#LLM Model settings
+AI_ENGINE="OPENAI"
+OPENAI_MODEL="gpt-4.1-mini"
+GEMINI_MODEL="gemini-3.1-flash-lite-preview"
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 load_dotenv(os.path.join(REPO_ROOT, ".env"))
@@ -281,10 +288,11 @@ class TradingConfig:
     disable_liquidity_filter: bool = False
     shares_per_trade: float = SHARES_PER_TRADE
     max_trades_per_period: int = 1
-    max_losses_per_run: int = MAX_LOSSES_PER_RUN
+    max_net_losses_per_run: int = MAX_NET_LOSSES_PER_RUN
     min_confidence: float = DEFAULT_MIN_CONFIDENCE
     discovery_min_confidence: float = DISCOVERY_MIN_CONFIDENCE
     max_entry_price: float = 0.62
+    max_allowable_price: float = MAX_ALLOWABLE_PRICE
     max_spread: float = DEFAULT_MAX_SPREAD
     discovery_adx_caution_threshold: float = DISCOVERY_ADX_CAUTION_THRESHOLD
     trend_priority_adx_threshold: float = TREND_PRIORITY_ADX_THRESHOLD
@@ -330,7 +338,7 @@ class PolymarketConfig:
     chain_id: int = 137
 
 def get_llm_config() -> LlmConfig:
-    raw_engine = os.getenv("AI_ENGINE", "OPENAI").strip().lower()
+    raw_engine = str(AI_ENGINE).strip().lower()
     raw_timeout = os.getenv("API_CONNECTION_TIMEOUT")
     if raw_timeout is None:
         raw_timeout = os.getenv("API_CONNECTION_TMEOUT", "10")
@@ -348,7 +356,7 @@ def get_llm_config() -> LlmConfig:
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
             raise RuntimeError("OPENAI_API_KEY is not set in .env")
-        model = os.getenv("OPENAI_MODEL", "gpt-4.1-mini").strip() or "gpt-4.1-mini"
+        model = str(OPENAI_MODEL).strip() or "gpt-4.1-mini"
         return LlmConfig(
             engine="openai",
             api_key=api_key,
@@ -362,7 +370,7 @@ def get_llm_config() -> LlmConfig:
         api_key = os.getenv("GEMINI_API_KEY")
         if not api_key:
             raise RuntimeError("GEMINI_API_KEY is not set in .env")
-        model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip() or "gemini-2.5-flash"
+        model = str(GEMINI_MODEL).strip() or "gemini-2.5-flash"
         return LlmConfig(
             engine="gemini",
             api_key=api_key,
@@ -402,12 +410,13 @@ def get_trading_config() -> TradingConfig:
         disable_liquidity_filter=_parse_bool_env("DISABLE_LIQUIDITY_FILTER", False),
         shares_per_trade=float(SHARES_PER_TRADE),
         max_trades_per_period=max(int(os.getenv("BTC_AGENT_MAX_TRADES_PER_PERIOD", "1")), 1),
-        max_losses_per_run=max(int(MAX_LOSSES_PER_RUN), 0),
+        max_net_losses_per_run=max(int(MAX_NET_LOSSES_PER_RUN), 0),
         min_confidence=float(os.getenv("BTC_AGENT_MIN_CONFIDENCE", str(DEFAULT_MIN_CONFIDENCE))),
         discovery_min_confidence=float(
             os.getenv("BTC_AGENT_DISCOVERY_MIN_CONFIDENCE", str(DISCOVERY_MIN_CONFIDENCE))
         ),
         max_entry_price=float(BTC_AGENT_MAX_PRICE),
+        max_allowable_price=float(MAX_ALLOWABLE_PRICE),
         max_spread=float(os.getenv("BTC_AGENT_MAX_SPREAD", str(DEFAULT_MAX_SPREAD))),
         discovery_adx_caution_threshold=float(
             os.getenv("BTC_AGENT_DISCOVERY_ADX_CAUTION_THRESHOLD", str(DISCOVERY_ADX_CAUTION_THRESHOLD))

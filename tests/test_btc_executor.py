@@ -489,6 +489,34 @@ class TestBtcExecutor(unittest.TestCase):
 
         self.assertEqual(vetoes, [])
 
+    def test_calculate_time_decay_vetoes_discounts_matching_macro_direction(self):
+        vetoes = calculate_time_decay_vetoes(
+            {
+                "time_remaining_seconds": 250,
+                "volatility_5m": 40.0,
+                "threshold_gap_usd": 40.0,
+                "adx_14": 30.0,
+                "decision_side": "UP",
+                "macro_trend_direction": "UP",
+            }
+        )
+
+        self.assertEqual(vetoes, [])
+
+    def test_calculate_time_decay_vetoes_bypasses_adx_exhaustion_when_macro_aligned(self):
+        vetoes = calculate_time_decay_vetoes(
+            {
+                "time_remaining_seconds": 180,
+                "volatility_5m": 40.0,
+                "threshold_gap_usd": 80.0,
+                "adx_14": 80.0,
+                "decision_side": "UP",
+                "macro_trend_direction": "UP",
+            }
+        )
+
+        self.assertNotIn("adx_exhaustion_early_veto_adx_80.0", vetoes)
+
     def test_resolve_confirmed_live_fill_requires_positive_filled_size(self):
         with patch(
             "custom.btc_agent.executor._fetch_live_order_status",
@@ -1357,6 +1385,59 @@ class TestBtcExecutor(unittest.TestCase):
         self.assertIsNone(validated_snapshot)
         self.assertIn("RSI directional veto blocked UP", rejection.reason)
 
+    def test_validate_trade_candidate_bypasses_early_window_rsi_when_macro_aligned(self):
+        market = types.SimpleNamespace(
+            up_token_id="up-token",
+            down_token_id="down-token",
+            settlement_threshold=100.0,
+            end_ts=1_000_000_260,
+            volume=5000.0,
+            up_market_probability=0.80,
+            down_market_probability=0.20,
+        )
+        decision = types.SimpleNamespace(
+            side="UP",
+            confidence=0.82,
+            max_price_to_pay=1.0,
+            reason="test",
+        )
+        features = types.SimpleNamespace(
+            price_usd=160.0,
+            volatility_5m=10.0,
+            rsi_9=66.0,
+            adx_14=20.0,
+            macro_trend_direction="UP",
+            delta_pct_from_window_open=0.001,
+        )
+        snapshot = TokenQuoteSnapshot(
+            token_id="up-token",
+            buy_quote=0.60,
+            midpoint=0.60,
+            last_trade_price=0.60,
+            reference_price=0.60,
+            target_limit_price=0.60,
+            recommended_limit_price=0.60,
+            ok_to_submit=True,
+            submit_reason="ok",
+            best_bid=0.59,
+            best_ask=0.60,
+            tick_size=0.01,
+            spread=0.01,
+        )
+
+        fake_now = datetime.fromtimestamp(1_000_000_000, tz=timezone.utc)
+        with patch("custom.btc_agent.executor.datetime") as mock_datetime:
+            mock_datetime.now.return_value = fake_now
+            validated_snapshot, rejection = _validate_trade_candidate(
+                market,
+                decision,
+                features=features,
+                snapshot=snapshot,
+            )
+
+        self.assertIs(validated_snapshot, snapshot)
+        self.assertIsNone(rejection)
+
     def test_validate_trade_candidate_rejects_up_on_hard_exhaustion_cap(self):
         market = types.SimpleNamespace(
             up_token_id="up-token",
@@ -1990,8 +2071,8 @@ class TestBtcExecutor(unittest.TestCase):
             )
 
         self.assertIsNone(validated_snapshot)
-        self.assertIn("Dynamic time-decay veto", rejection.reason)
-        self.assertIn("dynamic_vol_veto", rejection.reason)
+        self.assertIn("Early-window volatility veto", rejection.reason)
+        self.assertIn("1.0x vol5m", rejection.reason)
 
     def test_validate_trade_candidate_rejects_up_quote_price_divergence(self):
         market = types.SimpleNamespace(
@@ -2011,7 +2092,7 @@ class TestBtcExecutor(unittest.TestCase):
         )
         features = types.SimpleNamespace(
             price_usd=112.0,
-            volatility_5m=20.0,
+            volatility_5m=10.0,
             rsi_9=60.0,
         )
         snapshot = TokenQuoteSnapshot(
@@ -2628,8 +2709,8 @@ class TestBtcExecutor(unittest.TestCase):
 
         self.assertIsNone(validated_snapshot)
         self.assertIsNotNone(rejection)
-        self.assertIn("Dynamic time-decay veto", rejection.reason)
-        self.assertIn("dynamic_vol_veto", rejection.reason)
+        self.assertIn("Early-window volatility veto", rejection.reason)
+        self.assertIn("1.0x vol5m", rejection.reason)
 
     def test_validate_trade_candidate_discounts_volatility_margin_for_high_confidence(self):
         market = types.SimpleNamespace(
@@ -3088,7 +3169,7 @@ class TestBtcExecutor(unittest.TestCase):
         self.assertIn("FOK order could not be fully filled", result.reason)
         self.assertEqual(client.execute_order.call_count, 1)
 
-    def test_execute_live_trade_returns_rejection_when_minimum_size_exceeds_shares_per_trade(self):
+    def test_execute_live_trade_forces_exchange_minimum_size_floor(self):
         market = types.SimpleNamespace(end_ts=int(datetime.now(timezone.utc).timestamp()) + 30)
         decision = types.SimpleNamespace(side="UP", confidence=0.8, max_price_to_pay=1.0)
         snapshot = TokenQuoteSnapshot(
@@ -3106,11 +3187,7 @@ class TestBtcExecutor(unittest.TestCase):
             tick_size=0.01,
             spread=0.01,
         )
-        client = types.SimpleNamespace(
-            execute_order=unittest.mock.Mock(
-                side_effect=Exception("order xyz is invalid. Size (2.88) lower than the minimum: 5")
-            )
-        )
+        client = types.SimpleNamespace(execute_order=unittest.mock.Mock(return_value={"ok": True}))
 
         with patch(
             "custom.btc_agent.executor.get_trading_config",
@@ -3131,8 +3208,9 @@ class TestBtcExecutor(unittest.TestCase):
         ):
             result = _execute_live_trade(decision=decision, market=market, snapshot=snapshot)
 
-        self.assertFalse(result.executed)
-        self.assertIn("Exchange minimum size exceeds configured shares_per_trade", result.reason)
+        self.assertTrue(result.executed)
+        self.assertEqual(result.size, 5.0)
+        self.assertEqual(client.execute_order.call_args.kwargs["size"], 5.0)
         self.assertEqual(client.execute_order.call_count, 1)
 
     def test_execute_live_trade_uses_fixed_shares_per_trade(self):
@@ -3178,6 +3256,47 @@ class TestBtcExecutor(unittest.TestCase):
         self.assertEqual(result.size, 7.0)
         self.assertIn("for 7.0000 shares", result.reason)
         self.assertEqual(client.execute_order.call_args.kwargs["size"], 7.0)
+
+    def test_execute_live_trade_rejects_submission_price_above_config_ceiling(self):
+        market = types.SimpleNamespace(end_ts=int(datetime.now(timezone.utc).timestamp()) + 30)
+        decision = types.SimpleNamespace(side="UP", confidence=0.95, max_price_to_pay=1.0)
+        snapshot = TokenQuoteSnapshot(
+            token_id="up-token",
+            buy_quote=0.99,
+            midpoint=0.99,
+            last_trade_price=0.99,
+            reference_price=0.99,
+            target_limit_price=0.99,
+            recommended_limit_price=0.99,
+            ok_to_submit=True,
+            submit_reason="ok",
+            best_bid=0.98,
+            best_ask=0.99,
+            tick_size=0.01,
+            spread=0.01,
+        )
+        client = types.SimpleNamespace(execute_order=unittest.mock.Mock(return_value={"ok": True}))
+
+        with patch(
+            "custom.btc_agent.executor.get_trading_config",
+            return_value=types.SimpleNamespace(
+                shares_per_trade=7.0,
+                live_min_order_usd=1.0,
+                live_fee_rate_bps=1000,
+                use_recommended_limit=False,
+                max_allowable_price=0.75,
+            ),
+        ), patch(
+            "custom.btc_agent.executor.Polymarket",
+            return_value=client,
+        ):
+            result = _execute_live_trade(decision=decision, market=market, snapshot=snapshot)
+
+        self.assertFalse(result.executed)
+        self.assertEqual(result.price, 0.99)
+        self.assertIn("Risk/Reward price ceiling exceeded", result.reason)
+        self.assertEqual(result.veto_flags, ["risk_reward_price_ceiling_exceeded"])
+        client.execute_order.assert_not_called()
 
     def test_execute_live_trade_triggers_slippage_kill_switch_after_bad_fill(self):
         market = types.SimpleNamespace(end_ts=int(datetime.now(timezone.utc).timestamp()) + 30)
@@ -3231,16 +3350,16 @@ class TestBtcExecutor(unittest.TestCase):
         decision = types.SimpleNamespace(side="UP", confidence=0.80, max_price_to_pay=1.0)
         snapshot = TokenQuoteSnapshot(
             token_id="up-token",
-            buy_quote=0.83,
-            midpoint=0.83,
-            last_trade_price=0.83,
-            reference_price=0.83,
-            target_limit_price=0.83,
-            recommended_limit_price=0.83,
+            buy_quote=0.73,
+            midpoint=0.73,
+            last_trade_price=0.73,
+            reference_price=0.73,
+            target_limit_price=0.73,
+            recommended_limit_price=0.73,
             ok_to_submit=True,
             submit_reason="ok",
-            best_bid=0.82,
-            best_ask=0.83,
+            best_bid=0.72,
+            best_ask=0.73,
             tick_size=0.01,
             spread=0.01,
         )
@@ -3261,13 +3380,13 @@ class TestBtcExecutor(unittest.TestCase):
             return_value=client,
         ), patch(
             "custom.btc_agent.executor._resolve_actual_fill_price",
-            return_value=0.83,
+            return_value=0.73,
         ):
             result = _execute_live_trade(decision=decision, market=market, snapshot=snapshot)
 
         self.assertTrue(result.executed)
-        self.assertEqual(result.size, 2.0)
-        self.assertEqual(client.execute_order.call_args.kwargs["size"], 2.0)
+        self.assertEqual(result.size, 5.0)
+        self.assertEqual(client.execute_order.call_args.kwargs["size"], 5.0)
 
     def test_execute_live_trade_returns_unfilled_submission_when_fill_not_confirmed(self):
         market = types.SimpleNamespace(end_ts=int(datetime.now(timezone.utc).timestamp()) + 30)
@@ -3318,16 +3437,16 @@ class TestBtcExecutor(unittest.TestCase):
         decision = types.SimpleNamespace(side="DOWN", confidence=0.85, max_price_to_pay=1.0)
         snapshot = TokenQuoteSnapshot(
             token_id="down-token",
-            buy_quote=0.79,
-            midpoint=0.79,
-            last_trade_price=0.79,
-            reference_price=0.79,
-            target_limit_price=0.79,
-            recommended_limit_price=0.79,
+            buy_quote=0.74,
+            midpoint=0.74,
+            last_trade_price=0.74,
+            reference_price=0.74,
+            target_limit_price=0.74,
+            recommended_limit_price=0.74,
             ok_to_submit=True,
             submit_reason="ok",
-            best_bid=0.78,
-            best_ask=0.79,
+            best_bid=0.73,
+            best_ask=0.74,
             tick_size=0.01,
             spread=0.01,
         )
@@ -3426,7 +3545,63 @@ class TestBtcExecutor(unittest.TestCase):
         self.assertTrue(result.executed)
         self.assertEqual(result.live_order_id, "new-order")
         self.assertEqual(client.execute_order.call_args.kwargs["price"], 0.69)
-        self.assertEqual(client.execute_order.call_args.kwargs["size"], 3.0)
+        self.assertEqual(client.execute_order.call_args.kwargs["size"], 5.0)
+
+    def test_retry_unfilled_live_order_rejects_submission_price_above_config_ceiling(self):
+        market = types.SimpleNamespace(end_ts=int(datetime.now(timezone.utc).timestamp()) + 30)
+        order = types.SimpleNamespace(
+            side="UP",
+            token_id="up-token",
+            live_order_id="old-order",
+            actual_fill_price=None,
+            shares=3.0,
+            shares_requested=3.0,
+            quoted_price_at_entry=0.99,
+            book_depth_at_fill=100.0,
+        )
+        snapshot = TokenQuoteSnapshot(
+            token_id="up-token",
+            buy_quote=0.99,
+            midpoint=0.99,
+            last_trade_price=0.99,
+            reference_price=0.99,
+            target_limit_price=0.99,
+            recommended_limit_price=0.99,
+            ok_to_submit=True,
+            submit_reason="ok",
+            best_bid=0.98,
+            best_ask=0.99,
+            tick_size=0.01,
+            spread=0.01,
+        )
+        client = types.SimpleNamespace(execute_order=unittest.mock.Mock(return_value={"ok": True, "orderID": "new-order"}))
+
+        with patch(
+            "custom.btc_agent.executor.get_trading_config",
+            return_value=types.SimpleNamespace(
+                paper_trading=False,
+                live_min_order_usd=1.0,
+                live_fee_rate_bps=1000,
+                use_recommended_limit=False,
+                max_allowable_price=0.75,
+            ),
+        ), patch(
+            "custom.btc_agent.executor.cancel_live_order",
+            return_value=True,
+        ), patch(
+            "custom.btc_agent.executor.get_token_quote_snapshot",
+            return_value=snapshot,
+        ), patch(
+            "custom.btc_agent.executor.Polymarket",
+            return_value=client,
+        ):
+            result = retry_unfilled_live_order(order, market)
+
+        self.assertFalse(result.executed)
+        self.assertEqual(result.price, 0.99)
+        self.assertIn("Risk/Reward price ceiling exceeded", result.reason)
+        self.assertEqual(result.veto_flags, ["risk_reward_price_ceiling_exceeded"])
+        client.execute_order.assert_not_called()
 
 
 if __name__ == "__main__":

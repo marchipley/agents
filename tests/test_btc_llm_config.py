@@ -14,11 +14,12 @@ class TestBtcLlmConfig(unittest.TestCase):
         with patch.dict(
             os.environ,
             {
-                "AI_ENGINE": "OPENAI",
                 "OPENAI_API_KEY": "openai-key",
-                "OPENAI_MODEL": "gpt-4.1-mini",
             },
             clear=False,
+        ), patch("custom.btc_agent.config.AI_ENGINE", "OPENAI"), patch(
+            "custom.btc_agent.config.OPENAI_MODEL",
+            "gpt-4.1-mini",
         ):
             cfg = get_llm_config()
 
@@ -30,17 +31,18 @@ class TestBtcLlmConfig(unittest.TestCase):
         with patch.dict(
             os.environ,
             {
-                "AI_ENGINE": "GEMINI",
                 "GEMINI_API_KEY": "gemini-key",
-                "GEMINI_MODEL": "gemini-2.5-flash",
             },
             clear=False,
+        ), patch("custom.btc_agent.config.AI_ENGINE", "GEMINI"), patch(
+            "custom.btc_agent.config.GEMINI_MODEL",
+            "gemini-3.1-flash-lite-preview",
         ):
             cfg = get_llm_config()
 
         self.assertEqual(cfg.engine, "gemini")
         self.assertEqual(cfg.api_key, "gemini-key")
-        self.assertEqual(cfg.model, "gemini-2.5-flash")
+        self.assertEqual(cfg.model, "gemini-3.1-flash-lite-preview")
         self.assertEqual(cfg.api_connection_timeout_seconds, 10.0)
         self.assertEqual(cfg.api_connection_retry_timer_seconds, 2.0)
         self.assertEqual(cfg.api_connection_retry_attempts, 3)
@@ -49,14 +51,15 @@ class TestBtcLlmConfig(unittest.TestCase):
         with patch.dict(
             os.environ,
             {
-                "AI_ENGINE": "GEMINI",
                 "GEMINI_API_KEY": "gemini-key",
-                "GEMINI_MODEL": "gemini-2.5-flash",
                 "API_CONNECTION_TIMEOUT": "7",
                 "API_CONNECTION_RETRY_TIMER": "3.5",
                 "API_CONNECTION_RETRY_ATTEMPTS": "5",
             },
             clear=False,
+        ), patch("custom.btc_agent.config.AI_ENGINE", "GEMINI"), patch(
+            "custom.btc_agent.config.GEMINI_MODEL",
+            "gemini-3.1-flash-lite-preview",
         ):
             cfg = get_llm_config()
 
@@ -67,11 +70,9 @@ class TestBtcLlmConfig(unittest.TestCase):
     def test_unknown_engine_raises(self):
         with patch.dict(
             os.environ,
-            {
-                "AI_ENGINE": "ANTHROPIC",
-            },
+            {},
             clear=False,
-        ):
+        ), patch("custom.btc_agent.config.AI_ENGINE", "ANTHROPIC"):
             with self.assertRaises(RuntimeError):
                 get_llm_config()
 
@@ -86,6 +87,12 @@ class TestBtcLlmConfig(unittest.TestCase):
             cfg = get_trading_config()
 
         self.assertTrue(cfg.llm_show_detail)
+
+    def test_trading_config_reads_max_allowable_price_from_config_constant(self):
+        with patch("custom.btc_agent.config.MAX_ALLOWABLE_PRICE", 0.95):
+            cfg = get_trading_config()
+
+        self.assertEqual(cfg.max_allowable_price, 0.95)
 
 
 if __name__ == "__main__":

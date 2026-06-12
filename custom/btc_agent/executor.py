@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from typing import Optional, Any, Dict, List, Tuple
 
 from agents.polymarket.polymarket import Polymarket
-from .config import get_trading_config, get_polymarket_config
+from .config import MAX_ALLOWABLE_PRICE, get_trading_config, get_polymarket_config
 from .indicators import BtcFeatures
 from .llm_decision import LlmDecision
 from .market_lookup import BtcUpDownMarket
@@ -471,6 +471,40 @@ def get_submission_limit_price(snapshot: TokenQuoteSnapshot) -> Optional[float]:
 def get_submission_limit_label() -> str:
     cfg = get_trading_config()
     return "recommended limit" if cfg.use_recommended_limit else "target limit"
+
+
+def _submission_limit_price_exceeds_ceiling(
+    submission_limit_price: Optional[float],
+    cfg,
+) -> bool:
+    if submission_limit_price is None:
+        return False
+    max_allowable_price = min(float(getattr(cfg, "max_allowable_price", MAX_ALLOWABLE_PRICE)), 0.75)
+    return float(submission_limit_price) > max_allowable_price
+
+
+def _clamp_submission_limit_price(
+    submission_limit_price: Optional[float],
+    cfg,
+) -> Optional[float]:
+    if submission_limit_price is None:
+        return None
+    calculated_limit_price = float(submission_limit_price)
+    max_allowable_price = min(float(getattr(cfg, "max_allowable_price", MAX_ALLOWABLE_PRICE)), 0.75)
+    final_submission_price = min(calculated_limit_price, max_allowable_price)
+    return max(final_submission_price, 0.01)
+
+
+def _risk_reward_price_ceiling_reason(
+    submission_limit_price: float,
+    cfg,
+) -> str:
+    max_allowable_price = min(float(getattr(cfg, "max_allowable_price", MAX_ALLOWABLE_PRICE)), 0.75)
+    return (
+        "Risk/Reward price ceiling exceeded "
+        f"(entry_price={float(submission_limit_price):.3f}; "
+        f"max_allowable_price={max_allowable_price:.3f})"
+    )
 
 
 def evaluate_ok_to_submit(
@@ -1366,12 +1400,34 @@ def retry_unfilled_live_order(order, market: BtcUpDownMarket) -> Optional[TradeE
             submission_accepted=False,
             live_order_id=None,
         )
+    if _submission_limit_price_exceeds_ceiling(submission_limit_price, cfg):
+        return TradeExecutionResult(
+            executed=False,
+            side=getattr(order, "side", None),
+            size=0.0,
+            price=submission_limit_price,
+            token_id=getattr(order, "token_id", None),
+            reason=_risk_reward_price_ceiling_reason(submission_limit_price, cfg),
+            live_order_response=None,
+            execution_snapshot=snapshot,
+            quoted_price_at_entry=snapshot.buy_quote,
+            actual_fill_price=None,
+            realized_slippage_bps=None,
+            order_latency_ms=0,
+            book_depth_at_fill=_get_book_depth_at_fill(snapshot),
+            shares_requested=getattr(order, "shares_requested", None),
+            submission_accepted=False,
+            live_order_id=None,
+            veto_flags=["risk_reward_price_ceiling_exceeded"],
+        )
+    submission_limit_price = _clamp_submission_limit_price(submission_limit_price, cfg)
 
     time_remaining_seconds = _get_time_remaining_seconds(market)
     use_fok = time_remaining_seconds <= 10
     order_type_label = "FOK" if use_fok else "GTC"
     size = float(getattr(order, "shares_requested", None) or getattr(order, "shares", 0.0) or 0.0)
     size = _quantize_live_buy_size_for_amount_precision(submission_limit_price, size)
+    size = max(float(size), 5.0)
     quoted_price_at_entry = snapshot.buy_quote
     book_depth_at_fill = _get_book_depth_at_fill(snapshot)
     if size <= 0:
@@ -1423,6 +1479,7 @@ def retry_unfilled_live_order(order, market: BtcUpDownMarket) -> Optional[TradeE
         )
 
     client = Polymarket()
+    size = max(float(size), 5.0)
     required_cash = _get_required_live_cash(size, submission_limit_price, cfg.live_fee_rate_bps)
     ensure_live_trade_cash_available(required_cash)
     submit_started = time.monotonic()
@@ -1633,6 +1690,12 @@ def calculate_time_decay_vetoes(features: dict) -> List[str]:
         adx_14 = float(features.get("adx_14", 0))
         momentum_alignment = bool(features.get("momentum_alignment", False))
         ema_alignment = bool(features.get("ema_alignment", False))
+        decision_side = str(features.get("decision_side") or "").upper()
+        macro_trend_direction = str(features.get("macro_trend_direction") or "").upper()
+        macro_trend_aligned = (
+            (decision_side == "UP" and macro_trend_direction == "UP")
+            or (decision_side == "DOWN" and macro_trend_direction == "DOWN")
+        )
 
         time_factor = max(min(time_left / 300.0, 1.0), 0.0)
         multiplier = 0.2 + (time_factor ** 1.5) * 1.8
@@ -1642,13 +1705,15 @@ def calculate_time_decay_vetoes(features: dict) -> List[str]:
 
         effective_vol = max(vol_5m, 25.0)
         req_cushion = effective_vol * multiplier
+        if macro_trend_aligned:
+            req_cushion *= 0.60
 
         if cushion_usd < req_cushion:
             vetoes.append(
                 f"dynamic_vol_veto_req_{req_cushion:.2f}_act_{cushion_usd:.2f}_mult_{multiplier:.2f}"
             )
 
-        if adx_14 > 75.0 and time_left > 60:
+        if not macro_trend_aligned and adx_14 > 75.0 and time_left > 60:
             vetoes.append(f"adx_exhaustion_early_veto_adx_{adx_14:.1f}")
     except Exception as exc:
         vetoes.append(f"dynamic_veto_calc_error_{str(exc)}")
@@ -1848,10 +1913,13 @@ def _validate_trade_candidate(
     if isinstance(regime_fingerprint, dict):
         trend_regime = str(regime_fingerprint.get("trend_regime", "unknown") or "unknown")
         rsi_regime = str(regime_fingerprint.get("rsi_regime", "unknown") or "unknown")
+    feature_rsi_regime = None if features is None else getattr(features, "rsi_regime", None)
+    if feature_rsi_regime is not None and rsi_regime.lower() == "unknown":
+        rsi_regime = str(feature_rsi_regime or "unknown")
     regime_label = str(rsi_regime or "").upper()
     parabolic_up_regime = regime_label == "PARABOLIC_UP"
     parabolic_down_regime = regime_label == "PARABOLIC_DOWN"
-    parabolic_regime = parabolic_up_regime or parabolic_down_regime
+    parabolic_regime = "PARABOLIC" in regime_label
     strong_trend_itm = side_is_itm and trend_regime.lower() in {"strong_up", "strong_down"}
     required_velocity_to_win = None
     if gap_to_target is not None and time_remaining_seconds > 0:
@@ -1862,6 +1930,8 @@ def _validate_trade_candidate(
     rsi_9 = None if features is None else getattr(features, "rsi_9", None)
     rsi_speed_divergence = None if features is None else getattr(features, "rsi_speed_divergence", None)
     adx_14 = None if features is None else getattr(features, "adx_14", None)
+    macro_trend_direction = "" if features is None else str(getattr(features, "macro_trend_direction", "") or "").upper()
+    macro_trend_aligned = decision.side in {"UP", "DOWN"} and macro_trend_direction == decision.side
     market_implied_probability = _get_market_implied_probability(market, decision, snapshot)
     chosen_side_market_win_chance = (
         float(market_implied_probability)
@@ -1881,6 +1951,8 @@ def _validate_trade_candidate(
         "adx_14": 0.0 if adx_14 is None else float(adx_14),
         "momentum_alignment": _momentum_alignment(features) is True,
         "ema_alignment": bool(getattr(features, "ema_alignment", False)),
+        "decision_side": decision.side,
+        "macro_trend_direction": getattr(features, "macro_trend_direction", None),
     }
     dynamic_adx_vetoes = [
         veto for veto in calculate_time_decay_vetoes(dynamic_veto_context)
@@ -1996,7 +2068,7 @@ def _validate_trade_candidate(
         decision.side == "DOWN"
         and rsi_9 is not None
         and rsi_9 < float(getattr(cfg, "down_rsi_veto_threshold", 30.0))
-        and not parabolic_down_regime
+        and not parabolic_regime
     ):
         down_rsi_threshold = float(getattr(cfg, "down_rsi_veto_threshold", 30.0))
         return _reject(
@@ -2027,6 +2099,7 @@ def _validate_trade_candidate(
         and time_remaining_seconds > 200
         and rsi_9 is not None
         and rsi_9 > float(getattr(cfg, "max_early_window_rsi", 65.0))
+        and not macro_trend_aligned
     ):
         return _reject(
             submission_limit_price,
@@ -2053,7 +2126,7 @@ def _validate_trade_candidate(
             and adx_14 is not None
             and adx_14 > float(getattr(cfg, "parabolic_rsi_suspend_adx_threshold", 35.0))
         )
-        and not parabolic_up_regime
+        and not parabolic_regime
         and rsi_9 > up_rsi_threshold
     ):
         return _reject(
@@ -2064,27 +2137,28 @@ def _validate_trade_candidate(
             ),
         )
 
-    if (
-        time_remaining_seconds > 240
-        and gap_to_target is not None
-        and features is not None
-        and getattr(features, "atr_14", None) not in (None, 0)
-        and abs(gap_to_target) < (0.2 * float(getattr(features, "atr_14", 0.0)))
-        and not (
-            _momentum_alignment(features) is True
-            and adx_14 is not None
-            and adx_14 >= float(getattr(cfg, "trend_priority_adx_threshold", 30.0))
-        )
-    ):
-        return _reject(
-            submission_limit_price,
-            (
-                "Discovery strike-buffer veto blocked early low-separation trade "
-                f"(gap={gap_to_target:.3f}; atr_14={float(getattr(features, 'atr_14', 0.0)):.3f}; "
-                f"buffer={(0.2 * float(getattr(features, 'atr_14', 0.0))):.3f}; "
-                f"time_remaining={time_remaining_seconds}s)"
-            ),
-        )
+    if gap_to_target is not None and features is not None and getattr(features, "volatility_5m", None) not in (None, 0):
+        vol5m = float(features.volatility_5m)
+        required_multiplier = 0.0
+
+        if time_remaining_seconds > 240:
+            required_multiplier = 2.0
+        elif time_remaining_seconds > 180:
+            required_multiplier = 1.5
+        elif time_remaining_seconds > 120:
+            required_multiplier = 1.0
+
+        required_cushion = vol5m * required_multiplier
+        if required_multiplier > 0.0 and abs(gap_to_target) < required_cushion:
+            return _reject(
+                submission_limit_price,
+                (
+                    "Early-window volatility veto: "
+                    f"Cushion {abs(gap_to_target):.2f} is less than required "
+                    f"{required_multiplier}x vol5m ({required_cushion:.2f}) "
+                    f"with {time_remaining_seconds}s left."
+                ),
+            )
 
     if (
         chosen_side_market_win_chance is not None
@@ -2424,8 +2498,31 @@ def _execute_live_trade(
     if submission_limit_price is None or live_price is None:
         raise RuntimeError("Live trade execution called without a valid priced snapshot.")
 
+    if _submission_limit_price_exceeds_ceiling(submission_limit_price, cfg):
+        return TradeExecutionResult(
+            executed=False,
+            side=decision.side,
+            size=0.0,
+            price=submission_limit_price,
+            token_id=snapshot.token_id,
+            reason=_risk_reward_price_ceiling_reason(submission_limit_price, cfg),
+            live_order_response=None,
+            execution_snapshot=snapshot,
+            quoted_price_at_entry=snapshot.buy_quote,
+            actual_fill_price=None,
+            realized_slippage_bps=None,
+            order_latency_ms=0,
+            book_depth_at_fill=_get_book_depth_at_fill(snapshot),
+            shares_requested=_get_order_size_for_decision(cfg),
+            submission_accepted=False,
+            live_order_id=None,
+            veto_flags=["risk_reward_price_ceiling_exceeded"],
+        )
+    submission_limit_price = _clamp_submission_limit_price(submission_limit_price, cfg)
+
     size = _get_order_size_for_decision(cfg)
     size = _quantize_live_buy_size_for_amount_precision(submission_limit_price, size)
+    size = max(float(size), 5.0)
     quoted_price_at_entry = snapshot.buy_quote
     book_depth_at_fill = _get_book_depth_at_fill(snapshot)
     min_order_size = _scale_live_size_for_min_notional(
@@ -2473,6 +2570,7 @@ def _execute_live_trade(
     client = Polymarket()
 
     def _submit_order(order_size: float, fok_enabled: bool):
+        order_size = max(float(order_size), 5.0)
         order_notional_local = _get_order_notional(order_size, submission_limit_price)
         estimated_fee_local = _estimate_live_fee(order_size, submission_limit_price, cfg.live_fee_rate_bps)
         required_cash_local = _get_required_live_cash(

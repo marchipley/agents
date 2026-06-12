@@ -1,6 +1,6 @@
 import json
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
 import requests
@@ -280,6 +280,29 @@ class TestBtcIndicators(unittest.TestCase):
         self.assertEqual(features.retained_sample_count, 4)
         self.assertEqual(features.window_sample_count, 3)
         self.assertEqual(features.trailing_5m_sample_count, 3)
+
+    def test_build_btc_features_calculates_macro_trend_from_15m_history(self):
+        now = datetime.fromtimestamp(1_776_814_500, tz=timezone.utc)
+        target_time = now - timedelta(minutes=15)
+        indicators._record_price_sample(74990.0, as_of=target_time - timedelta(seconds=30))
+        indicators._record_price_sample(75000.0, as_of=target_time)
+        indicators._record_price_sample(75020.0, as_of=now - timedelta(seconds=300))
+        indicators._record_price_sample(75025.0, as_of=now - timedelta(seconds=200))
+        indicators._record_price_sample(75030.0, as_of=now - timedelta(seconds=100))
+
+        with patch(
+            "custom.btc_agent.indicators.fetch_btc_spot_price",
+            side_effect=self._recorded_price_return(75050.0),
+        ), patch(
+            "custom.btc_agent.indicators.datetime",
+        ) as mock_datetime:
+            mock_datetime.now.return_value = now
+            mock_datetime.fromtimestamp.side_effect = datetime.fromtimestamp
+            mock_datetime.timezone = timezone
+            features = indicators.build_btc_features(window_start_ts=int((now - timedelta(seconds=300)).timestamp()))
+
+        self.assertAlmostEqual(features.macro_trend_15m_usd, 50.0, places=6)
+        self.assertEqual(features.macro_trend_direction, "UP")
 
     def test_build_btc_features_carries_forward_last_pre_window_sample(self):
         indicators._record_price_sample(

@@ -915,8 +915,12 @@ def _llm_analysis_payload() -> dict:
         return {"engine": cfg.engine, "model": cfg.model}
     except Exception as exc:
         return {
-            "engine": os.getenv("AI_ENGINE"),
-            "model": os.getenv("OPENAI_MODEL") or os.getenv("GEMINI_MODEL"),
+            "engine": getattr(config_module, "AI_ENGINE", None),
+            "model": (
+                getattr(config_module, "OPENAI_MODEL", None)
+                if str(getattr(config_module, "AI_ENGINE", "")).upper() == "OPENAI"
+                else getattr(config_module, "GEMINI_MODEL", None)
+            ),
             "error": str(exc),
         }
 
@@ -1440,7 +1444,13 @@ def append_completed_order_tick(
             observed_at=observed_at,
             current_btc_price=current_btc_price,
             session_win_trades=_SESSION_WIN_TRADES + (1 if outcome_label == "win" else 0),
-            session_loss_trades=_SESSION_LOSS_TRADES + (1 if outcome_label == "loss" else 0),
+            session_loss_trades=(
+                _SESSION_LOSS_TRADES + 1
+                if outcome_label == "loss"
+                else max(_SESSION_LOSS_TRADES - 1, 0)
+                if outcome_label == "win"
+                else _SESSION_LOSS_TRADES
+            ),
             force=True,
         )
     return outcome_label
@@ -1460,6 +1470,8 @@ def finalize_completed_orders(previous_orders, current_btc_price: float) -> int:
             record_realized_pnl_for_order(order, outcome_label)
         if outcome_label == "win":
             _SESSION_WIN_TRADES += 1
+            if _SESSION_LOSS_TRADES > 0:
+                _SESSION_LOSS_TRADES -= 1
         if outcome_label == "loss":
             loss_count += 1
             _SESSION_LOSS_TRADES += 1
@@ -1971,13 +1983,16 @@ def _should_log_failed_order_attempt(cfg, decision, result) -> bool:
 
 
 def enforce_session_loss_trade_limit(cfg) -> None:
-    if getattr(cfg, "max_losses_per_run", 0) <= 0:
+    max_net_losses_per_run = int(
+        getattr(cfg, "max_net_losses_per_run", getattr(cfg, "max_losses_per_run", 0))
+    )
+    if max_net_losses_per_run <= 0:
         return
-    if _SESSION_LOSS_TRADES < cfg.max_losses_per_run:
+    if _SESSION_LOSS_TRADES < max_net_losses_per_run:
         return
     print(
-        "Max losses per run has been reached "
-        f"({_SESSION_LOSS_TRADES}/{cfg.max_losses_per_run}). "
+        "Max net losses per run has been reached "
+        f"({_SESSION_LOSS_TRADES}/{max_net_losses_per_run}). "
         "Exiting BTC agent."
     )
     sys.exit(0)

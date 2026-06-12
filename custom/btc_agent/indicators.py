@@ -22,8 +22,9 @@ from .network import http_get
 _PRICE_HISTORY: List[Tuple[datetime, float]] = []
 _PRICE_HISTORY_BACKFILLED = False
 _LIVE_PRICE_SAMPLES_RECORDED = 0
-_BACKFILL_WINDOW_SECONDS = 420
+_BACKFILL_WINDOW_SECONDS = 960
 _BACKFILL_BUCKET_SECONDS = 20
+_PRICE_HISTORY_MAX_SAMPLES = 240
 _WINDOW_BASELINE_CARRY_FORWARD_SECONDS = 60
 _WINDOW_BASELINE_LOOKAHEAD_SECONDS = 60
 _POLYMARKET_RTDS_URL = "wss://ws-live-data.polymarket.com"
@@ -67,6 +68,8 @@ class BtcFeatures:
     retained_sample_count: int
     window_sample_count: int
     trailing_5m_sample_count: int
+    macro_trend_15m_usd: float = 0.0
+    macro_trend_direction: str = "FLAT"
     live_sample_count: int = 0
 
 
@@ -212,8 +215,8 @@ def _record_price_sample(price: float, as_of: Optional[datetime] = None, seeded:
         if same_price and near_duplicate:
             return
     _PRICE_HISTORY.append((timestamp, price))
-    if len(_PRICE_HISTORY) > 60:
-        _PRICE_HISTORY = _PRICE_HISTORY[-60:]
+    if len(_PRICE_HISTORY) > _PRICE_HISTORY_MAX_SAMPLES:
+        _PRICE_HISTORY = _PRICE_HISTORY[-_PRICE_HISTORY_MAX_SAMPLES:]
     if not seeded:
         _LIVE_PRICE_SAMPLES_RECORDED += 1
 
@@ -614,6 +617,21 @@ def build_btc_features(window_start_ts: int) -> BtcFeatures:
     adx_14 = _compute_adx_from_closes(prices, period=14)
     atr_14 = _compute_atr_from_closes(prices, period=14)
     volatility_5m = statistics.pstdev(trailing_5m_prices) if len(trailing_5m_prices) >= 2 else None
+    price_15m_ago = price_now
+    if _PRICE_HISTORY:
+        target_time = now - timedelta(minutes=15)
+        past_prices = [price for ts, price in _PRICE_HISTORY if ts >= target_time]
+        if past_prices:
+            price_15m_ago = past_prices[0]
+        else:
+            price_15m_ago = _PRICE_HISTORY[0][1]
+    macro_trend_15m_usd = price_now - price_15m_ago
+    macro_threshold = 0.0 if volatility_5m is None else float(volatility_5m)
+    macro_trend_direction = "FLAT"
+    if macro_trend_15m_usd > macro_threshold:
+        macro_trend_direction = "UP"
+    elif macro_trend_15m_usd < -macro_threshold:
+        macro_trend_direction = "DOWN"
     consecutive_flat_ticks = _count_consecutive_flat_ticks(prices)
     consecutive_directional_ticks = _count_consecutive_directional_ticks(prices)
     last_10_ticks_direction = _build_last_ticks_direction(prices)
@@ -641,6 +659,8 @@ def build_btc_features(window_start_ts: int) -> BtcFeatures:
         adx_14=adx_14,
         atr_14=atr_14,
         volatility_5m=volatility_5m,
+        macro_trend_15m_usd=macro_trend_15m_usd,
+        macro_trend_direction=macro_trend_direction,
         consecutive_flat_ticks=consecutive_flat_ticks,
         consecutive_directional_ticks=consecutive_directional_ticks,
         last_10_ticks_direction=last_10_ticks_direction,

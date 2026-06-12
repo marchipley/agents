@@ -549,7 +549,7 @@ class TestBtcMain(unittest.TestCase):
         ) as mock_exit:
             with self.assertRaises(SystemExit):
                 enforce_session_loss_trade_limit(
-                    SimpleNamespace(max_losses_per_run=3)
+                    SimpleNamespace(max_net_losses_per_run=3)
                 )
 
         mock_exit.assert_called_once_with(0)
@@ -562,10 +562,48 @@ class TestBtcMain(unittest.TestCase):
             "custom.btc_agent.main.sys.exit",
         ) as mock_exit:
             enforce_session_loss_trade_limit(
-                SimpleNamespace(max_losses_per_run=3)
+                SimpleNamespace(max_net_losses_per_run=3)
             )
 
         mock_exit.assert_not_called()
+
+    def test_finalize_completed_orders_win_decrements_net_loss_count(self):
+        from custom.btc_agent import main as main_module
+
+        main_module._SESSION_WIN_TRADES = 0
+        main_module._SESSION_LOSS_TRADES = 1
+        try:
+            with patch(
+                "custom.btc_agent.main.append_completed_order_tick",
+                return_value="win",
+            ), patch("custom.btc_agent.main.record_realized_pnl_for_order"):
+                completed_losses = main_module.finalize_completed_orders([object()], 77770.0)
+
+            self.assertEqual(completed_losses, 0)
+            self.assertEqual(main_module._SESSION_WIN_TRADES, 1)
+            self.assertEqual(main_module._SESSION_LOSS_TRADES, 0)
+        finally:
+            main_module._SESSION_WIN_TRADES = 0
+            main_module._SESSION_LOSS_TRADES = 0
+
+    def test_finalize_completed_orders_win_does_not_decrement_net_loss_below_zero(self):
+        from custom.btc_agent import main as main_module
+
+        main_module._SESSION_WIN_TRADES = 0
+        main_module._SESSION_LOSS_TRADES = 0
+        try:
+            with patch(
+                "custom.btc_agent.main.append_completed_order_tick",
+                return_value="win",
+            ), patch("custom.btc_agent.main.record_realized_pnl_for_order"):
+                completed_losses = main_module.finalize_completed_orders([object()], 77770.0)
+
+            self.assertEqual(completed_losses, 0)
+            self.assertEqual(main_module._SESSION_WIN_TRADES, 1)
+            self.assertEqual(main_module._SESSION_LOSS_TRADES, 0)
+        finally:
+            main_module._SESSION_WIN_TRADES = 0
+            main_module._SESSION_LOSS_TRADES = 0
 
     def test_should_not_log_failed_order_attempt_for_paper_trade_rejection(self):
         cfg = SimpleNamespace(paper_trading=True)
