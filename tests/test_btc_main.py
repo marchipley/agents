@@ -265,6 +265,58 @@ class TestBtcMain(unittest.TestCase):
         sleep.assert_called_once_with(1.5)
         revert_trade.assert_not_called()
 
+    def test_maintain_unfilled_live_orders_releases_slot_only_after_confirmed_cancel(self):
+        order = ActivePaperOrder(
+            market_slug="btc-updown-5m-1779999906",
+            market_title="Bitcoin Up or Down",
+            side="DOWN",
+            shares=5.0,
+            entry_price=0.67,
+            token_id="down-token",
+            target_btc_price=80000.0,
+            entry_btc_price=79990.0,
+            live_order_id="order-confirmed-cancel",
+            placed_at=datetime.now(timezone.utc) - timedelta(seconds=30),
+            filled=False,
+            actual_fill_price=None,
+        )
+        call_count = {"refresh": 0}
+
+        def refresh_status(_order):
+            call_count["refresh"] += 1
+            if call_count["refresh"] == 3:
+                _order.api_order_state = "ORDER_STATE_CANCELED"
+            return False
+
+        with patch.dict(os.environ, {"CANCEL_UNFILLED_TIMER": "10"}), patch(
+            "custom.btc_agent.main.refresh_live_order_fill_status",
+            side_effect=refresh_status,
+        ) as refresh_status_mock, patch(
+            "custom.btc_agent.executor.cancel_live_order",
+            return_value=True,
+        ) as cancel_order, patch(
+            "custom.btc_agent.main.os.getcwd",
+            return_value="/tmp",
+        ), patch(
+            "custom.btc_agent.main.append_period_analysis_sample"
+        ), patch(
+            "custom.btc_agent.main.revert_executed_trade"
+        ) as revert_trade, patch(
+            "custom.btc_agent.main.os.replace",
+            wraps=os.replace,
+        ), patch(
+            "custom.btc_agent.main.time.sleep"
+        ) as sleep:
+            result = maintain_unfilled_live_orders([order], SimpleNamespace())
+
+        self.assertEqual(result, [])
+        self.assertEqual(refresh_status_mock.call_count, 3)
+        cancel_order.assert_called_once_with("order-confirmed-cancel")
+        sleep.assert_called_once_with(1.5)
+        self.assertEqual(order.api_order_state, "CANCELED")
+        self.assertEqual(order.api_state, "CANCELED")
+        revert_trade.assert_called_once_with(order)
+
     def test_maintain_unfilled_live_orders_final_status_check_blocks_cancel(self):
         order = ActivePaperOrder(
             market_slug="btc-updown-5m-1779999903",
@@ -496,6 +548,7 @@ class TestBtcMain(unittest.TestCase):
         "1779999900",
         "1779999901",
         "1779999902",
+        "1779999906",
         "1999999997",
         "1999999998",
         "1999999999",

@@ -1553,15 +1553,41 @@ def maintain_unfilled_live_orders(active_orders, market):
 
                         canceled = cancel_live_order(order_id)
                         if canceled:
-                            # Allow Polymarket REST state to catch up with an in-flight match
-                            # before releasing the local trade slot.
-                            time.sleep(1.5)
-                            try:
-                                if refresh_live_order_fill_status(order):
-                                    newly_filled_orders.append(order)
-                                    continue
-                            except Exception:
-                                pass
+                            is_actually_filled = False
+                            for _ in range(4):
+                                time.sleep(1.5)
+                                try:
+                                    if refresh_live_order_fill_status(order):
+                                        newly_filled_orders.append(order)
+                                        is_actually_filled = True
+                                        break
+                                except Exception:
+                                    pass
+
+                                api_state = str(getattr(order, "api_state", "") or "").upper()
+                                api_order_state = str(getattr(order, "api_order_state", "") or "").upper()
+                                if api_state in {
+                                    "CANCELED",
+                                    "CANCELLED",
+                                    "ORDER_STATE_CANCELED",
+                                } or api_order_state in {
+                                    "CANCELED",
+                                    "CANCELLED",
+                                    "ORDER_STATE_CANCELED",
+                                }:
+                                    break
+
+                            if is_actually_filled:
+                                continue
+
+                            api_state = str(getattr(order, "api_state", "") or "").upper()
+                            api_order_state = str(getattr(order, "api_order_state", "") or "").upper()
+                            if (
+                                getattr(order, "filled", False)
+                                or api_state in filled_states
+                                or api_order_state in filled_states
+                            ):
+                                continue
 
                             msg = (
                                 f"Unfilled order {order_id} was placed but cancelled because it was "
