@@ -2071,8 +2071,8 @@ class TestBtcExecutor(unittest.TestCase):
             )
 
         self.assertIsNone(validated_snapshot)
-        self.assertIn("Early-window volatility veto", rejection.reason)
-        self.assertIn("1.0x vol5m", rejection.reason)
+        self.assertIn("Dynamic time-decay veto", rejection.reason)
+        self.assertIn("dynamic_vol_veto", rejection.reason)
 
     def test_validate_trade_candidate_rejects_up_quote_price_divergence(self):
         market = types.SimpleNamespace(
@@ -2709,8 +2709,8 @@ class TestBtcExecutor(unittest.TestCase):
 
         self.assertIsNone(validated_snapshot)
         self.assertIsNotNone(rejection)
-        self.assertIn("Early-window volatility veto", rejection.reason)
-        self.assertIn("1.0x vol5m", rejection.reason)
+        self.assertIn("Dynamic time-decay veto", rejection.reason)
+        self.assertIn("dynamic_vol_veto", rejection.reason)
 
     def test_validate_trade_candidate_discounts_volatility_margin_for_high_confidence(self):
         market = types.SimpleNamespace(

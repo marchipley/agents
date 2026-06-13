@@ -2137,29 +2137,6 @@ def _validate_trade_candidate(
             ),
         )
 
-    if gap_to_target is not None and features is not None and getattr(features, "volatility_5m", None) not in (None, 0):
-        vol5m = float(features.volatility_5m)
-        required_multiplier = 0.0
-
-        if time_remaining_seconds > 240:
-            required_multiplier = 2.0
-        elif time_remaining_seconds > 180:
-            required_multiplier = 1.5
-        elif time_remaining_seconds > 120:
-            required_multiplier = 1.0
-
-        required_cushion = vol5m * required_multiplier
-        if required_multiplier > 0.0 and abs(gap_to_target) < required_cushion:
-            return _reject(
-                submission_limit_price,
-                (
-                    "Early-window volatility veto: "
-                    f"Cushion {abs(gap_to_target):.2f} is less than required "
-                    f"{required_multiplier}x vol5m ({required_cushion:.2f}) "
-                    f"with {time_remaining_seconds}s left."
-                ),
-            )
-
     if (
         chosen_side_market_win_chance is not None
         and chosen_side_market_win_chance < float(getattr(cfg, "market_win_chance_veto_threshold", 0.15))
