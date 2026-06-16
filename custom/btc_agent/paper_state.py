@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 
 PositionStatus = Literal["WINNING", "LOSING", "TIED"]
@@ -29,6 +29,10 @@ class ActivePaperOrder:
     live_reprice_attempts: int = 0
     llm_prompt_text: Optional[str] = None
     llm_raw_response_text: Optional[str] = None
+    trigger_state: Optional[Dict[str, Any]] = None
+    current_excursion_usd: Optional[float] = None
+    max_favorable_excursion_usd: Optional[float] = None
+    max_adverse_excursion_usd: Optional[float] = None
     trade_number_in_period: int = 1
     target_is_approximate: bool = False
     placed_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))

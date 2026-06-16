@@ -3257,6 +3257,50 @@ class TestBtcExecutor(unittest.TestCase):
         self.assertIn("for 7.0000 shares", result.reason)
         self.assertEqual(client.execute_order.call_args.kwargs["size"], 7.0)
 
+    def test_execute_live_trade_applies_early_time_decay_price_ceiling(self):
+        market = types.SimpleNamespace(end_ts=int(datetime.now(timezone.utc).timestamp()) + 260)
+        decision = types.SimpleNamespace(side="UP", confidence=0.95, max_price_to_pay=1.0)
+        snapshot = TokenQuoteSnapshot(
+            token_id="up-token",
+            buy_quote=0.70,
+            midpoint=0.70,
+            last_trade_price=0.70,
+            reference_price=0.70,
+            target_limit_price=0.70,
+            recommended_limit_price=0.70,
+            ok_to_submit=True,
+            submit_reason="ok",
+            best_bid=0.69,
+            best_ask=0.70,
+            tick_size=0.01,
+            spread=0.01,
+        )
+        client = types.SimpleNamespace(execute_order=unittest.mock.Mock(return_value={"ok": True}))
+
+        with patch(
+            "custom.btc_agent.executor.get_trading_config",
+            return_value=types.SimpleNamespace(
+                shares_per_trade=7.0,
+                live_min_order_usd=1.0,
+                live_fee_rate_bps=1000,
+                use_recommended_limit=False,
+                max_allowable_price=0.75,
+            ),
+        ), patch(
+            "custom.btc_agent.executor.ensure_live_trade_cash_available",
+        ), patch(
+            "custom.btc_agent.executor.Polymarket",
+            return_value=client,
+        ), patch(
+            "custom.btc_agent.executor._resolve_actual_fill_price",
+            return_value=0.58,
+        ):
+            result = _execute_live_trade(decision=decision, market=market, snapshot=snapshot)
+
+        self.assertTrue(result.executed)
+        self.assertEqual(result.price, 0.58)
+        self.assertEqual(client.execute_order.call_args.kwargs["price"], 0.58)
+
     def test_execute_live_trade_rejects_submission_price_above_config_ceiling(self):
         market = types.SimpleNamespace(end_ts=int(datetime.now(timezone.utc).timestamp()) + 30)
         decision = types.SimpleNamespace(side="UP", confidence=0.95, max_price_to_pay=1.0)

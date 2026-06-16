@@ -1,6 +1,7 @@
 # custom/btc_agent/main.py
 
 from contextlib import nullcontext
+import copy
 from datetime import datetime, timezone
 import math
 import os
@@ -369,6 +370,35 @@ def _position_outcome_reason(order: ActivePaperOrder, current_btc_price: float, 
             f"({current_btc_price:.2f} >= {order.target_btc_price:.2f})"
         )
     return f"BTC finished exactly at the price to beat ({current_btc_price:.2f})"
+
+
+def _order_cushion_usd(order: ActivePaperOrder, current_btc_price: float) -> Optional[float]:
+    try:
+        price = float(current_btc_price)
+        target = float(order.target_btc_price)
+    except (TypeError, ValueError):
+        return None
+    if order.side == "UP":
+        return price - target
+    if order.side == "DOWN":
+        return target - price
+    return None
+
+
+def _update_order_excursions(order: ActivePaperOrder, current_btc_price: float) -> Optional[float]:
+    cushion = _order_cushion_usd(order, current_btc_price)
+    if cushion is None:
+        return None
+    order.current_excursion_usd = cushion
+    if getattr(order, "max_favorable_excursion_usd", None) is None:
+        order.max_favorable_excursion_usd = cushion
+    else:
+        order.max_favorable_excursion_usd = max(order.max_favorable_excursion_usd, cushion)
+    if getattr(order, "max_adverse_excursion_usd", None) is None:
+        order.max_adverse_excursion_usd = cushion
+    else:
+        order.max_adverse_excursion_usd = min(order.max_adverse_excursion_usd, cushion)
+    return cushion
 
 
 def _snapshot_summary(prefix: str, snapshot: TokenQuoteSnapshot) -> list[str]:
@@ -876,6 +906,40 @@ def _execution_result_analysis_payload(result) -> Optional[dict]:
     }
 
 
+def _trigger_state_payload(
+    *,
+    observed_at: datetime,
+    market,
+    features,
+    decision,
+    up_snapshot: TokenQuoteSnapshot = None,
+    down_snapshot: TokenQuoteSnapshot = None,
+) -> dict:
+    return {
+        "observed_at": observed_at.isoformat() if hasattr(observed_at, "isoformat") else None,
+        "market_slug": getattr(market, "slug", None),
+        "features": copy.deepcopy(_features_analysis_payload(features)),
+        "decision": copy.deepcopy(_decision_analysis_payload(decision, market=market, features=features)),
+        "llm_raw_response": getattr(decision, "raw_response_text", None),
+        "regime_fingerprint": copy.deepcopy(
+            _build_regime_fingerprint(
+                market_slug=getattr(market, "slug", None),
+                market=market,
+                observed_at=observed_at,
+                features=features,
+                up_snapshot=up_snapshot,
+                down_snapshot=down_snapshot,
+                current_btc_price=getattr(features, "price_usd", None),
+                period_open_price_to_beat=getattr(market, "settlement_threshold", None),
+            )
+        ),
+        "quotes": {
+            "up": copy.deepcopy(_snapshot_analysis_payload(up_snapshot)),
+            "down": copy.deepcopy(_snapshot_analysis_payload(down_snapshot)),
+        },
+    }
+
+
 def _active_orders_analysis_payload(current_btc_price=None) -> list[dict]:
     orders = []
     for order in get_active_orders():
@@ -906,6 +970,16 @@ def _order_analysis_payload(order, current_btc_price=None) -> Optional[dict]:
         "actual_fill_price": _json_safe_number(getattr(order, "actual_fill_price", None)),
         "realized_slippage_bps": _json_safe_number(getattr(order, "realized_slippage_bps", None)),
         "trade_number_in_period": getattr(order, "trade_number_in_period", None),
+        "current_excursion_usd": _json_safe_number(
+            getattr(order, "current_excursion_usd", None)
+        ),
+        "max_favorable_excursion_usd": _json_safe_number(
+            getattr(order, "max_favorable_excursion_usd", None)
+        ),
+        "max_adverse_excursion_usd": _json_safe_number(
+            getattr(order, "max_adverse_excursion_usd", None)
+        ),
+        "trigger_state": getattr(order, "trigger_state", None),
     }
 
 
@@ -1277,6 +1351,7 @@ def append_completed_order_tick(
         else 0.0
     )
     btc_gap_to_target = current_btc_price - order.target_btc_price
+    current_excursion_usd = _update_order_excursions(order, current_btc_price)
     if is_unfilled:
         status = "UNFILLED"
         outcome_label = "unfilled"
@@ -1335,6 +1410,9 @@ def append_completed_order_tick(
                     f"btc_move_from_entry={btc_move_from_entry:.2f}",
                     f"btc_move_from_entry_pct={btc_move_from_entry_pct:.4f}%",
                     f"btc_gap_to_target={btc_gap_to_target:.2f}",
+                    f"current_excursion_usd={_fmt(current_excursion_usd)}",
+                    f"max_favorable_excursion_usd={_fmt(getattr(order, 'max_favorable_excursion_usd', None))}",
+                    f"max_adverse_excursion_usd={_fmt(getattr(order, 'max_adverse_excursion_usd', None))}",
                     f"market_time_remaining_seconds={_fmt(regime_fingerprint.get('time_remaining_seconds'))}",
                     f"market_time_remaining_mmss={_fmt_mmss_from_seconds(regime_fingerprint.get('time_remaining_seconds'))}",
                     *_run_pnl_summary_lines(),
@@ -1366,6 +1444,18 @@ def append_completed_order_tick(
                         "llm_raw_response_start",
                         raw_response_text,
                         "llm_raw_response_end",
+                        "",
+                    ]
+                )
+            )
+        trigger_state = getattr(order, "trigger_state", None)
+        if trigger_state:
+            log_file.write(
+                "\n".join(
+                    [
+                        "trigger_state_start",
+                        json.dumps(trigger_state, sort_keys=True, default=str),
+                        "trigger_state_end",
                         "",
                     ]
                 )
@@ -2798,6 +2888,11 @@ def _run_once_core() -> None:
                 )
                 or features.window_open_price
             )
+        initial_excursion_usd = (
+            features.price_usd - target_btc_price
+            if decision.side == "UP"
+            else target_btc_price - features.price_usd
+        )
 
         new_order = ActivePaperOrder(
             market_slug=market.slug,
@@ -2821,6 +2916,17 @@ def _run_once_core() -> None:
             api_state=getattr(result, "api_order_state", None),
             llm_prompt_text=getattr(decision, "prompt_text", None),
             llm_raw_response_text=getattr(decision, "raw_response_text", None),
+            trigger_state=_trigger_state_payload(
+                observed_at=features.as_of,
+                market=market,
+                features=features,
+                decision=decision,
+                up_snapshot=up_snapshot,
+                down_snapshot=down_snapshot,
+            ),
+            current_excursion_usd=initial_excursion_usd,
+            max_favorable_excursion_usd=initial_excursion_usd,
+            max_adverse_excursion_usd=initial_excursion_usd,
             target_is_approximate=target_is_approximate,
         )
         promote_pending_period_log_to_completed(

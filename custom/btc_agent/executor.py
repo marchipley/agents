@@ -486,12 +486,26 @@ def _submission_limit_price_exceeds_ceiling(
 def _clamp_submission_limit_price(
     submission_limit_price: Optional[float],
     cfg,
+    time_remaining_seconds: Optional[int] = None,
 ) -> Optional[float]:
     if submission_limit_price is None:
         return None
     calculated_limit_price = float(submission_limit_price)
     max_allowable_price = min(float(getattr(cfg, "max_allowable_price", MAX_ALLOWABLE_PRICE)), 0.75)
-    final_submission_price = min(calculated_limit_price, max_allowable_price)
+    max_allowable_early_price = calculated_limit_price
+    if time_remaining_seconds is not None:
+        if time_remaining_seconds > 240:
+            max_allowable_early_price = min(calculated_limit_price, 0.58)
+        elif time_remaining_seconds > 180:
+            max_allowable_early_price = min(calculated_limit_price, 0.68)
+        elif time_remaining_seconds > 120:
+            max_allowable_early_price = min(calculated_limit_price, 0.80)
+
+    final_submission_price = min(
+        calculated_limit_price,
+        max_allowable_price,
+        max_allowable_early_price,
+    )
     return max(final_submission_price, 0.01)
 
 
@@ -1420,9 +1434,12 @@ def retry_unfilled_live_order(order, market: BtcUpDownMarket) -> Optional[TradeE
             live_order_id=None,
             veto_flags=["risk_reward_price_ceiling_exceeded"],
         )
-    submission_limit_price = _clamp_submission_limit_price(submission_limit_price, cfg)
-
     time_remaining_seconds = _get_time_remaining_seconds(market)
+    submission_limit_price = _clamp_submission_limit_price(
+        submission_limit_price,
+        cfg,
+        time_remaining_seconds=time_remaining_seconds,
+    )
     use_fok = time_remaining_seconds <= 10
     order_type_label = "FOK" if use_fok else "GTC"
     size = float(getattr(order, "shares_requested", None) or getattr(order, "shares", 0.0) or 0.0)
@@ -2495,7 +2512,11 @@ def _execute_live_trade(
             live_order_id=None,
             veto_flags=["risk_reward_price_ceiling_exceeded"],
         )
-    submission_limit_price = _clamp_submission_limit_price(submission_limit_price, cfg)
+    submission_limit_price = _clamp_submission_limit_price(
+        submission_limit_price,
+        cfg,
+        time_remaining_seconds=time_remaining_seconds,
+    )
 
     size = _get_order_size_for_decision(cfg)
     size = _quantize_live_buy_size_for_amount_precision(submission_limit_price, size)

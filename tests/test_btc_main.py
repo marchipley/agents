@@ -1085,6 +1085,15 @@ class TestBtcMain(unittest.TestCase):
             api_state="ORDER_STATE_FILLED",
             llm_prompt_text="SYSTEM PROMPT:\nfoo\n\nUSER PROMPT:\nbar",
             llm_raw_response_text='{"decision":"UP","confidence":0.8,"max_price_to_pay":1.0,"reason":"test"}',
+            trigger_state={
+                "observed_at": "2026-04-30T20:10:00+00:00",
+                "features": {"btc_price": 77760.0},
+                "decision": {"side": "UP"},
+                "llm_raw_response": '{"decision":"UP"}',
+            },
+            current_excursion_usd=-3.01,
+            max_favorable_excursion_usd=-3.01,
+            max_adverse_excursion_usd=-3.01,
         )
 
         with patch(
@@ -1104,6 +1113,9 @@ class TestBtcMain(unittest.TestCase):
         self.assertIn("position_state=WINNING", content)
         self.assertIn("btc_move_from_entry=10.00", content)
         self.assertIn("btc_gap_to_target=6.99", content)
+        self.assertIn("current_excursion_usd=6.990", content)
+        self.assertIn("max_favorable_excursion_usd=6.990", content)
+        self.assertIn("max_adverse_excursion_usd=-3.010", content)
         self.assertIn("market_time_remaining_mmss=", content)
         self.assertIn("polymarket_api_state=ORDER_STATE_FILLED", content)
         self.assertIn("internal_filled_flag=True", content)
@@ -1122,6 +1134,9 @@ class TestBtcMain(unittest.TestCase):
         self.assertIn("llm_raw_response_start", content)
         self.assertIn('"decision":"UP"', content)
         self.assertIn("llm_raw_response_end", content)
+        self.assertIn("trigger_state_start", content)
+        self.assertIn('"features": {"btc_price": 77760.0}', content)
+        self.assertIn("trigger_state_end", content)
 
     def test_append_pending_period_tick_analysis_writes_llm_prompt_when_present(self):
         market = SimpleNamespace(
