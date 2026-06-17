@@ -485,27 +485,23 @@ def _submission_limit_price_exceeds_ceiling(
 
 def _clamp_submission_limit_price(
     submission_limit_price: Optional[float],
+    time_remaining_seconds: int,
     cfg,
-    time_remaining_seconds: Optional[int] = None,
 ) -> Optional[float]:
     if submission_limit_price is None:
         return None
     calculated_limit_price = float(submission_limit_price)
-    max_allowable_price = min(float(getattr(cfg, "max_allowable_price", MAX_ALLOWABLE_PRICE)), 0.75)
-    max_allowable_early_price = calculated_limit_price
-    if time_remaining_seconds is not None:
-        if time_remaining_seconds > 240:
-            max_allowable_early_price = min(calculated_limit_price, 0.58)
-        elif time_remaining_seconds > 180:
-            max_allowable_early_price = min(calculated_limit_price, 0.68)
-        elif time_remaining_seconds > 120:
-            max_allowable_early_price = min(calculated_limit_price, 0.80)
 
-    final_submission_price = min(
-        calculated_limit_price,
-        max_allowable_price,
-        max_allowable_early_price,
-    )
+    max_allowable_early_price = calculated_limit_price
+    if time_remaining_seconds > 240:
+        max_allowable_early_price = min(calculated_limit_price, 0.58)
+    elif time_remaining_seconds > 180:
+        max_allowable_early_price = min(calculated_limit_price, 0.68)
+    elif time_remaining_seconds > 120:
+        max_allowable_early_price = min(calculated_limit_price, 0.80)
+
+    max_allowable_price = min(float(getattr(cfg, "max_allowable_price", MAX_ALLOWABLE_PRICE)), 0.75)
+    final_submission_price = min(calculated_limit_price, max_allowable_early_price, max_allowable_price)
     return max(final_submission_price, 0.01)
 
 
@@ -1437,8 +1433,8 @@ def retry_unfilled_live_order(order, market: BtcUpDownMarket) -> Optional[TradeE
     time_remaining_seconds = _get_time_remaining_seconds(market)
     submission_limit_price = _clamp_submission_limit_price(
         submission_limit_price,
+        time_remaining_seconds,
         cfg,
-        time_remaining_seconds=time_remaining_seconds,
     )
     use_fok = time_remaining_seconds <= 10
     order_type_label = "FOK" if use_fok else "GTC"
@@ -2011,23 +2007,41 @@ def _validate_trade_candidate(
                 ),
             )
 
-    if decision.side == "UP" and rsi_9 is not None and rsi_9 > 85.0 and not parabolic_up_regime:
-        return _reject(
-            submission_limit_price,
-            (
-                "Absolute RSI Veto blocked UP trade in extreme overbought conditions "
-                f"(rsi_9={rsi_9:.3f}; threshold=85.000)"
-            ),
-        )
+    if decision.side == "UP" and rsi_9 is not None:
+        if rsi_9 > 92.0:
+            return _reject(
+                submission_limit_price,
+                (
+                    "Absolute RSI Exhaustion Veto: Price mathematically over-extended "
+                    f"(rsi_9={rsi_9:.3f} > 92.000)"
+                ),
+            )
+        elif rsi_9 > 85.0 and not parabolic_up_regime:
+            return _reject(
+                submission_limit_price,
+                (
+                    "Absolute RSI Veto blocked UP trade in extreme overbought conditions "
+                    f"(rsi_9={rsi_9:.3f}; threshold=85.000)"
+                ),
+            )
 
-    if decision.side == "DOWN" and rsi_9 is not None and rsi_9 < 15.0 and not parabolic_down_regime:
-        return _reject(
-            submission_limit_price,
-            (
-                "Absolute RSI Veto blocked DOWN trade in extreme oversold conditions "
-                f"(rsi_9={rsi_9:.3f}; threshold=15.000)"
-            ),
-        )
+    if decision.side == "DOWN" and rsi_9 is not None:
+        if rsi_9 < 8.0:
+            return _reject(
+                submission_limit_price,
+                (
+                    "Absolute RSI Exhaustion Veto: Price mathematically over-extended "
+                    f"(rsi_9={rsi_9:.3f} < 8.000)"
+                ),
+            )
+        elif rsi_9 < 15.0 and not parabolic_down_regime:
+            return _reject(
+                submission_limit_price,
+                (
+                    "Absolute RSI Veto blocked DOWN trade in extreme oversold conditions "
+                    f"(rsi_9={rsi_9:.3f}; threshold=15.000)"
+                ),
+            )
 
     if adx_14 is not None and adx_14 > 50.0:
         if decision.side == "UP" and rsi_9 is not None and rsi_9 > 75.0 and not parabolic_up_regime:
@@ -2514,8 +2528,8 @@ def _execute_live_trade(
         )
     submission_limit_price = _clamp_submission_limit_price(
         submission_limit_price,
+        time_remaining_seconds,
         cfg,
-        time_remaining_seconds=time_remaining_seconds,
     )
 
     size = _get_order_size_for_decision(cfg)
